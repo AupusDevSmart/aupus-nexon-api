@@ -1,0 +1,208 @@
+// ===============================================
+// ENUMS PARA SOLICITAÇÃO DE SERVIÇO
+// ===============================================
+
+enum StatusSolicitacaoServico {
+  RASCUNHO       // Ainda sendo preenchida
+  AGUARDANDO     // Aguardando análise
+  EM_ANALISE     // Sendo analisada
+  APROVADA       // Aprovada para execução
+  OS_GERADA      // OS criada
+  EM_EXECUCAO    // Serviço em andamento
+  CONCLUIDA      // Serviço concluído
+  CANCELADA      // Cancelada
+  REJEITADA      // Rejeitada
+}
+
+enum TipoSolicitacaoServico {
+  INSTALACAO     // Instalação de equipamento
+  MELHORIA       // Melhoria de processo
+  PREVENTIVA     // Manutenção preventiva extra
+  ADAPTACAO      // Adaptação/modificação
+  INSPECAO       // Inspeção técnica
+  CALIBRACAO     // Calibração de equipamento
+  LIMPEZA        // Limpeza industrial
+  TREINAMENTO    // Treinamento operacional
+  OUTROS         // Outros serviços
+}
+
+enum PrioridadeSolicitacao {
+  BAIXA
+  MEDIA
+  ALTA
+  URGENTE
+}
+
+enum OrigemSolicitacao {
+  OPERADOR       // Solicitado por operador
+  SISTEMA        // Gerado pelo sistema
+  PREVENTIVA     // Planejamento preventivo
+  MELHORIA       // Programa de melhorias
+  AUDITORIA      // Resultado de auditoria
+}
+
+// ===============================================
+// MODELOS PARA SOLICITAÇÃO DE SERVIÇO
+// ===============================================
+
+// Tabela principal de solicitações de serviço
+model solicitacoes_servico {
+  id                      String                         @id @default(cuid()) @db.Char(26)
+  numero                  String                         @unique @db.VarChar(50) // SSV-2024-001
+  titulo                  String                         @db.VarChar(255)
+  descricao               String                         @db.Text
+  tipo                    TipoSolicitacaoServico
+  status                  StatusSolicitacaoServico       @default(RASCUNHO)
+  prioridade              PrioridadeSolicitacao         @default(MEDIA)
+  origem                  OrigemSolicitacao              @default(OPERADOR)
+
+  // Localização
+  planta_id               String?                        @db.Char(26)
+  unidade_id              String?                        @db.Char(26)
+  proprietario_id         String?                        @db.Char(26)
+  equipamento_id          String?                        @db.Char(26)
+  local                   String                         @db.VarChar(255)
+  area                    String?                        @db.VarChar(255)
+
+  // Datas e prazos
+  data_solicitacao        DateTime                       @default(now())
+  data_necessidade        DateTime?                      // Quando o serviço é necessário
+  prazo_execucao          Int?                          // Prazo em dias
+  data_prevista_inicio    DateTime?
+  data_prevista_fim       DateTime?
+
+  // Justificativa e benefícios
+  justificativa           String?                        @db.Text
+  beneficios_esperados    String?                        @db.Text
+  riscos_nao_execucao     String?                        @db.Text
+
+  // Recursos estimados
+  tempo_estimado          Decimal?                       @db.Decimal(5, 2)
+  custo_estimado          Decimal?                       @db.Decimal(12, 2)
+  materiais_necessarios   String?                        @db.Text
+  ferramentas_necessarias String?                        @db.Text
+  mao_obra_necessaria     String?                        @db.Text
+
+  // Responsáveis
+  solicitante_id          String?                        @db.Char(26)
+  solicitante_nome        String                         @db.VarChar(255)
+  departamento            String?                        @db.VarChar(100)
+  contato                 String?                        @db.VarChar(100)
+
+  // Análise
+  analisado_por_id        String?                        @db.Char(26)
+  analisado_por_nome      String?                        @db.VarChar(255)
+  data_analise            DateTime?
+  parecer_tecnico         String?                        @db.Text
+  observacoes_analise     String?                        @db.Text
+
+  // Aprovação
+  aprovado_por_id         String?                        @db.Char(26)
+  aprovado_por_nome       String?                        @db.VarChar(255)
+  data_aprovacao          DateTime?
+  observacoes_aprovacao   String?                        @db.Text
+
+  // Rejeição
+  motivo_rejeicao         String?                        @db.Text
+  sugestoes_alternativas  String?                        @db.Text
+
+  // Cancelamento
+  motivo_cancelamento     String?                        @db.Text
+  cancelado_por_id        String?                        @db.Char(26)
+  cancelado_por_nome      String?                        @db.VarChar(255)
+  data_cancelamento       DateTime?
+
+  // Vínculo com OS
+  programacao_os_id       String?                        @unique @db.Char(26)
+  ordem_servico_id        String?                        @db.VarChar(50)
+
+  // Metadados
+  created_at              DateTime                       @default(now())
+  updated_at              DateTime                       @updatedAt
+  deleted_at              DateTime?
+
+  // Relacionamentos
+  planta                  plantas?                       @relation(fields: [planta_id], references: [id])
+  unidade                 unidades?                      @relation(fields: [unidade_id], references: [id])
+  proprietario            usuarios?                      @relation("solicitacoes_proprietario", fields: [proprietario_id], references: [id])
+  equipamento             equipamentos?                  @relation(fields: [equipamento_id], references: [id])
+  solicitante             usuarios?                      @relation("solicitacoes_solicitante", fields: [solicitante_id], references: [id])
+  analisado_por           usuarios?                      @relation("solicitacoes_analisador", fields: [analisado_por_id], references: [id])
+  aprovado_por            usuarios?                      @relation("solicitacoes_aprovador", fields: [aprovado_por_id], references: [id])
+  cancelado_por           usuarios?                      @relation("solicitacoes_cancelador", fields: [cancelado_por_id], references: [id])
+  programacao_os          programacoes_os?               @relation(fields: [programacao_os_id], references: [id])
+
+  anexos                  anexos_solicitacao_servico[]
+  historico               historico_solicitacao_servico[]
+  comentarios             comentarios_solicitacao_servico[]
+
+  @@index([numero])
+  @@index([status])
+  @@index([tipo])
+  @@index([prioridade])
+  @@index([data_solicitacao])
+  @@index([planta_id])
+  @@index([unidade_id])
+  @@index([proprietario_id])
+  @@index([equipamento_id])
+  @@index([solicitante_id])
+  @@index([deleted_at])
+  @@map("solicitacoes_servico")
+}
+
+// Histórico de ações na solicitação
+model historico_solicitacao_servico {
+  id                String                   @id @default(cuid())
+  solicitacao_id    String                   @db.Char(26)
+  acao              String                   @db.VarChar(255)
+  usuario_id        String?                  @db.Char(26)
+  usuario_nome      String                   @db.VarChar(255)
+  data              DateTime                 @default(now())
+  status_anterior   StatusSolicitacaoServico?
+  status_novo       StatusSolicitacaoServico?
+  observacoes       String?                  @db.Text
+  dados_extras      Json?
+
+  solicitacao       solicitacoes_servico     @relation(fields: [solicitacao_id], references: [id], onDelete: Cascade)
+
+  @@index([solicitacao_id])
+  @@index([data])
+  @@map("historico_solicitacao_servico")
+}
+
+// Anexos da solicitação
+model anexos_solicitacao_servico {
+  id                String                   @id @default(cuid())
+  solicitacao_id    String                   @db.Char(26)
+  nome              String                   @db.VarChar(255)
+  nome_original     String                   @db.VarChar(255)
+  mime_type         String                   @db.VarChar(100)
+  tamanho           Int
+  caminho           String                   @db.Text
+  descricao         String?                  @db.Text
+  tipo_documento    String?                  @db.VarChar(50) // FOTO, DOCUMENTO, ORCAMENTO, etc
+  uploaded_por_id   String?                  @db.Char(26)
+  uploaded_por_nome String                   @db.VarChar(255)
+  created_at        DateTime                 @default(now())
+
+  solicitacao       solicitacoes_servico     @relation(fields: [solicitacao_id], references: [id], onDelete: Cascade)
+
+  @@index([solicitacao_id])
+  @@map("anexos_solicitacao_servico")
+}
+
+// Comentários e discussões sobre a solicitação
+model comentarios_solicitacao_servico {
+  id                String                   @id @default(cuid())
+  solicitacao_id    String                   @db.Char(26)
+  comentario        String                   @db.Text
+  usuario_id        String?                  @db.Char(26)
+  usuario_nome      String                   @db.VarChar(255)
+  created_at        DateTime                 @default(now())
+
+  solicitacao       solicitacoes_servico     @relation(fields: [solicitacao_id], references: [id], onDelete: Cascade)
+
+  @@index([solicitacao_id])
+  @@index([created_at])
+  @@map("comentarios_solicitacao_servico")
+}

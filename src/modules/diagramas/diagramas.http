@@ -1,0 +1,229 @@
+### ============================================
+### TESTES - API DE DIAGRAMAS SINÓPTICOS
+### ============================================
+
+@baseUrl = http://localhost:3000/api/v1
+@token = SEU_TOKEN_JWT_AQUI
+
+### ============================================
+### 1. CRIAR DIAGRAMA
+### ============================================
+
+POST {{baseUrl}}/diagramas
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "unidadeId": "ID_DA_UNIDADE_AQUI",
+  "nome": "Diagrama Principal UFV",
+  "descricao": "Diagrama sinóptico da unidade fotovoltaica principal",
+  "configuracoes": {
+    "zoom": 1.0,
+    "grid": {
+      "enabled": true,
+      "size": 20,
+      "snapToGrid": true
+    },
+    "canvas": {
+      "width": 2000,
+      "height": 1500,
+      "backgroundColor": "#f5f5f5"
+    }
+  }
+}
+
+### ============================================
+### 2. OBTER DIAGRAMA POR ID
+### ============================================
+
+GET {{baseUrl}}/diagramas/ID_DO_DIAGRAMA_AQUI
+Authorization: Bearer {{token}}
+
+### Com dados em tempo real
+GET {{baseUrl}}/diagramas/ID_DO_DIAGRAMA_AQUI?includeData=true
+Authorization: Bearer {{token}}
+
+### ============================================
+### 3. ATUALIZAR DIAGRAMA
+### ============================================
+
+PATCH {{baseUrl}}/diagramas/ID_DO_DIAGRAMA_AQUI
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "nome": "Diagrama Principal - Atualizado",
+  "descricao": "Nova descrição",
+  "configuracoes": {
+    "zoom": 1.2,
+    "viewport": {
+      "x": 100,
+      "y": 50,
+      "scale": 1.2
+    }
+  },
+  "ativo": true
+}
+
+### ============================================
+### 4. ADICIONAR EQUIPAMENTO AO DIAGRAMA
+### ============================================
+
+POST {{baseUrl}}/diagramas/ID_DO_DIAGRAMA_AQUI/equipamentos
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "equipamentoId": "ID_DO_EQUIPAMENTO_AQUI",
+  "posicao": {
+    "x": 100,
+    "y": 200
+  },
+  "rotacao": 0,
+  "dimensoes": {
+    "largura": 64,
+    "altura": 64
+  },
+  "propriedades": {
+    "customLabel": "INV-01",
+    "showTag": true
+  }
+}
+
+### ============================================
+### 5. ATUALIZAR POSIÇÃO DO EQUIPAMENTO
+### ============================================
+
+PATCH {{baseUrl}}/diagramas/ID_DO_DIAGRAMA_AQUI/equipamentos/ID_DO_EQUIPAMENTO_AQUI
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "posicao": {
+    "x": 350,
+    "y": 420
+  },
+  "rotacao": 45
+}
+
+### ============================================
+### 6. ADICIONAR MÚLTIPLOS EQUIPAMENTOS (BULK)
+### ============================================
+
+POST {{baseUrl}}/diagramas/ID_DO_DIAGRAMA_AQUI/equipamentos/bulk
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "equipamentos": [
+    {
+      "equipamentoId": "equip_001",
+      "posicao": { "x": 100, "y": 200 },
+      "rotacao": 0
+    },
+    {
+      "equipamentoId": "equip_002",
+      "posicao": { "x": 300, "y": 200 },
+      "rotacao": 0
+    },
+    {
+      "equipamentoId": "equip_003",
+      "posicao": { "x": 500, "y": 200 },
+      "rotacao": 0
+    }
+  ]
+}
+
+### ============================================
+### 7. CRIAR CONEXÃO ENTRE EQUIPAMENTOS
+### ============================================
+
+POST {{baseUrl}}/diagramas/ID_DO_DIAGRAMA_AQUI/conexoes
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "origem": {
+    "equipamentoId": "equip_001",
+    "porta": "right"
+  },
+  "destino": {
+    "equipamentoId": "equip_002",
+    "porta": "left"
+  },
+  "visual": {
+    "tipoLinha": "solida",
+    "cor": "#22c55e",
+    "espessura": 2
+  },
+  "pontosIntermediarios": [
+    { "x": 164, "y": 200 },
+    { "x": 220, "y": 200 }
+  ],
+  "rotulo": "380V"
+}
+
+### ============================================
+### 8. ATUALIZAR CONEXÃO
+### ============================================
+
+PATCH {{baseUrl}}/diagramas/ID_DO_DIAGRAMA_AQUI/conexoes/ID_DA_CONEXAO_AQUI
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "pontosIntermediarios": [
+    { "x": 170, "y": 205 },
+    { "x": 170, "y": 260 },
+    { "x": 215, "y": 260 }
+  ],
+  "visual": {
+    "espessura": 3,
+    "cor": "#3b82f6"
+  },
+  "rotulo": "380V AC"
+}
+
+### ============================================
+### 9. CRIAR MÚLTIPLAS CONEXÕES (BULK)
+### ============================================
+
+POST {{baseUrl}}/diagramas/ID_DO_DIAGRAMA_AQUI/conexoes/bulk
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "conexoes": [
+    {
+      "origem": { "equipamentoId": "equip_001", "porta": "right" },
+      "destino": { "equipamentoId": "equip_002", "porta": "left" },
+      "visual": { "tipoLinha": "solida", "cor": "#22c55e" }
+    },
+    {
+      "origem": { "equipamentoId": "equip_002", "porta": "right" },
+      "destino": { "equipamentoId": "equip_003", "porta": "left" },
+      "visual": { "tipoLinha": "solida", "cor": "#22c55e" }
+    }
+  ]
+}
+
+### ============================================
+### 10. REMOVER CONEXÃO
+### ============================================
+
+DELETE {{baseUrl}}/diagramas/ID_DO_DIAGRAMA_AQUI/conexoes/ID_DA_CONEXAO_AQUI
+Authorization: Bearer {{token}}
+
+### ============================================
+### 11. REMOVER EQUIPAMENTO DO DIAGRAMA
+### ============================================
+
+DELETE {{baseUrl}}/diagramas/ID_DO_DIAGRAMA_AQUI/equipamentos/ID_DO_EQUIPAMENTO_AQUI
+Authorization: Bearer {{token}}
+
+### ============================================
+### 12. DELETAR DIAGRAMA
+### ============================================
+
+DELETE {{baseUrl}}/diagramas/ID_DO_DIAGRAMA_AQUI
+Authorization: Bearer {{token}}
