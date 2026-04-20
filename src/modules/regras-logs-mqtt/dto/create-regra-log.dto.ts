@@ -5,6 +5,7 @@ import {
   IsOptional,
   IsIn,
   IsInt,
+  IsBoolean,
   Min,
   MaxLength,
 } from 'class-validator';
@@ -45,4 +46,8 @@ export class CreateRegraLogDto {
   @IsInt()
   @Min(1)
   cooldown_minutos?: number;
+
+  @IsOptional()
+  @IsBoolean()
+  ativo?: boolean;
 }
