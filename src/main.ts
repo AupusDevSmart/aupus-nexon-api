@@ -22,9 +22,13 @@ async function bootstrap() {
     prefix: '/uploads/',
   });
 
-  // ✅ CORS para integração com frontend
+  // CORS: origens permitidas em CORS_ORIGIN (separadas por virgula). Vazio = reflete qualquer origem (dev).
+  const corsOriginEnv = process.env.CORS_ORIGIN?.trim();
+  const corsOrigin = corsOriginEnv
+    ? corsOriginEnv.split(',').map((o) => o.trim()).filter(Boolean)
+    : true;
   app.enableCors({
-    origin: true, // Permitir qualquer origem (simplifica deploy)
+    origin: corsOrigin,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'x-xsrf-token'],
     credentials: true,
