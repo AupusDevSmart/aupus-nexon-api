@@ -67,4 +67,27 @@ export class UploadsController {
       });
     }
   }
+
+  @Get('equipamentos/:filename')
+  @ApiOperation({ summary: 'Serve equipamento photo' })
+  @ApiResponse({ status: 200, description: 'Image file' })
+  @ApiResponse({ status: 404, description: 'File not found' })
+  async serveEquipamentoPhoto(@Param('filename') filename: string, @Res() res: Response) {
+    try {
+      const filePath = join(process.cwd(), 'uploads', 'equipamentos', filename);
+
+      if (!existsSync(filePath)) {
+        return res.status(HttpStatus.NOT_FOUND).json({
+          message: 'File not found'
+        });
+      }
+
+      return res.sendFile(filePath);
+    } catch (error) {
+      return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+        message: 'Error serving file',
+        error: error.message
+      });
+    }
+  }
 }
