@@ -47,7 +47,7 @@
     "typescript": "^5.9.2"
   },
   "dependencies": {
-    "@aupus/api-shared": "file:../api-shared",
+    "@aupus/api-shared": "git+https://github.com/AupusDevSmart/api-shared.git#v0.2.0",
     "@nestjs/config": "^4.0.2",
     "@nestjs/jwt": "^11.0.0",
     "@nestjs/passport": "^11.0.5",

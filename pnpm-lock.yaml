@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@aupus/api-shared':
-        specifier: file:../api-shared
-        version: file:../api-shared(27732e5b999b84e8c37b47221a99dbff)
+        specifier: git+https://github.com/AupusDevSmart/api-shared.git#v0.2.0
+        version: git+https://github.com/AupusDevSmart/api-shared.git#1ffc59b31438a5bed8eac552428d1d8dbf796d95(27732e5b999b84e8c37b47221a99dbff)
       '@nestjs/config':
         specifier: ^4.0.2
         version: 4.0.4(@nestjs/common@11.1.19(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2))(rxjs@7.8.2)
@@ -189,8 +189,9 @@ packages:
     resolution: {integrity: sha512-lnw+ZM1Io+cJAkReC0NPDjqObL8NtKzKIkdgEEKC8CUmkhurYhedbicN8Y8NYHgG1uLd2GozW3+/QqPRZaN+Lw==}
     engines: {node: ^18.19.1 || ^20.11.1 || >=22.0.0, npm: ^6.11.0 || ^7.5.6 || >=8.0.0, yarn: '>= 1.13.0'}
 
-  '@aupus/api-shared@file:../api-shared':
-    resolution: {directory: ../api-shared, type: directory}
+  '@aupus/api-shared@git+https://github.com/AupusDevSmart/api-shared.git#1ffc59b31438a5bed8eac552428d1d8dbf796d95':
+    resolution: {commit: 1ffc59b31438a5bed8eac552428d1d8dbf796d95, repo: https://github.com/AupusDevSmart/api-shared.git, type: git}
+    version: 0.2.0
     peerDependencies:
       '@nestjs/common': ^11.0.0
       '@nestjs/config': ^4.0.0
@@ -3700,7 +3701,7 @@ snapshots:
     transitivePeerDependencies:
       - chokidar
 
-  '@aupus/api-shared@file:../api-shared(27732e5b999b84e8c37b47221a99dbff)':
+  '@aupus/api-shared@git+https://github.com/AupusDevSmart/api-shared.git#1ffc59b31438a5bed8eac552428d1d8dbf796d95(27732e5b999b84e8c37b47221a99dbff)':
     dependencies:
       '@nestjs/common': 11.1.19(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2)
       '@nestjs/config': 4.0.4(@nestjs/common@11.1.19(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2))(rxjs@7.8.2)
