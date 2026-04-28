@@ -59,7 +59,7 @@ export const logger = pino({
   // Base fields para todos os logs
   base: {
     env: process.env.NODE_ENV || 'development',
-    service: 'aupus-service-api',
+    service: 'aupus-nexon-api',
   },
 });
 
