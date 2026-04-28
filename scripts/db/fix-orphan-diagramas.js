@@ -3,7 +3,7 @@
  * Execução: node prisma/scripts/fix-orphan-diagramas.js
  */
 
-const { PrismaClient } = require('@prisma/client');
+const { PrismaClient } = require('@aupus/api-shared');
 
 const prisma = new PrismaClient();
 

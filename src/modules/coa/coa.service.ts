@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '@aupus/api-shared';
-import { Prisma } from '@prisma/client';
+import { Prisma } from '@aupus/api-shared';
 import { CalculoCustosService } from '../equipamentos-dados/services/calculo-custos.service';
 
 export interface DashboardData {

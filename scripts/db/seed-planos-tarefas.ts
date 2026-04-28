@@ -1,5 +1,5 @@
 // prisma/seeds/seed-planos-tarefas.ts
-import { PrismaClient, StatusPlano, StatusTarefa, TipoManutencao, CategoriaTarefa, FrequenciaTarefa, CondicaoAtivo, TipoRecurso } from '@prisma/client';
+import { PrismaClient, StatusPlano, StatusTarefa, TipoManutencao, CategoriaTarefa, FrequenciaTarefa, CondicaoAtivo, TipoRecurso } from '@aupus/api-shared';
 
 const prisma = new PrismaClient();
 

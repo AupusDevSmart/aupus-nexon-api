@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '@aupus/api-shared';
 import { ClassificacaoHorariosService } from './classificacao-horarios.service';
-import { Prisma } from '@prisma/client';
+import { Prisma } from '@aupus/api-shared';
 
 /**
  * Service responsável por processar e salvar dados MQTT

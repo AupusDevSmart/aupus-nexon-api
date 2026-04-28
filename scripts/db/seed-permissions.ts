@@ -5,8 +5,8 @@
  * seguindo o padrão moderno: recurso.acao
  */
 
-import { PrismaClient } from '@prisma/client';
-import { getAllPermissions } from '../permissions-structure';
+import { PrismaClient } from '@aupus/api-shared';
+import { getAllPermissions } from './permissions-structure';
 
 const prisma = new PrismaClient();
 

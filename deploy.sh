@@ -29,9 +29,6 @@ git pull --ff-only origin main
 step "pnpm install --frozen-lockfile"
 pnpm install --frozen-lockfile
 
-step "Gerando Prisma Client"
-pnpm prisma generate
-
 step "Snapshot de dist/ anterior em dist.previous/"
 rm -rf dist.previous
 [ -d dist ] && cp -a dist dist.previous || true

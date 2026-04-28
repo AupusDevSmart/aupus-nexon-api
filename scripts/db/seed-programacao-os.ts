@@ -1,4 +1,4 @@
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient } from '@aupus/api-shared';
 
 const prisma = new PrismaClient();
 

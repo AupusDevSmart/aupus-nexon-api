@@ -7,7 +7,7 @@
  * 3. Associa corretamente com tipos de equipamentos
  */
 
-const { PrismaClient } = require('@prisma/client');
+const { PrismaClient } = require('@aupus/api-shared');
 const prisma = new PrismaClient();
 
 async function main() {
