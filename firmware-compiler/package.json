@@ -1,0 +1,13 @@
+{
+  "name": "aupus-firmware-compiler",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Compila firmware ESP32/ESP8266 via PlatformIO CLI para OTA do aupus-nexon-api. Servico HTTP standalone consumido por OtaService.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -42,7 +42,21 @@ mkdir -p logs
 step "Reload no PM2 ($PM2_APP)"
 pm2 reload ecosystem.config.cjs --update-env
 
+# ---- firmware-compiler (subdir) ----
+# Subprojeto Node plano (sem deps npm hoje), porem mantemos pnpm install para
+# garantir node_modules/ caso deps sejam adicionadas. Idempotente.
+if [ -d firmware-compiler ]; then
+  step "firmware-compiler: pnpm install"
+  (cd firmware-compiler && pnpm install --prod --frozen-lockfile 2>/dev/null || pnpm install --prod)
+
+  step "firmware-compiler: garantindo artifacts/"
+  mkdir -p firmware-compiler/artifacts
+
+  step "firmware-compiler: startOrReload PM2"
+  pm2 startOrReload firmware-compiler/ecosystem.config.cjs --update-env
+fi
+
 step "Estado final"
-pm2 list | grep -E "name|$PM2_APP" || true
+pm2 list | grep -E "name|$PM2_APP|aupus-firmware-compiler" || true
 
 printf '\nDeploy concluido. Para rollback: rm -rf dist && mv dist.previous dist && pm2 reload ecosystem.config.cjs\n'
