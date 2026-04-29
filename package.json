@@ -91,5 +91,12 @@
     "rxjs": "^7.8.2",
     "socket.io": "^4.8.1",
     "uuid": "^13.0.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@prisma/client",
+      "@prisma/engines",
+      "prisma"
+    ]
   }
 }
