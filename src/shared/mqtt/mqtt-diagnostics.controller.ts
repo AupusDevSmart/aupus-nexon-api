@@ -2,12 +2,14 @@ import { Controller, Get, Post, Optional } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { MqttDiagnosticsService } from './mqtt-diagnostics.service';
 import { MqttRedisBufferService } from './mqtt-redis-buffer.service';
+import { MqttService } from './mqtt.service';
 
 @ApiTags('MQTT Diagnostics')
 @Controller('mqtt/diagnostico')
 export class MqttDiagnosticsController {
   constructor(
     private readonly diagnosticsService: MqttDiagnosticsService,
+    private readonly mqttService: MqttService,
     @Optional() private readonly redisBuffer?: MqttRedisBufferService,
   ) {}
 
@@ -101,6 +103,31 @@ export class MqttDiagnosticsController {
         success: false,
         message: 'Erro ao forçar processamento',
         error: error.message,
+      };
+    }
+  }
+
+  @Post('resync')
+  @ApiOperation({
+    summary: 'Reconcilia subscriptions MQTT com o estado do banco',
+    description:
+      'Le todos os equipamentos com mqtt_habilitado=true e ajusta as subscriptions ' +
+      'do MqttService (subscribe nos faltantes, unsubscribe nos extras). Idempotente — ' +
+      'retorna {added: [], removed: []} se ja esta sincronizado.',
+  })
+  @ApiResponse({ status: 200, description: 'Diff de tópicos adicionados/removidos' })
+  async resync() {
+    try {
+      const result = await this.mqttService.reconcileSubscriptions();
+      return {
+        success: true,
+        data: result,
+      };
+    } catch (error: any) {
+      return {
+        success: false,
+        message: 'Erro ao reconciliar subscriptions MQTT',
+        error: error?.message || String(error),
       };
     }
   }

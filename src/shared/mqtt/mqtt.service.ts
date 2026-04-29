@@ -1,12 +1,40 @@
 import { Injectable, OnModuleInit, OnModuleDestroy, Inject, forwardRef, Optional } from '@nestjs/common';
+import { OnEvent } from '@nestjs/event-emitter';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import * as mqtt from 'mqtt';
-import { PrismaService } from '@aupus/api-shared';
+import {
+  PrismaService,
+  EQUIPAMENTO_MQTT_CHANGED,
+  EquipamentoMqttChangedPayload,
+} from '@aupus/api-shared';
 import { MqttIngestionService } from '../../modules/equipamentos-dados/services/mqtt-ingestion.service';
 import { MqttRedisBufferService } from './mqtt-redis-buffer.service';
 import { RegrasLogsMqttEngine } from '../../modules/regras-logs-mqtt/regras-logs-mqtt.engine';
 import { EventEmitter } from 'events';
 import Ajv from 'ajv';
 import addFormats from 'ajv-formats';
+
+type SubscribeOrigin = 'boot' | 'event' | 'reconcile' | 'manual';
+
+export interface ReconcileResult {
+  added: Array<{ equipamentoId: string; topic: string }>;
+  removed: Array<{ equipamentoId: string; topic: string }>;
+  total: number;
+}
+
+/**
+ * Payload retained publicado pelo TON em `<topic_base>/status` quando conecta.
+ * Apenas `mac` (formato AA:BB:CC:DD:EE:FF) e `online` sao consumidos hoje;
+ * outros campos sao toleravelmente ignorados (forward-compatible).
+ */
+export interface StatusAnnouncePayload {
+  online?: boolean;
+  mac?: string;
+  version?: string;
+  model?: string;
+  ip?: string;
+  [key: string]: unknown;
+}
 
 // Interface para o buffer de dados
 interface BufferData {
@@ -213,7 +241,7 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     }
 
     for (const equip of equipamentos) {
-      this.subscribeTopic(equip.topico_mqtt!, equip.id);
+      this.subscribeTopic(equip.topico_mqtt!, equip.id, 'boot');
     }
 
     if (this.logLevel !== 'minimal') {
@@ -222,76 +250,209 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
   }
 
   /**
-   * Subscreve a um tópico MQTT
+   * Valida formato basico de topico (defesa em profundidade — DTO no api-shared
+   * deveria validar primeiro). Recusa wildcards, vazio, leading/trailing slash.
    */
-  private subscribeTopic(topic: string, equipamentoId: string) {
-    // 🔧 FIX: Validação para ignorar tópicos vazios ou apenas espaços
-    if (!topic || !topic.trim()) {
-      console.warn(`⚠️ [MQTT] Tópico vazio ignorado para equipamento ${equipamentoId}`);
+  private isValidTopic(topic: unknown): topic is string {
+    if (!topic || typeof topic !== 'string') return false;
+    const t = topic.trim();
+    if (!t) return false;
+    if (t.startsWith('/') || t.endsWith('/')) return false;
+    if (t.includes('\u0000')) return false;
+    // Wildcards MQTT (+, #) nao fazem sentido para topicos de equipamento
+    if (t.includes('+') || t.includes('#')) return false;
+    return true;
+  }
+
+  /**
+   * Subscreve a um tópico MQTT.
+   * Também subscreve a `<topic>/status` (retained) — usado pelo TON
+   * para anunciar identidade (mac, version, ip) ao conectar.
+   * Vide processStatusAnnounce() em handleMessage().
+   */
+  private subscribeTopic(topic: string, equipamentoId: string, origin: SubscribeOrigin = 'boot') {
+    if (!this.isValidTopic(topic)) {
+      console.warn(`⚠️ [MQTT] Topico invalido ignorado para equipamento ${equipamentoId}: ${JSON.stringify(topic)}`);
       return;
     }
+    const equipId = equipamentoId.trim();
 
+    // 1) Subscribe principal (telemetria — formato definido por mqtt_schema do tipo)
+    let isNewTopic = false;
     if (!this.subscriptions.has(topic)) {
       this.subscriptions.set(topic, []);
-      this.client.subscribe(topic, (err) => {
+      isNewTopic = true;
+      this.client?.subscribe(topic, (err) => {
         if (err) {
-          // console.error(`❌ Erro ao subscrever tópico ${topic}:`, err);
-        } else {
-          // console.log(`✅ Subscrito ao tópico: ${topic}`);
+          console.warn(`⚠️ [MQTT] Falha ao subscrever ${topic}: ${err.message}`);
         }
       });
     }
 
     const equipamentos = this.subscriptions.get(topic)!;
-    if (!equipamentos.includes(equipamentoId)) {
-      equipamentos.push(equipamentoId);
+    let added = false;
+    if (!equipamentos.includes(equipId)) {
+      equipamentos.push(equipId);
+      added = true;
+    }
+
+    if (origin !== 'boot' && (isNewTopic || added) && this.logLevel !== 'minimal') {
+      console.log(`[MQTT][dyn] subscribe ${topic} (equipamento ${equipId}, origin=${origin})`);
+    }
+
+    // 2) Subscribe ao tópico de status retained do mesmo dispositivo:
+    // permite descobrir o MAC físico (eFuse) e popular equipamentos.mac_address
+    // automaticamente quando o TON fica online.
+    const statusTopic = `${topic}/status`;
+    if (!this.subscriptions.has(statusTopic)) {
+      this.subscriptions.set(statusTopic, []);
+      this.client?.subscribe(statusTopic, (err) => {
+        if (err) {
+          console.warn(`⚠️ [MQTT] Falha ao subscrever ${statusTopic}: ${err.message}`);
+        }
+      });
+    }
+    const statusEquipamentos = this.subscriptions.get(statusTopic)!;
+    if (!statusEquipamentos.includes(equipId)) {
+      statusEquipamentos.push(equipId);
     }
   }
 
   /**
    * Remove subscrição de um tópico
    */
-  public unsubscribeTopic(topic: string, equipamentoId: string) {
-    if (!this.subscriptions.has(topic)) return;
+  public unsubscribeTopic(topic: string, equipamentoId: string, origin: SubscribeOrigin = 'manual') {
+    if (!topic || !this.subscriptions.has(topic)) return;
+    const equipId = equipamentoId.trim();
 
     const equipamentos = this.subscriptions.get(topic)!;
-    const index = equipamentos.indexOf(equipamentoId);
+    const index = equipamentos.indexOf(equipId);
+    if (index === -1) return;
 
-    if (index > -1) {
-      equipamentos.splice(index, 1);
+    equipamentos.splice(index, 1);
+
+    let removedFromBroker = false;
+    if (equipamentos.length === 0) {
+      this.client?.unsubscribe(topic);
+      this.subscriptions.delete(topic);
+      removedFromBroker = true;
     }
 
-    // Se não há mais equipamentos neste tópico, desinscreve
-    if (equipamentos.length === 0) {
-      this.client.unsubscribe(topic);
-      this.subscriptions.delete(topic);
-      // console.log(`🔕 Desinscrito do tópico: ${topic}`);
+    if (origin !== 'boot' && this.logLevel !== 'minimal') {
+      const flag = removedFromBroker ? 'broker-unsub' : 'remaining-' + equipamentos.length;
+      console.log(`[MQTT][dyn] unsubscribe ${topic} (equipamento ${equipId}, ${flag}, origin=${origin})`);
     }
   }
 
   /**
-   * Processa mensagem recebida
+   * Processa mensagem recebida.
+   * Roteamento:
+   *   - `<topic>/status` → processStatusAnnounce (auto-discovery de MAC)
+   *   - `<topic>` exato  → processarDadosEquipamento (telemetria, fluxo legado)
    */
   private async handleMessage(topic: string, payload: Buffer) {
     try {
-      // Parse do payload JSON
+      // Payload pode estar vazio (broker limpando retained); ignorar nesse caso.
+      if (!payload || payload.length === 0) return;
+
       const dados = JSON.parse(payload.toString());
 
-      // Obter equipamentos que escutam este tópico
       const equipamentoIds = this.subscriptions.get(topic);
-      // console.log('📨 [MQTT] Equipamentos inscritos:', equipamentoIds?.length || 0);
-
       if (!equipamentoIds || equipamentoIds.length === 0) {
-        // console.log('⚠️ [MQTT] Nenhum equipamento inscrito neste tópico');
         return;
       }
 
-      // Processar para cada equipamento
+      // Roteamento por sub-path
+      if (topic.endsWith('/status')) {
+        for (const equipamentoId of equipamentoIds) {
+          await this.processStatusAnnounce(equipamentoId, dados);
+        }
+        return;
+      }
+
+      // Fluxo legado: telemetria
       for (const equipamentoId of equipamentoIds) {
         await this.processarDadosEquipamento(equipamentoId, dados, topic);
       }
     } catch (error) {
       console.error(`❌ Erro ao processar mensagem do tópico ${topic}:`, error);
+    }
+  }
+
+  /**
+   * Processa announce retained publicado pelo TON em `<topic_base>/status`.
+   * Payload esperado:
+   *   { online: true, version: "1.0.0", model: "TON1", mac: "AA:BB:CC:DD:EE:FF", ip: "..." }
+   *
+   * Comportamento:
+   *   - Se equipamento ainda não tem mac_address e o announce traz um MAC válido,
+   *     popula equipamentos.mac_address (auto-discovery).
+   *   - Se já tem MAC e o announce traz outro, loga warning (TON foi trocado fisicamente?).
+   *   - Em qualquer caso, emite evento WS para o gateway (futuro: badge online no UI).
+   *
+   * NÃO atualiza outras tabelas (telemetria continua indo só pelo fluxo legado).
+   */
+  private async processStatusAnnounce(
+    equipamentoId: string,
+    dados: StatusAnnouncePayload,
+  ): Promise<void> {
+    try {
+      // Payload "offline" (LWT) — só logar, nada a atualizar
+      if (dados.online === false) {
+        if (this.logLevel === 'verbose') {
+          console.log(`📴 [MQTT] ${equipamentoId} reportou offline`);
+        }
+        return;
+      }
+
+      const macRaw = typeof dados.mac === 'string' ? dados.mac.trim().toUpperCase() : '';
+      // Valida formato AA:BB:CC:DD:EE:FF
+      const isValidMac = /^([0-9A-F]{2}:){5}[0-9A-F]{2}$/.test(macRaw);
+      if (!isValidMac) {
+        // announce sem MAC ainda é válido — outros TONs antigos podem não publicar
+        return;
+      }
+
+      // Lê estado atual do equipamento
+      const equipamento = await this.prisma.equipamentos.findUnique({
+        where: { id: equipamentoId },
+        select: { id: true, nome: true, mac_address: true },
+      });
+      if (!equipamento) return;
+
+      if (!equipamento.mac_address) {
+        // Caso 1: vínculo automático (auto-discovery)
+        try {
+          await this.prisma.equipamentos.update({
+            where: { id: equipamentoId },
+            data: { mac_address: macRaw },
+          });
+          console.log(
+            `🔗 [MQTT] Auto-discovery: equipamento ${equipamento.nome} (${equipamentoId}) ` +
+              `vinculado ao MAC ${macRaw}`,
+          );
+        } catch (e: any) {
+          // P2002 = unique constraint (outro equipamento já tem esse MAC)
+          if (e?.code === 'P2002') {
+            console.warn(
+              `⚠️ [MQTT] MAC ${macRaw} já vinculado a outro equipamento — ` +
+                `equipamento ${equipamento.nome} (${equipamentoId}) ficou sem vínculo.`,
+            );
+          } else {
+            throw e;
+          }
+        }
+      } else if (equipamento.mac_address.toUpperCase() !== macRaw) {
+        // Caso 2: equipamento já vinculado a outro MAC — pode ser troca física,
+        // mas é situação que merece atenção do operador.
+        console.warn(
+          `⚠️ [MQTT] Equipamento ${equipamento.nome} (${equipamentoId}) está vinculado ao MAC ` +
+            `${equipamento.mac_address} mas reportou ${macRaw}. Verificar substituição física.`,
+        );
+      }
+      // Caso 3: MAC bate — nada a fazer (saúde normal).
+    } catch (error) {
+      console.error(`❌ Erro processando status announce de ${equipamentoId}:`, error);
     }
   }
 
@@ -490,17 +651,140 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
   }
 
   /**
-   * Adiciona novo tópico dinamicamente
+   * Adiciona novo tópico dinamicamente.
+   * Implementa IMqttBroker — chamado pelo EquipamentosService (api-shared) via configurarMqtt().
    */
   public adicionarTopico(equipamentoId: string, topic: string) {
-    this.subscribeTopic(topic, equipamentoId);
+    this.subscribeTopic(topic, equipamentoId, 'manual');
   }
 
   /**
-   * Remove tópico dinamicamente
+   * Remove tópico dinamicamente. Tambem desinscreve o `<topic>/status` pareado.
    */
   public removerTopico(equipamentoId: string, topic: string) {
-    this.unsubscribeTopic(topic, equipamentoId);
+    this.unsubscribeTopic(topic, equipamentoId, 'manual');
+    if (topic && !topic.endsWith('/status')) {
+      this.unsubscribeTopic(`${topic}/status`, equipamentoId, 'manual');
+    }
+  }
+
+  /**
+   * Handler de evento emitido pelo CRUD de equipamentos (idealmente dentro
+   * do EquipamentosService em @aupus/api-shared, apos commit da transacao).
+   * Idempotente: chamar duas vezes com o mesmo payload e seguro.
+   */
+  @OnEvent(EQUIPAMENTO_MQTT_CHANGED, { async: true })
+  async handleEquipamentoMqttChanged(payload: Partial<EquipamentoMqttChangedPayload>): Promise<void> {
+    const equipamentoId = payload?.equipamentoId?.trim();
+    if (!equipamentoId) {
+      console.warn('[MQTT][dyn] evento equipamento.mqtt.changed sem equipamentoId');
+      return;
+    }
+    const topicoAntigo = payload.topicoAntigo?.trim() || null;
+    const topicoNovo = payload.topicoNovo?.trim() || null;
+    const habilitado = !!payload.habilitado;
+
+    if (topicoAntigo && topicoAntigo !== topicoNovo) {
+      this.unsubscribeTopic(topicoAntigo, equipamentoId, 'event');
+      this.unsubscribeTopic(`${topicoAntigo}/status`, equipamentoId, 'event');
+    }
+
+    if (habilitado && topicoNovo) {
+      this.subscribeTopic(topicoNovo, equipamentoId, 'event');
+    } else if (!habilitado && topicoNovo) {
+      // Desabilitado — garantir que nao estamos mais inscritos
+      this.unsubscribeTopic(topicoNovo, equipamentoId, 'event');
+      this.unsubscribeTopic(`${topicoNovo}/status`, equipamentoId, 'event');
+    }
+  }
+
+  /**
+   * Le o estado desejado do banco e ajusta as subscriptions atuais. Idempotente.
+   * Defesa contra drift se um evento for perdido (deploy no meio de update,
+   * crash entre commit e emit, etc.).
+   */
+  public async reconcileSubscriptions(): Promise<ReconcileResult> {
+    const desired = await this.prisma.equipamentos.findMany({
+      where: {
+        mqtt_habilitado: true,
+        topico_mqtt: { not: null },
+        NOT: { topico_mqtt: '' },
+        deleted_at: null,
+      },
+      select: { id: true, topico_mqtt: true },
+    });
+
+    // equipamentoId -> topicoPrimario (ja trim/validado)
+    const desiredMap = new Map<string, string>();
+    for (const e of desired) {
+      const id = e.id?.trim();
+      const topic = e.topico_mqtt?.trim();
+      if (id && this.isValidTopic(topic)) {
+        desiredMap.set(id, topic!);
+      }
+    }
+
+    // equipamentoId -> Set<topicoPrimario> (ignora /status)
+    const currentMap = new Map<string, Set<string>>();
+    for (const [topic, equipIds] of this.subscriptions.entries()) {
+      if (topic.endsWith('/status')) continue;
+      for (const equipId of equipIds) {
+        const id = equipId.trim();
+        if (!currentMap.has(id)) currentMap.set(id, new Set());
+        currentMap.get(id)!.add(topic);
+      }
+    }
+
+    const added: Array<{ equipamentoId: string; topic: string }> = [];
+    const removed: Array<{ equipamentoId: string; topic: string }> = [];
+
+    // Adicionar o que esta no desejado mas nao no atual
+    for (const [equipamentoId, topic] of desiredMap.entries()) {
+      const currentTopics = currentMap.get(equipamentoId);
+      if (!currentTopics || !currentTopics.has(topic)) {
+        this.subscribeTopic(topic, equipamentoId, 'reconcile');
+        added.push({ equipamentoId, topic });
+      }
+    }
+
+    // Remover o que esta no atual mas nao bate com o desejado
+    for (const [equipamentoId, currentTopics] of currentMap.entries()) {
+      const desiredTopic = desiredMap.get(equipamentoId);
+      for (const topic of currentTopics) {
+        if (desiredTopic !== topic) {
+          this.unsubscribeTopic(topic, equipamentoId, 'reconcile');
+          this.unsubscribeTopic(`${topic}/status`, equipamentoId, 'reconcile');
+          removed.push({ equipamentoId, topic });
+        }
+      }
+    }
+
+    if (this.logLevel !== 'minimal') {
+      if (added.length === 0 && removed.length === 0) {
+        console.log(`[MQTT][reconcile] ok (${desiredMap.size} topicos)`);
+      } else {
+        console.log(`[MQTT][reconcile] +${added.length} -${removed.length} (alvo: ${desiredMap.size})`);
+      }
+    }
+
+    return { added, removed, total: desiredMap.size };
+  }
+
+  /**
+   * Reconciliacao periodica defensiva (a cada 5 min). Se um evento foi perdido
+   * (deploy, crash, condicao de corrida), o estado converge na proxima rodada.
+   */
+  @Cron(CronExpression.EVERY_5_MINUTES)
+  async scheduledReconcile(): Promise<void> {
+    const mqttMode = process.env.MQTT_MODE || 'production';
+    if (mqttMode === 'disabled') return;
+    if (!this.client) return;
+
+    try {
+      await this.reconcileSubscriptions();
+    } catch (error: any) {
+      console.error('[MQTT][reconcile] erro:', error?.message || error);
+    }
   }
 
   /**
@@ -518,6 +802,29 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
    */
   public isConnected(): boolean {
     return this.client?.connected || false;
+  }
+
+  /**
+   * Publica uma mensagem MQTT. Usa QoS 1 e retained=false por padrão.
+   * @returns Promise que resolve quando o broker ackar (QoS 1) ou após envio (QoS 0).
+   * @throws Error se o cliente não estiver conectado ou se o publish falhar.
+   */
+  public publish(
+    topic: string,
+    payload: string | Buffer,
+    opts: { qos?: 0 | 1 | 2; retain?: boolean } = {},
+  ): Promise<void> {
+    if (!this.client || !this.client.connected) {
+      return Promise.reject(new Error('MQTT client not connected'));
+    }
+    const qos = (opts.qos ?? 1) as 0 | 1 | 2;
+    const retain = opts.retain ?? false;
+    return new Promise<void>((resolve, reject) => {
+      this.client.publish(topic, payload, { qos, retain }, (err) => {
+        if (err) return reject(err);
+        resolve();
+      });
+    });
   }
 
   /**

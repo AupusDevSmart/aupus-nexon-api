@@ -3,6 +3,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
+import { EventEmitterModule } from '@nestjs/event-emitter';
 import { SentryModule } from '@sentry/nestjs/setup';
 import { SentryGlobalFilter } from '@sentry/nestjs/setup';
 import { APP_FILTER } from '@nestjs/core';
@@ -21,6 +22,8 @@ import { CoaModule } from './modules/coa/coa.module';
 import { LogsMqttModule } from './modules/logs-mqtt/logs-mqtt.module';
 import { RegrasLogsMqttModule } from './modules/regras-logs-mqtt/regras-logs-mqtt.module';
 import { UploadsModule } from './modules/uploads/uploads.module';
+import { IoTModule } from './modules/iot/iot.module';
+import { OtaModule } from './modules/ota/ota.module';
 
 // Modulos compartilhados (de @aupus/api-shared)
 import {
@@ -46,6 +49,7 @@ import {
       envFilePath: ['.env.local', '.env'],
     }),
     ScheduleModule.forRoot(),
+    EventEmitterModule.forRoot(),
 
     PrismaModule,
     MailModule,
@@ -74,6 +78,8 @@ import {
     LogsMqttModule,
     RegrasLogsMqttModule,
     UploadsModule,
+    IoTModule,
+    OtaModule,
   ],
   controllers: [AppController],
   providers: [
