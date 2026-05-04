@@ -275,7 +275,11 @@ export class CoaService {
     // Usa a coluna energia_kwh (soma todas as leituras do dia)
     // - Para M160: cada leitura tem energia_kwh calculada (Pt * tempo)
     // - Para inversores: usa energy.daily_yield da última leitura
-    // Timezone: America/Sao_Paulo (UTC-3)
+    // Boundary: CURRENT_DATE::timestamp (hoje 00:00 UTC, sem dependencia da TZ da sessao Postgres).
+    // Alinha com o controller do modal de custos (Date.UTC(ano, mes-1, dia, 0)) — ambos comparam
+    // contra timestamp_dados (timestamp without time zone, gravado em UTC). A expressao anterior
+    // CURRENT_DATE AT TIME ZONE 'America/Sao_Paulo' rendia 21:00 do dia anterior em sessao UTC,
+    // incluindo 3h a mais de leituras e divergindo do total exibido no modal de medidor.
     const energiaAgregadaDia = await this.prisma.$queryRaw<any[]>`
       WITH DadosDia AS (
         SELECT
@@ -288,7 +292,7 @@ export class CoaService {
           ROW_NUMBER() OVER (PARTITION BY ed.equipamento_id ORDER BY ed.timestamp_dados DESC) as rn_ultima
         FROM equipamentos_dados ed
         INNER JOIN equipamentos e ON e.id = ed.equipamento_id
-        WHERE ed.timestamp_dados >= (CURRENT_DATE AT TIME ZONE 'America/Sao_Paulo')
+        WHERE ed.timestamp_dados >= CURRENT_DATE::timestamp
           AND e.deleted_at IS NULL
       ),
       EnergiaM160 AS (
