@@ -2,6 +2,7 @@ import { Injectable, OnModuleInit, OnModuleDestroy, Inject, forwardRef, Optional
 import { OnEvent } from '@nestjs/event-emitter';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import * as mqtt from 'mqtt';
+import { randomUUID } from 'crypto';
 import {
   PrismaService,
   EQUIPAMENTO_MQTT_CHANGED,
@@ -15,6 +16,27 @@ import Ajv from 'ajv';
 import addFormats from 'ajv-formats';
 
 type SubscribeOrigin = 'boot' | 'event' | 'reconcile' | 'manual';
+
+// Ack aplicação-level para comandos publicados em <base>/cmd.
+// TON responde em <base>/cmd/ack: {cmd_id, status, msg, ts}
+export type CmdAckStatus = 'ok' | 'error' | 'duplicate';
+export interface CmdAckResult {
+  cmd_id: string;
+  status: CmdAckStatus;
+  msg: string;
+  ts: number;
+}
+interface PendingCommand {
+  cmd_id: string;
+  topic: string;             // <base>/cmd
+  envelope: string;          // payload serializado
+  resolve: (r: CmdAckResult) => void;
+  reject: (e: Error) => void;
+  timer: NodeJS.Timeout;
+  attempt: number;           // 1 = primeira tentativa
+  maxAttempts: number;
+  timeoutMs: number;
+}
 
 export interface ReconcileResult {
   added: Array<{ equipamentoId: string; topic: string }>;
@@ -52,6 +74,9 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
   private subscriptions: Map<string, string[]> = new Map(); // topic -> [equipamentoIds]
   private ajv: Ajv;
   private logLevel: 'minimal' | 'normal' | 'verbose' = 'normal';
+
+  // Comandos publicados aguardando ack do TON. Chave: cmd_id (UUID).
+  private pendingCommands: Map<string, PendingCommand> = new Map();
 
   // Buffer para agregação de 1 minuto
   private buffers: Map<string, BufferData> = new Map();
@@ -316,6 +341,22 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     if (!statusEquipamentos.includes(equipId)) {
       statusEquipamentos.push(equipId);
     }
+
+    // 3) Subscribe ao tópico de ack de comandos: <base>/cmd/ack
+    // Usado por publishCommand() para resolver o Promise da chamada.
+    const ackTopic = `${topic}/cmd/ack`;
+    if (!this.subscriptions.has(ackTopic)) {
+      this.subscriptions.set(ackTopic, []);
+      this.client?.subscribe(ackTopic, (err) => {
+        if (err) {
+          console.warn(`⚠️ [MQTT] Falha ao subscrever ${ackTopic}: ${err.message}`);
+        }
+      });
+    }
+    const ackEquipamentos = this.subscriptions.get(ackTopic)!;
+    if (!ackEquipamentos.includes(equipId)) {
+      ackEquipamentos.push(equipId);
+    }
   }
 
   /**
@@ -356,6 +397,13 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       if (!payload || payload.length === 0) return;
 
       const dados = JSON.parse(payload.toString());
+
+      // Acks de comando são roteados por cmd_id em pendingCommands,
+      // não dependem de equipamentoIds — processar antes do lookup de subscription.
+      if (topic.endsWith('/cmd/ack')) {
+        this.processCommandAck(dados);
+        return;
+      }
 
       const equipamentoIds = this.subscriptions.get(topic);
       if (!equipamentoIds || equipamentoIds.length === 0) {
@@ -454,6 +502,105 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     } catch (error) {
       console.error(`❌ Erro processando status announce de ${equipamentoId}:`, error);
     }
+  }
+
+  /**
+   * Processa ack vindo do TON em <base>/cmd/ack:
+   *   { cmd_id: "<uuid>", status: "ok"|"error"|"duplicate", msg: "...", ts: 123 }
+   * Resolve o Promise pendente em pendingCommands se houver.
+   */
+  private processCommandAck(dados: any): void {
+    const cmd_id = typeof dados?.cmd_id === 'string' ? dados.cmd_id : '';
+    if (!cmd_id) return;
+
+    const pending = this.pendingCommands.get(cmd_id);
+    if (!pending) {
+      // Ack chegou tarde demais (já rejeitado por timeout) ou cmd_id desconhecido
+      return;
+    }
+
+    clearTimeout(pending.timer);
+    this.pendingCommands.delete(cmd_id);
+
+    const result: CmdAckResult = {
+      cmd_id,
+      status: (dados.status as CmdAckStatus) || 'error',
+      msg: typeof dados.msg === 'string' ? dados.msg : '',
+      ts: typeof dados.ts === 'number' ? dados.ts : Math.floor(Date.now() / 1000),
+    };
+    pending.resolve(result);
+  }
+
+  /**
+   * Publica um comando em <topicoBase>/cmd com envelope {cmd_id, cmd} e
+   * aguarda ack em <topicoBase>/cmd/ack. Retransmite até maxAttempts vezes
+   * em caso de timeout.
+   *
+   * @param topicoBase  Mesmo valor de equipamentos.topico_mqtt (ex.: "AUPUS_TESTE")
+   * @param cmd         String ("r1 on") ou objeto ({device, cmd}) — TON aceita ambos
+   * @param opts        timeoutMs default 5000, maxAttempts default 3
+   * @returns CmdAckResult com status do TON. Status "duplicate" é tratado como sucesso.
+   * @throws Error em timeout final (todas as tentativas esgotadas)
+   */
+  public publishCommand(
+    topicoBase: string,
+    cmd: string | object,
+    opts: { timeoutMs?: number; maxAttempts?: number } = {},
+  ): Promise<CmdAckResult> {
+    if (!topicoBase || !topicoBase.trim()) {
+      return Promise.reject(new Error('topicoBase vazio'));
+    }
+    if (!this.client?.connected) {
+      return Promise.reject(new Error('MQTT client not connected'));
+    }
+
+    const cmd_id = randomUUID();
+    const topic = `${topicoBase}/cmd`;
+    const envelope = JSON.stringify({ cmd_id, cmd });
+    const timeoutMs = opts.timeoutMs ?? 5000;
+    const maxAttempts = opts.maxAttempts ?? 3;
+
+    return new Promise<CmdAckResult>((resolve, reject) => {
+      const pending: PendingCommand = {
+        cmd_id,
+        topic,
+        envelope,
+        resolve,
+        reject,
+        attempt: 1,
+        maxAttempts,
+        timeoutMs,
+        timer: undefined as unknown as NodeJS.Timeout,
+      };
+
+      const armTimer = () => {
+        pending.timer = setTimeout(() => {
+          if (!this.pendingCommands.has(cmd_id)) return; // já resolvido
+          if (pending.attempt >= maxAttempts) {
+            this.pendingCommands.delete(cmd_id);
+            reject(new Error(`Timeout: comando ${cmd_id} sem ack após ${maxAttempts} tentativas`));
+            return;
+          }
+          pending.attempt++;
+          console.warn(`⚠️ [MQTT-CMD] Retry ${pending.attempt}/${maxAttempts} cmd_id=${cmd_id}`);
+          this.client.publish(topic, envelope, { qos: 1, retain: false }, (err) => {
+            if (err) console.warn(`⚠️ [MQTT-CMD] Republish falhou: ${err.message}`);
+          });
+          armTimer();
+        }, timeoutMs);
+      };
+
+      this.pendingCommands.set(cmd_id, pending);
+
+      this.client.publish(topic, envelope, { qos: 1, retain: false }, (err) => {
+        if (err) {
+          this.pendingCommands.delete(cmd_id);
+          return reject(err);
+        }
+      });
+
+      armTimer();
+    });
   }
 
   /**
@@ -659,12 +806,14 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
   }
 
   /**
-   * Remove tópico dinamicamente. Tambem desinscreve o `<topic>/status` pareado.
+   * Remove tópico dinamicamente. Tambem desinscreve `<topic>/status` e
+   * `<topic>/cmd/ack` pareados.
    */
   public removerTopico(equipamentoId: string, topic: string) {
     this.unsubscribeTopic(topic, equipamentoId, 'manual');
-    if (topic && !topic.endsWith('/status')) {
+    if (topic && !topic.endsWith('/status') && !topic.endsWith('/cmd/ack')) {
       this.unsubscribeTopic(`${topic}/status`, equipamentoId, 'manual');
+      this.unsubscribeTopic(`${topic}/cmd/ack`, equipamentoId, 'manual');
     }
   }
 
@@ -687,6 +836,7 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     if (topicoAntigo && topicoAntigo !== topicoNovo) {
       this.unsubscribeTopic(topicoAntigo, equipamentoId, 'event');
       this.unsubscribeTopic(`${topicoAntigo}/status`, equipamentoId, 'event');
+      this.unsubscribeTopic(`${topicoAntigo}/cmd/ack`, equipamentoId, 'event');
     }
 
     if (habilitado && topicoNovo) {
@@ -695,6 +845,7 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       // Desabilitado — garantir que nao estamos mais inscritos
       this.unsubscribeTopic(topicoNovo, equipamentoId, 'event');
       this.unsubscribeTopic(`${topicoNovo}/status`, equipamentoId, 'event');
+      this.unsubscribeTopic(`${topicoNovo}/cmd/ack`, equipamentoId, 'event');
     }
   }
 
@@ -724,10 +875,10 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       }
     }
 
-    // equipamentoId -> Set<topicoPrimario> (ignora /status)
+    // equipamentoId -> Set<topicoPrimario> (ignora /status e /cmd/ack)
     const currentMap = new Map<string, Set<string>>();
     for (const [topic, equipIds] of this.subscriptions.entries()) {
-      if (topic.endsWith('/status')) continue;
+      if (topic.endsWith('/status') || topic.endsWith('/cmd/ack')) continue;
       for (const equipId of equipIds) {
         const id = equipId.trim();
         if (!currentMap.has(id)) currentMap.set(id, new Set());
@@ -754,6 +905,7 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
         if (desiredTopic !== topic) {
           this.unsubscribeTopic(topic, equipamentoId, 'reconcile');
           this.unsubscribeTopic(`${topic}/status`, equipamentoId, 'reconcile');
+          this.unsubscribeTopic(`${topic}/cmd/ack`, equipamentoId, 'reconcile');
           removed.push({ equipamentoId, topic });
         }
       }
