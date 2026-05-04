@@ -294,11 +294,14 @@ export class CoaService {
       EnergiaM160 AS (
         -- ✅ M160: SOMAR consumo_phf do JSON (fonte de verdade do medidor)
         -- consumo_phf = energia real medida nos últimos 30s
+        -- Filtra spikes >5 kWh/leitura (mesma regra de CalculoCustosService.MAX_CONSUMO_POR_LEITURA)
+        -- para alinhar com o "Energia Total" do modal de medidor.
         SELECT
           unidade_id,
           SUM(COALESCE(CAST(dados->>'consumo_phf' AS NUMERIC), 0)) as energia_dia_kwh
         FROM DadosDia
         WHERE (tipo_equipamento ILIKE '%M-160%' OR tipo_equipamento ILIKE '%M160%')
+          AND COALESCE(CAST(dados->>'consumo_phf' AS NUMERIC), 0) <= 5
         GROUP BY unidade_id
       ),
       EnergiaInversores AS (

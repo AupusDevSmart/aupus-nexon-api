@@ -352,7 +352,7 @@ export class EquipamentosDadosService {
           DATE(timestamp_dados) as data,
           SUM(
             COALESCE(
-              (dados->>'consumo_phf')::numeric,
+              CASE WHEN (dados->>'consumo_phf')::numeric <= 5 THEN (dados->>'consumo_phf')::numeric END,
               (dados->'energy'->>'period_energy_kwh')::numeric,
               (dados->>'energia_kwh')::numeric
             )
@@ -1045,7 +1045,7 @@ export class EquipamentosDadosService {
         TO_CHAR(timestamp_dados, 'TMMonth') as mes_nome,
         SUM(
           COALESCE(
-            (dados->>'consumo_phf')::numeric,
+            CASE WHEN (dados->>'consumo_phf')::numeric <= 5 THEN (dados->>'consumo_phf')::numeric END,
             (dados->'energy'->>'period_energy_kwh')::numeric,
             (dados->>'energia_kwh')::numeric
           )
