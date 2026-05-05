@@ -1,8 +1,11 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { randomBytes } from 'node:crypto';
 import { PrismaService } from '@aupus/api-shared';
+import { Prisma } from '@aupus/api-shared';
 import type {
   IotDiagrama,
+  IotDiagramaComponent,
+  IotDiagramaConnection,
   IotProjetoRow,
 } from './interfaces/iot-diagrama.interface';
 
@@ -12,121 +15,255 @@ const EMPTY_DIAGRAMA: IotDiagrama = {
   nextId: 1,
 };
 
+const PROJETO_SELECT = {
+  id: true,
+  unidade_id: true,
+  nome: true,
+  diagrama: true,
+  created_at: true,
+  updated_at: true,
+} as const;
+
 /**
  * Service de projetos IoT.
  *
- * A tabela `iot_projetos` NAO esta declarada em `api-shared/prisma/schema.prisma`
- * porque eh gerenciada por `/var/www/iot_nexon/` (sistema externo que compartilha
- * o mesmo Postgres). Logo, todas as operacoes usam queries raw do Prisma.
+ * Persistencia dupla durante transicao (PR1, 2026-05):
+ * - Cache JSONB em `iot_projetos.diagrama` — formato consumido pelo frontend
+ *   legado iot-diagram.v2.js sem mudancas. Continua sendo a fonte do GET.
+ * - Tabelas relacionais `iot_componentes` + `iot_conexoes` — base da
+ *   integracao IoT <-> Diagrama Unifilar via FK iot_componentes.equipamento_id.
  *
- * Schema esperado da tabela:
- *   id          CHAR(26)    PRIMARY KEY
- *   unidade_id  CHAR(26)    NOT NULL
- *   nome        VARCHAR     NOT NULL
- *   diagrama    JSONB       NOT NULL
- *   created_at  TIMESTAMP   NOT NULL
- *   updated_at  TIMESTAMP   NOT NULL
- *   deleted_at  TIMESTAMP   NULL    (soft delete)
+ * Em PUT, ambos sao escritos juntos numa transacao. JSONB sera deprecated
+ * apos 1-2 sprints estaveis.
+ *
+ * Sobre o sync delete-all+insert-all em syncRelational: simples e atomico
+ * mas faz CASCADE em iot_firmwares e SET NULL em iot_dispositivos_online dos
+ * componentes. Aceitavel hoje (ambas tabelas sem dados de producao). Quando
+ * ganharem, trocar por delta upsert preservando IDs estaveis.
  */
 @Injectable()
 export class IoTService {
   constructor(private readonly prisma: PrismaService) {}
 
-  /** Gera um ID hex de 26 chars (compativel com CHAR(26) usado em iot_projetos.id). */
+  /** Gera um ID hex de 26 chars compativel com CHAR(26) — preserva o formato dos registros existentes. */
   private generateId(): string {
     return randomBytes(13).toString('hex');
   }
 
   async getProjetosByUnidade(unidadeId: string): Promise<IotProjetoRow[]> {
-    return this.prisma.$queryRaw<IotProjetoRow[]>`
-      SELECT id, unidade_id, nome, diagrama, created_at, updated_at
-      FROM iot_projetos
-      WHERE unidade_id = ${unidadeId} AND deleted_at IS NULL
-      ORDER BY created_at ASC
-    `;
+    const rows = await this.prisma.iot_projetos.findMany({
+      where: { unidade_id: unidadeId.trim(), deleted_at: null },
+      orderBy: { created_at: 'asc' },
+      select: PROJETO_SELECT,
+    });
+    return rows.map(this.toProjetoRow);
   }
 
   async getProjetoById(id: string): Promise<IotProjetoRow | null> {
-    const rows = await this.prisma.$queryRaw<IotProjetoRow[]>`
-      SELECT id, unidade_id, nome, diagrama, created_at, updated_at
-      FROM iot_projetos
-      WHERE id = ${id} AND deleted_at IS NULL
-      LIMIT 1
-    `;
-    return rows[0] ?? null;
+    const row = await this.prisma.iot_projetos.findFirst({
+      where: { id: id.trim(), deleted_at: null },
+      select: PROJETO_SELECT,
+    });
+    return row ? this.toProjetoRow(row) : null;
   }
 
-  async createProjeto(
-    unidadeId: string,
-    nome: string,
-  ): Promise<IotProjetoRow> {
-    const id = this.generateId();
-    await this.prisma.$executeRaw`
-      INSERT INTO iot_projetos (id, unidade_id, nome, diagrama, created_at, updated_at)
-      VALUES (
-        ${id},
-        ${unidadeId},
-        ${nome},
-        ${JSON.stringify(EMPTY_DIAGRAMA)}::jsonb,
-        NOW(),
-        NOW()
-      )
-    `;
-    const created = await this.getProjetoById(id);
-    if (!created) {
-      // INSERT confirmado mas SELECT nao retornou — caso patologico (deleted_at preenchido por trigger?).
-      throw new NotFoundException(
-        `Projeto IoT recem-criado nao foi encontrado (id=${id})`,
-      );
-    }
-    return created;
+  async createProjeto(unidadeId: string, nome: string): Promise<IotProjetoRow> {
+    const created = await this.prisma.iot_projetos.create({
+      data: {
+        id: this.generateId(),
+        unidade_id: unidadeId.trim(),
+        nome,
+        diagrama: EMPTY_DIAGRAMA as unknown as Prisma.InputJsonValue,
+      },
+      select: PROJETO_SELECT,
+    });
+    return this.toProjetoRow(created);
   }
 
   async updateProjeto(
     id: string,
     data: { nome?: string; diagrama?: IotDiagrama },
   ): Promise<IotProjetoRow> {
-    const existing = await this.getProjetoById(id);
-    if (!existing) {
-      throw new NotFoundException(`Projeto IoT ${id} nao encontrado`);
-    }
+    const trimmedId = id.trim();
 
-    if (data.nome !== undefined && data.diagrama !== undefined) {
-      await this.prisma.$executeRaw`
-        UPDATE iot_projetos
-        SET nome = ${data.nome},
-            diagrama = ${JSON.stringify(data.diagrama)}::jsonb,
-            updated_at = NOW()
-        WHERE id = ${id} AND deleted_at IS NULL
-      `;
-    } else if (data.nome !== undefined) {
-      await this.prisma.$executeRaw`
-        UPDATE iot_projetos
-        SET nome = ${data.nome}, updated_at = NOW()
-        WHERE id = ${id} AND deleted_at IS NULL
-      `;
-    } else if (data.diagrama !== undefined) {
-      await this.prisma.$executeRaw`
-        UPDATE iot_projetos
-        SET diagrama = ${JSON.stringify(data.diagrama)}::jsonb, updated_at = NOW()
-        WHERE id = ${id} AND deleted_at IS NULL
-      `;
-    }
-    // Se nada foi enviado, retorna o estado atual (sem modificacao).
-    const updated = await this.getProjetoById(id);
-    if (!updated) {
-      throw new NotFoundException(`Projeto IoT ${id} nao encontrado apos update`);
-    }
-    return updated;
+    return this.prisma.$transaction(async (tx) => {
+      const existing = await tx.iot_projetos.findFirst({
+        where: { id: trimmedId, deleted_at: null },
+        select: { id: true },
+      });
+      if (!existing) {
+        throw new NotFoundException(`Projeto IoT ${trimmedId} nao encontrado`);
+      }
+
+      const updateData: Prisma.iot_projetosUpdateInput = {};
+      if (data.nome !== undefined) updateData.nome = data.nome;
+      if (data.diagrama !== undefined) {
+        updateData.diagrama = data.diagrama as unknown as Prisma.InputJsonValue;
+        updateData.view_pan_x = data.diagrama.pan?.x ?? 0;
+        updateData.view_pan_y = data.diagrama.pan?.y ?? 0;
+        updateData.view_zoom = data.diagrama.zoom ?? 1;
+      }
+
+      if (Object.keys(updateData).length > 0) {
+        await tx.iot_projetos.update({
+          where: { id: trimmedId },
+          data: updateData,
+        });
+      }
+
+      if (data.diagrama !== undefined) {
+        await this.syncRelational(tx, trimmedId, data.diagrama);
+      }
+
+      const updated = await tx.iot_projetos.findFirst({
+        where: { id: trimmedId, deleted_at: null },
+        select: PROJETO_SELECT,
+      });
+      if (!updated) {
+        throw new NotFoundException(
+          `Projeto IoT ${trimmedId} desapareceu durante o update`,
+        );
+      }
+      return this.toProjetoRow(updated);
+    });
   }
 
   async deleteProjeto(id: string): Promise<void> {
-    const existing = await this.getProjetoById(id);
+    const trimmedId = id.trim();
+    const existing = await this.prisma.iot_projetos.findFirst({
+      where: { id: trimmedId, deleted_at: null },
+      select: { id: true },
+    });
     if (!existing) {
-      throw new NotFoundException(`Projeto IoT ${id} nao encontrado`);
+      throw new NotFoundException(`Projeto IoT ${trimmedId} nao encontrado`);
     }
-    await this.prisma.$executeRaw`
-      UPDATE iot_projetos SET deleted_at = NOW() WHERE id = ${id}
-    `;
+    await this.prisma.iot_projetos.update({
+      where: { id: trimmedId },
+      data: { deleted_at: new Date() },
+    });
   }
+
+  /**
+   * Reescreve iot_componentes + iot_conexoes do projeto a partir do diagrama.
+   * Chamado dentro da transacao do updateProjeto.
+   */
+  private async syncRelational(
+    tx: Prisma.TransactionClient,
+    projetoId: string,
+    diagrama: IotDiagrama,
+  ): Promise<void> {
+    await tx.iot_conexoes.deleteMany({ where: { projeto_id: projetoId } });
+    await tx.iot_componentes.deleteMany({ where: { projeto_id: projetoId } });
+
+    if (!Array.isArray(diagrama.components) || diagrama.components.length === 0) {
+      return;
+    }
+
+    const idMapping = new Map<string, string>();
+    for (const comp of diagrama.components) {
+      const dbId = this.generateId();
+      const localId = String(comp.id);
+      idMapping.set(localId, dbId);
+
+      await tx.iot_componentes.create({
+        data: {
+          id: dbId,
+          projeto_id: projetoId,
+          tipo: comp.type,
+          x: typeof comp.x === 'number' ? comp.x : 0,
+          y: typeof comp.y === 'number' ? comp.y : 0,
+          equipamento_id: this.extractEquipamentoId(comp),
+          props: this.extractComponentProps(comp) as unknown as Prisma.InputJsonValue,
+        },
+      });
+    }
+
+    if (!Array.isArray(diagrama.connections)) return;
+
+    for (const conn of diagrama.connections) {
+      const fromRef = this.parseConnectionRef(conn.from);
+      const toRef = this.parseConnectionRef(conn.to);
+      if (!fromRef || !toRef) continue;
+
+      const fromCompId = idMapping.get(fromRef.componentId);
+      const toCompId = idMapping.get(toRef.componentId);
+      if (!fromCompId || !toCompId) continue;
+
+      await tx.iot_conexoes.create({
+        data: {
+          id: this.generateId(),
+          projeto_id: projetoId,
+          from_comp_id: fromCompId,
+          from_port: this.truncatePort(fromRef.port),
+          to_comp_id: toCompId,
+          to_port: this.truncatePort(toRef.port),
+          estilo: typeof conn.style === 'string' ? conn.style.slice(0, 20) : 'rs485',
+        },
+      });
+    }
+  }
+
+  /** Trim + valida CUID 26 chars. Retorna null se invalido. */
+  private extractEquipamentoId(comp: IotDiagramaComponent): string | null {
+    const props = (comp as Record<string, unknown>).props;
+    const fromProps =
+      props && typeof props === 'object'
+        ? (props as Record<string, unknown>).equipamento_id
+        : undefined;
+    const fromTop = (comp as Record<string, unknown>).equipamento_id;
+    const raw = typeof fromProps === 'string' ? fromProps : fromTop;
+    if (typeof raw !== 'string') return null;
+    const trimmed = raw.trim();
+    return trimmed.length === 26 ? trimmed : null;
+  }
+
+  /** Coleta atributos custom do componente (tudo exceto id/type/x/y) para gravar em iot_componentes.props. */
+  private extractComponentProps(comp: IotDiagramaComponent): Record<string, unknown> {
+    const { id: _id, type: _type, x: _x, y: _y, props, ...rest } = comp;
+    const merged: Record<string, unknown> = { ...rest };
+    if (props && typeof props === 'object') {
+      Object.assign(merged, props as Record<string, unknown>);
+    }
+    return merged;
+  }
+
+  /** Parse das duas formas que `connection.from`/`connection.to` aparecem no JSON. */
+  private parseConnectionRef(
+    ref: unknown,
+  ): { componentId: string; port?: string } | null {
+    if (ref === null || ref === undefined) return null;
+    if (typeof ref === 'string' || typeof ref === 'number') {
+      return { componentId: String(ref) };
+    }
+    if (typeof ref === 'object') {
+      const obj = ref as Record<string, unknown>;
+      const compId = obj.componentId ?? obj.id;
+      if (compId === undefined || compId === null) return null;
+      const port = typeof obj.port === 'string' ? obj.port : undefined;
+      return { componentId: String(compId), port };
+    }
+    return null;
+  }
+
+  private truncatePort(port: string | undefined): string {
+    if (!port) return '';
+    return port.slice(0, 10);
+  }
+
+  /** Cast da linha do Prisma para o shape consumido pelo frontend. */
+  private toProjetoRow = (row: {
+    id: string;
+    unidade_id: string;
+    nome: string;
+    diagrama: Prisma.JsonValue;
+    created_at: Date;
+    updated_at: Date;
+  }): IotProjetoRow => ({
+    id: row.id,
+    unidade_id: row.unidade_id,
+    nome: row.nome,
+    diagrama: (row.diagrama ?? EMPTY_DIAGRAMA) as unknown as IotDiagrama,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  });
 }
