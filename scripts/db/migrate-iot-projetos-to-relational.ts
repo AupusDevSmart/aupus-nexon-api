@@ -61,7 +61,7 @@ interface RawDiagrama {
 
 const generateId = (): string => randomBytes(13).toString('hex');
 
-function extractEquipamentoId(comp: RawComponent): string | null {
+function rawEquipamentoId(comp: RawComponent): string | null {
   const fromProps =
     comp.props && typeof comp.props === 'object'
       ? (comp.props as Record<string, unknown>).equipamento_id
@@ -70,7 +70,7 @@ function extractEquipamentoId(comp: RawComponent): string | null {
     typeof fromProps === 'string' ? fromProps : comp.equipamento_id;
   if (typeof raw !== 'string') return null;
   const trimmed = raw.trim();
-  return trimmed.length === 26 ? trimmed : null;
+  return trimmed.length === 0 ? null : trimmed;
 }
 
 function extractComponentProps(comp: RawComponent): Record<string, unknown> {
@@ -118,6 +118,10 @@ async function main() {
       const existingCount = await prisma.iot_componentes.count({
         where: { projeto_id: projeto.id },
       });
+      const diagrama = (projeto.diagrama ?? {}) as RawDiagrama;
+      const comps = Array.isArray(diagrama.components) ? diagrama.components : [];
+      const conns = Array.isArray(diagrama.connections) ? diagrama.connections : [];
+
       if (existingCount > 0) {
         console.log(
           `[skip]  ${projeto.id} (${projeto.nome}): ja tem ${existingCount} componentes em iot_componentes — provavelmente migrado.`,
@@ -126,13 +130,49 @@ async function main() {
         continue;
       }
 
-      const diagrama = (projeto.diagrama ?? {}) as RawDiagrama;
-      const comps = Array.isArray(diagrama.components) ? diagrama.components : [];
-      const conns = Array.isArray(diagrama.connections) ? diagrama.connections : [];
+      if (comps.length === 0) {
+        // projeto sem componentes no JSON — popular so o viewport e contar como skip
+        await prisma.iot_projetos.update({
+          where: { id: projeto.id },
+          data: {
+            view_pan_x: typeof diagrama.pan?.x === 'number' ? diagrama.pan.x : 0,
+            view_pan_y: typeof diagrama.pan?.y === 'number' ? diagrama.pan.y : 0,
+            view_zoom: typeof diagrama.zoom === 'number' ? diagrama.zoom : 1,
+          },
+        });
+        console.log(
+          `[skip]  ${projeto.id} (${projeto.nome}): JSON sem components — viewport sincronizado, nada a migrar.`,
+        );
+        skipped += 1;
+        continue;
+      }
 
       console.log(
         `[migrating] ${projeto.id} (${projeto.nome}): ${comps.length} components, ${conns.length} connections`,
       );
+
+      // Pre-resolve equipamento_ids requisitados pelos components do projeto.
+      const requestedEquipIds = new Set<string>();
+      for (const comp of comps) {
+        const raw = rawEquipamentoId(comp);
+        if (raw) requestedEquipIds.add(raw);
+      }
+      const validEquipIds = new Set<string>();
+      if (requestedEquipIds.size > 0) {
+        const found = await prisma.equipamentos.findMany({
+          where: { id: { in: Array.from(requestedEquipIds) }, deleted_at: null },
+          select: { id: true },
+        });
+        for (const e of found) validEquipIds.add(e.id.trim());
+        const missing = Array.from(requestedEquipIds).filter(
+          (id) => !validEquipIds.has(id),
+        );
+        if (missing.length > 0) {
+          console.log(
+            `        [warn] ${missing.length} equipamento_id(s) nao encontrado(s): ${missing.join(', ')}`,
+          );
+        }
+      }
 
       await prisma.$transaction(async (tx) => {
         // viewport pan/zoom
@@ -151,6 +191,10 @@ async function main() {
           const dbId = generateId();
           idMapping.set(String(comp.id), dbId);
 
+          const rawEquip = rawEquipamentoId(comp);
+          const equipamentoId =
+            rawEquip && validEquipIds.has(rawEquip) ? rawEquip : null;
+
           await tx.iot_componentes.create({
             data: {
               id: dbId,
@@ -158,7 +202,7 @@ async function main() {
               tipo: comp.type,
               x: typeof comp.x === 'number' ? comp.x : 0,
               y: typeof comp.y === 'number' ? comp.y : 0,
-              equipamento_id: extractEquipamentoId(comp),
+              equipamento_id: equipamentoId,
               props: extractComponentProps(comp) as unknown as Prisma.InputJsonValue,
             },
           });

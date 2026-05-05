@@ -159,11 +159,31 @@ export class IoTService {
       return;
     }
 
+    // Pre-resolve equipamento_ids via existence check em equipamentos.
+    // Handles CHAR(26) padding e ids invalidos sem quebrar a transacao.
+    const requestedEquipIds = new Set<string>();
+    for (const comp of diagrama.components) {
+      const raw = this.rawEquipamentoId(comp);
+      if (raw) requestedEquipIds.add(raw);
+    }
+    const validEquipIds = new Set<string>();
+    if (requestedEquipIds.size > 0) {
+      const found = await tx.equipamentos.findMany({
+        where: { id: { in: Array.from(requestedEquipIds) }, deleted_at: null },
+        select: { id: true },
+      });
+      for (const e of found) validEquipIds.add(e.id.trim());
+    }
+
     const idMapping = new Map<string, string>();
     for (const comp of diagrama.components) {
       const dbId = this.generateId();
       const localId = String(comp.id);
       idMapping.set(localId, dbId);
+
+      const rawEquip = this.rawEquipamentoId(comp);
+      const equipamentoId =
+        rawEquip && validEquipIds.has(rawEquip) ? rawEquip : null;
 
       await tx.iot_componentes.create({
         data: {
@@ -172,7 +192,7 @@ export class IoTService {
           tipo: comp.type,
           x: typeof comp.x === 'number' ? comp.x : 0,
           y: typeof comp.y === 'number' ? comp.y : 0,
-          equipamento_id: this.extractEquipamentoId(comp),
+          equipamento_id: equipamentoId,
           props: this.extractComponentProps(comp) as unknown as Prisma.InputJsonValue,
         },
       });
@@ -203,8 +223,13 @@ export class IoTService {
     }
   }
 
-  /** Trim + valida CUID 26 chars. Retorna null se invalido. */
-  private extractEquipamentoId(comp: IotDiagramaComponent): string | null {
+  /**
+   * Extrai equipamento_id bruto (texto trimado) do component.
+   * NAO valida formato — validacao acontece via SELECT em equipamentos
+   * dentro da transacao (lida com CHAR(26) padding e ids garbage).
+   * Aceita o id em comp.props.equipamento_id ou no proprio comp.equipamento_id.
+   */
+  private rawEquipamentoId(comp: IotDiagramaComponent): string | null {
     const props = (comp as Record<string, unknown>).props;
     const fromProps =
       props && typeof props === 'object'
@@ -214,7 +239,7 @@ export class IoTService {
     const raw = typeof fromProps === 'string' ? fromProps : fromTop;
     if (typeof raw !== 'string') return null;
     const trimmed = raw.trim();
-    return trimmed.length === 26 ? trimmed : null;
+    return trimmed.length === 0 ? null : trimmed;
   }
 
   /** Coleta atributos custom do componente (tudo exceto id/type/x/y) para gravar em iot_componentes.props. */
