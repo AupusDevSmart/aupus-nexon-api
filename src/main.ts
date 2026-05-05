@@ -7,6 +7,7 @@ import { ResponseInterceptor } from './common/interceptors/response.interceptor'
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { NestExpressApplication } from '@nestjs/platform-express';
+import { json, urlencoded } from 'express';
 import { join } from 'path';
 import * as Sentry from '@sentry/nestjs';
 import logger from './config/logger.config';
@@ -16,6 +17,10 @@ async function bootstrap() {
     logger: ['error', 'warn', 'log', 'debug', 'verbose'],
     bufferLogs: true,
   });
+
+  // POST /ota/compilar-e-publicar envia 21+ arquivos C++ (~120KB+) — default 100KB estoura.
+  app.use(json({ limit: '10mb' }));
+  app.use(urlencoded({ extended: true, limit: '10mb' }));
 
   // Servir arquivos estáticos (uploads)
   app.useStaticAssets(join(__dirname, '..', 'uploads'), {
