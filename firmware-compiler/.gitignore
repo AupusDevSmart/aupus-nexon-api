@@ -1,6 +1,5 @@
 node_modules/
 artifacts/
-prebuilt/*.bin
 *.log
 .env
 .env.local
