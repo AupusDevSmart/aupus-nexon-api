@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@aupus/api-shared':
-        specifier: git+https://github.com/AupusDevSmart/api-shared.git#v0.4.0
-        version: git+https://github.com/AupusDevSmart/api-shared.git#52c2da8674839491dd3c0ed712fa6e09b8a1c208(4eb0a8905d8ff9325a7cc6aa1f78a3d4)
+        specifier: git+https://github.com/AupusDevSmart/api-shared.git#v0.5.0
+        version: git+https://github.com/AupusDevSmart/api-shared.git#188057e7e78a9bb1713b1251985cc8f793508dcd(4eb0a8905d8ff9325a7cc6aa1f78a3d4)
       '@nestjs/config':
         specifier: ^4.0.2
         version: 4.0.2(@nestjs/common@11.1.19(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2))(rxjs@7.8.2)
@@ -183,9 +183,9 @@ packages:
     resolution: {integrity: sha512-lnw+ZM1Io+cJAkReC0NPDjqObL8NtKzKIkdgEEKC8CUmkhurYhedbicN8Y8NYHgG1uLd2GozW3+/QqPRZaN+Lw==}
     engines: {node: ^18.19.1 || ^20.11.1 || >=22.0.0, npm: ^6.11.0 || ^7.5.6 || >=8.0.0, yarn: '>= 1.13.0'}
 
-  '@aupus/api-shared@git+https://github.com/AupusDevSmart/api-shared.git#52c2da8674839491dd3c0ed712fa6e09b8a1c208':
-    resolution: {commit: 52c2da8674839491dd3c0ed712fa6e09b8a1c208, repo: https://github.com/AupusDevSmart/api-shared.git, type: git}
-    version: 0.4.0
+  '@aupus/api-shared@git+https://github.com/AupusDevSmart/api-shared.git#188057e7e78a9bb1713b1251985cc8f793508dcd':
+    resolution: {commit: 188057e7e78a9bb1713b1251985cc8f793508dcd, repo: https://github.com/AupusDevSmart/api-shared.git, type: git}
+    version: 0.5.0
     peerDependencies:
       '@nestjs/common': ^11.0.0
       '@nestjs/config': ^4.0.0
@@ -3586,7 +3586,7 @@ snapshots:
     transitivePeerDependencies:
       - chokidar
 
-  '@aupus/api-shared@git+https://github.com/AupusDevSmart/api-shared.git#52c2da8674839491dd3c0ed712fa6e09b8a1c208(4eb0a8905d8ff9325a7cc6aa1f78a3d4)':
+  '@aupus/api-shared@git+https://github.com/AupusDevSmart/api-shared.git#188057e7e78a9bb1713b1251985cc8f793508dcd(4eb0a8905d8ff9325a7cc6aa1f78a3d4)':
     dependencies:
       '@nestjs/common': 11.1.19(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2)
       '@nestjs/config': 4.0.2(@nestjs/common@11.1.19(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2))(rxjs@7.8.2)
