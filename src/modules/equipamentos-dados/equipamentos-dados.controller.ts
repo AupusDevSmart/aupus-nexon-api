@@ -2,6 +2,7 @@ import { Controller, Get, Param, Query, Logger, Post, Put, Body } from '@nestjs/
 import { EquipamentosDadosService } from './equipamentos-dados.service';
 import { CalculoCustosService } from './services/calculo-custos.service';
 import { ConfiguracaoCustoService } from './services/configuracao-custo.service';
+import { GatewayGraficosService } from './services/gateway-graficos.service';
 import { EquipamentoDadosQueryDto } from './dto/equipamento-dados-query.dto';
 import { CustosEnergiaQueryDto, PeriodoTipo } from './dto/custos-energia-query.dto';
 import { UpsertConfiguracaoCustoDto } from './dto/configuracao-custo.dto';
@@ -15,6 +16,7 @@ export class EquipamentosDadosController {
     private readonly service: EquipamentosDadosService,
     private readonly custosService: CalculoCustosService,
     private readonly configuracaoCustoService: ConfiguracaoCustoService,
+    private readonly gatewayGraficosService: GatewayGraficosService,
   ) {}
 
   /**
@@ -90,6 +92,31 @@ export class EquipamentosDadosController {
   ) {
     this.logger.log(`GET /equipamentos-dados/${id}/grafico-ano?ano=${ano || 'atual'}`);
     return this.service.getGraficoAno(id, ano);
+  }
+
+  // ============================================================================
+  // GATEWAY (A966 / categoria Gateway) - phf/phr direto do payload MQTT
+  // ============================================================================
+
+  @Get(':id/gateway/grafico-dia')
+  async getGatewayGraficoDia(
+    @Param('id') id: string,
+    @Query('data') data?: string,
+    @Query('intervalo') intervalo?: string,
+    @Query('inicio') inicio?: string,
+    @Query('fim') fim?: string,
+  ) {
+    this.logger.log(`GET /equipamentos-dados/${id}/gateway/grafico-dia`);
+    return this.gatewayGraficosService.getGraficoDia(id, data, intervalo, inicio, fim);
+  }
+
+  @Get(':id/gateway/grafico-mes')
+  async getGatewayGraficoMes(
+    @Param('id') id: string,
+    @Query('mes') mes?: string,
+  ) {
+    this.logger.log(`GET /equipamentos-dados/${id}/gateway/grafico-mes`);
+    return this.gatewayGraficosService.getGraficoMes(id, mes);
   }
 
   // ============================================================================
