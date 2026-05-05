@@ -1724,7 +1724,12 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
 
     } else {
       // ESTRUTURA SIMPLES/LEGADA - dados não aninhados
-      // Manter comportamento para equipamentos que não são inversores
+      // Fallback genérico: preserva última leitura inteira para tipos sem agregador
+      // específico (ex: Gateway/A966). Garante que payloads de categorias novas
+      // funcionem sem código novo. Agregados de power/voltage/etc abaixo sobrescrevem
+      // quando os campos legados existirem.
+      const { _qualidade, ...payloadFallback } = ultimaLeitura;
+      Object.assign(agregado, payloadFallback);
 
       const potencias = leituras.map((l) => l.dados.power).filter((p) => p != null && p > 0);
       const tensoes = leituras.map((l) => l.dados.voltage || l.dados.v1).filter((v) => v != null);
