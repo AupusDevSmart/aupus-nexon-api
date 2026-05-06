@@ -88,6 +88,7 @@ export const PERMISSIONS_STRUCTURE = {
       { name: 'equipamentos.edit', display_name: 'Editar Equipamentos', description: 'Editar dados de equipamentos' },
       { name: 'equipamentos.delete', display_name: 'Deletar Equipamentos', description: 'Deletar equipamentos' },
       { name: 'equipamentos.manage', display_name: 'Gerenciar Equipamentos', description: 'Acesso completo a equipamentos' },
+      { name: 'equipamentos.comandar', display_name: 'Comandar Equipamentos', description: 'Enviar comandos MQTT (relés, transistores, controle remoto) para equipamentos com mqtt_habilitado' },
     ]
   },
 

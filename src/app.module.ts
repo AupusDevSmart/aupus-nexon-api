@@ -24,6 +24,7 @@ import { RegrasLogsMqttModule } from './modules/regras-logs-mqtt/regras-logs-mqt
 import { UploadsModule } from './modules/uploads/uploads.module';
 import { IoTModule } from './modules/iot/iot.module';
 import { OtaModule } from './modules/ota/ota.module';
+import { EquipamentosCmdModule } from './modules/equipamentos-cmd/equipamentos-cmd.module';
 
 // Modulos compartilhados (de @aupus/api-shared)
 import {
@@ -80,6 +81,7 @@ import {
     UploadsModule,
     IoTModule,
     OtaModule,
+    EquipamentosCmdModule,
   ],
   controllers: [AppController],
   providers: [

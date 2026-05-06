@@ -55,6 +55,21 @@ export interface StatusAnnouncePayload {
   version?: string;
   model?: string;
   ip?: string;
+  // Telemetria opcional do dispositivo — populada conforme firmware evoluir.
+  // Mapeada para iot_dispositivos_online em upsertDispositivoOnline.
+  rssi?: number;
+  wifi_rssi?: number;
+  heap?: number;
+  free_heap?: number;
+  uptime?: number;
+  uptime_sec?: number;
+  hostname_ota?: string;
+  ota_hostname?: string;
+  firmware_versao?: number;
+  modbus_ok?: number;
+  modbus_err?: number;
+  mqtt_pub?: number;
+  sd_writes?: number;
   [key: string]: unknown;
 }
 
@@ -445,62 +460,178 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     dados: StatusAnnouncePayload,
   ): Promise<void> {
     try {
-      // Payload "offline" (LWT) — só logar, nada a atualizar
-      if (dados.online === false) {
+      const equipamento = await this.prisma.equipamentos.findUnique({
+        where: { id: equipamentoId },
+        select: { id: true, nome: true, mac_address: true, topico_mqtt: true },
+      });
+      if (!equipamento) return;
+
+      const isOnline = dados.online !== false;
+
+      // LWT (online=false): marcar dispositivo offline e sair sem mexer no MAC.
+      if (!isOnline) {
         if (this.logLevel === 'verbose') {
-          console.log(`📴 [MQTT] ${equipamentoId} reportou offline`);
+          console.log(`📴 [MQTT] ${equipamento.nome} (${equipamentoId}) reportou offline`);
         }
+        await this.markDispositivoOffline(equipamento.topico_mqtt);
         return;
       }
 
       const macRaw = typeof dados.mac === 'string' ? dados.mac.trim().toUpperCase() : '';
-      // Valida formato AA:BB:CC:DD:EE:FF
       const isValidMac = /^([0-9A-F]{2}:){5}[0-9A-F]{2}$/.test(macRaw);
-      if (!isValidMac) {
-        // announce sem MAC ainda é válido — outros TONs antigos podem não publicar
-        return;
-      }
 
-      // Lê estado atual do equipamento
-      const equipamento = await this.prisma.equipamentos.findUnique({
-        where: { id: equipamentoId },
-        select: { id: true, nome: true, mac_address: true },
-      });
-      if (!equipamento) return;
-
-      if (!equipamento.mac_address) {
-        // Caso 1: vínculo automático (auto-discovery)
-        try {
-          await this.prisma.equipamentos.update({
-            where: { id: equipamentoId },
-            data: { mac_address: macRaw },
-          });
-          console.log(
-            `🔗 [MQTT] Auto-discovery: equipamento ${equipamento.nome} (${equipamentoId}) ` +
-              `vinculado ao MAC ${macRaw}`,
-          );
-        } catch (e: any) {
-          // P2002 = unique constraint (outro equipamento já tem esse MAC)
-          if (e?.code === 'P2002') {
-            console.warn(
-              `⚠️ [MQTT] MAC ${macRaw} já vinculado a outro equipamento — ` +
-                `equipamento ${equipamento.nome} (${equipamentoId}) ficou sem vínculo.`,
+      // Auto-discovery do MAC em equipamentos.mac_address — só roda se MAC valido.
+      if (isValidMac) {
+        if (!equipamento.mac_address) {
+          try {
+            await this.prisma.equipamentos.update({
+              where: { id: equipamentoId },
+              data: { mac_address: macRaw },
+            });
+            console.log(
+              `🔗 [MQTT] Auto-discovery: equipamento ${equipamento.nome} (${equipamentoId}) ` +
+                `vinculado ao MAC ${macRaw}`,
             );
-          } else {
-            throw e;
+          } catch (e: any) {
+            if (e?.code === 'P2002') {
+              console.warn(
+                `⚠️ [MQTT] MAC ${macRaw} já vinculado a outro equipamento — ` +
+                  `equipamento ${equipamento.nome} (${equipamentoId}) ficou sem vínculo.`,
+              );
+            } else {
+              throw e;
+            }
           }
+        } else if (equipamento.mac_address.toUpperCase() !== macRaw) {
+          console.warn(
+            `⚠️ [MQTT] Equipamento ${equipamento.nome} (${equipamentoId}) está vinculado ao MAC ` +
+              `${equipamento.mac_address} mas reportou ${macRaw}. Verificar substituição física.`,
+          );
         }
-      } else if (equipamento.mac_address.toUpperCase() !== macRaw) {
-        // Caso 2: equipamento já vinculado a outro MAC — pode ser troca física,
-        // mas é situação que merece atenção do operador.
-        console.warn(
-          `⚠️ [MQTT] Equipamento ${equipamento.nome} (${equipamentoId}) está vinculado ao MAC ` +
-            `${equipamento.mac_address} mas reportou ${macRaw}. Verificar substituição física.`,
-        );
       }
-      // Caso 3: MAC bate — nada a fazer (saúde normal).
+
+      // Espelho em iot_dispositivos_online (independente de MAC valido — chave eh topico_mqtt).
+      // Captura estado runtime: online, RSSI, heap, IP, etc — para dashboards e diagnostico.
+      await this.upsertDispositivoOnline(equipamento, dados, isValidMac ? macRaw : null);
     } catch (error) {
       console.error(`❌ Erro processando status announce de ${equipamentoId}:`, error);
+    }
+  }
+
+  /**
+   * Espelha o announce em iot_dispositivos_online por topico_mqtt UNIQUE.
+   * Chave de upsert eh o topico (cada TON em campo tem topico unico).
+   *
+   * componente_id eh resolvido via FK iot_componentes.equipamento_id quando
+   * existir vinculacao no diagrama IoT. Se nao houver, fica NULL — o
+   * dispositivo aparece como "online no MQTT mas sem componente vinculado",
+   * util pra detectar TONs nao registrados.
+   *
+   * Falhas de upsert sao logadas mas nao propagadas: nao podem quebrar o
+   * fluxo de auto-discovery do MAC (que eh load-bearing).
+   */
+  private async upsertDispositivoOnline(
+    equipamento: { id: string; nome: string; topico_mqtt: string | null },
+    dados: StatusAnnouncePayload,
+    macValido: string | null,
+  ): Promise<void> {
+    const topico = equipamento.topico_mqtt?.trim();
+    if (!topico) return;
+
+    try {
+      const componente = await this.prisma.iot_componentes.findFirst({
+        where: { equipamento_id: equipamento.id },
+        select: { id: true },
+      });
+
+      const numericOrNull = (v: unknown): number | null =>
+        typeof v === 'number' && Number.isFinite(v) ? v : null;
+      const stringOrNull = (v: unknown, max: number): string | null =>
+        typeof v === 'string' && v.trim().length > 0 ? v.trim().slice(0, max) : null;
+      const intOrZero = (v: unknown): number =>
+        typeof v === 'number' && Number.isFinite(v) ? Math.trunc(v) : 0;
+
+      const ip = stringOrNull(dados.ip, 45);
+      const hostname_ota = stringOrNull(dados.hostname_ota ?? dados.ota_hostname, 100);
+      const wifi_rssi = numericOrNull(dados.wifi_rssi ?? dados.rssi);
+      const free_heap = numericOrNull(dados.free_heap ?? dados.heap);
+      const uptimeNum = numericOrNull(dados.uptime_sec ?? dados.uptime);
+      const uptime_sec = uptimeNum !== null ? BigInt(Math.trunc(uptimeNum)) : null;
+      const firmware_versao = numericOrNull(dados.firmware_versao);
+      const modbus_ok = intOrZero(dados.modbus_ok);
+      const modbus_err = intOrZero(dados.modbus_err);
+      const mqtt_pub = intOrZero(dados.mqtt_pub);
+      const sd_writes = intOrZero(dados.sd_writes);
+      const device_name = equipamento.nome.slice(0, 100);
+
+      await this.prisma.iot_dispositivos_online.upsert({
+        where: { topico_mqtt: topico },
+        create: {
+          componente_id: componente?.id ?? null,
+          device_name,
+          mac_address: macValido,
+          ip_address: ip,
+          hostname_ota,
+          topico_mqtt: topico,
+          online: true,
+          last_seen: new Date(),
+          uptime_sec,
+          wifi_rssi,
+          free_heap,
+          firmware_versao,
+          modbus_ok,
+          modbus_err,
+          mqtt_pub,
+          sd_writes,
+        },
+        update: {
+          componente_id: componente?.id ?? undefined,
+          device_name,
+          mac_address: macValido,
+          ip_address: ip,
+          hostname_ota,
+          online: true,
+          last_seen: new Date(),
+          uptime_sec,
+          wifi_rssi,
+          free_heap,
+          firmware_versao,
+          modbus_ok,
+          modbus_err,
+          mqtt_pub,
+          sd_writes,
+        },
+      });
+    } catch (e) {
+      console.error(
+        `❌ [MQTT] Falha upsert iot_dispositivos_online para topico ${topico}:`,
+        e,
+      );
+    }
+  }
+
+  /**
+   * LWT do TON: marca dispositivo offline em iot_dispositivos_online.
+   * No-op se nao houver topico ou linha previa para o topico (criar linha so
+   * com online=false sem MAC nem device_name nao agrega valor — TON nunca
+   * subiu nesse topico).
+   */
+  private async markDispositivoOffline(
+    topicoMqtt: string | null,
+  ): Promise<void> {
+    const topico = topicoMqtt?.trim();
+    if (!topico) return;
+
+    try {
+      await this.prisma.iot_dispositivos_online.updateMany({
+        where: { topico_mqtt: topico },
+        data: { online: false, last_seen: new Date() },
+      });
+    } catch (e) {
+      console.error(
+        `❌ [MQTT] Falha marcar iot_dispositivos_online offline para topico ${topico}:`,
+        e,
+      );
     }
   }
 
