@@ -2,7 +2,7 @@ import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '@aupus/api-shared';
 
 const INTERVALOS_VALIDOS = [1, 5, 15, 30] as const;
-const DEFAULT_INTERVALO_MIN = 30;
+const DEFAULT_INTERVALO_MIN = 15;
 const TZ_BRASILIA = 'America/Sao_Paulo';
 
 export interface GatewayPontoDia {
