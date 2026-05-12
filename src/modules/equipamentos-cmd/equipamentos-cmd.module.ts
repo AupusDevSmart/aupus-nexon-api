@@ -3,6 +3,7 @@ import { PrismaModule } from '@aupus/api-shared';
 
 import { MqttModule } from '../../shared/mqtt/mqtt.module';
 import { EquipamentosCmdController } from './equipamentos-cmd.controller';
+import { EquipamentosAcionarPontoController } from './acionar-ponto.controller';
 import { EquipamentosCmdService } from './equipamentos-cmd.service';
 
 /**
@@ -13,7 +14,7 @@ import { EquipamentosCmdService } from './equipamentos-cmd.service';
  */
 @Module({
   imports: [PrismaModule, MqttModule],
-  controllers: [EquipamentosCmdController],
+  controllers: [EquipamentosCmdController, EquipamentosAcionarPontoController],
   providers: [EquipamentosCmdService],
   exports: [EquipamentosCmdService],
 })
