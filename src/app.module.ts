@@ -25,6 +25,8 @@ import { UploadsModule } from './modules/uploads/uploads.module';
 import { IoTModule } from './modules/iot/iot.module';
 import { OtaModule } from './modules/ota/ota.module';
 import { EquipamentosCmdModule } from './modules/equipamentos-cmd/equipamentos-cmd.module';
+import { EquipamentoPontosModule } from './modules/equipamento-pontos/equipamento-pontos.module';
+import { TonBoModule } from './modules/ton-bo/ton-bo.module';
 
 // Modulos compartilhados (de @aupus/api-shared)
 import {
@@ -82,6 +84,8 @@ import {
     IoTModule,
     OtaModule,
     EquipamentosCmdModule,
+    EquipamentoPontosModule,
+    TonBoModule,
   ],
   controllers: [AppController],
   providers: [

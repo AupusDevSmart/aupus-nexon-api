@@ -89,6 +89,9 @@ export const PERMISSIONS_STRUCTURE = {
       { name: 'equipamentos.delete', display_name: 'Deletar Equipamentos', description: 'Deletar equipamentos' },
       { name: 'equipamentos.manage', display_name: 'Gerenciar Equipamentos', description: 'Acesso completo a equipamentos' },
       { name: 'equipamentos.comandar', display_name: 'Comandar Equipamentos', description: 'Enviar comandos MQTT (relés, transistores, controle remoto) para equipamentos com mqtt_habilitado' },
+      { name: 'equipamentos.manage_pontos', display_name: 'Gerenciar Pontos', description: 'Criar, editar e remover pontos de automação (comando/status/medição) por equipamento' },
+      { name: 'equipamentos.manage_bos', display_name: 'Gerenciar BOs de TON', description: 'Configurar mapeamento Binary Output -> ponto de equipamento + pulso_ms nas TONs' },
+      { name: 'equipamentos.acionar_ponto', display_name: 'Acionar Ponto de Automação', description: 'Executar ponto de tipo comando no Unifilar (dispara pulso na TON mapeada)' },
     ]
   },
 
