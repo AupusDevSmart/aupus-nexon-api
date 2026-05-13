@@ -16,18 +16,35 @@ err()  { printf '\nERRO: %s\n' "$*" >&2; exit 1; }
 
 cd "$(dirname "$0")"
 
-step "Verificando working tree limpo"
-if [ -n "$(git status --porcelain)" ]; then
-  echo "Mudancas locais nao commitadas detectadas:"
-  git status --short
-  err "Resolva (commit/stash/discard) antes de fazer deploy. Veja docs/PRE-DEPLOY.md."
-fi
+# SELF_REEXEC: faz git pull antes e re-executa o script com a versao nova.
+# Sem isso, se o proprio deploy.sh muda no commit puxado, bash le metade
+# do arquivo antigo + metade do novo de forma inconsistente (bug observado
+# em 2026-04-29 no firmware-compiler). Pull foge pra ca, restante do script
+# fica logo abaixo do guard.
+if [ "${SELF_REEXEC:-}" != "1" ]; then
+  step "Verificando working tree limpo"
+  if [ -n "$(git status --porcelain)" ]; then
+    echo "Mudancas locais nao commitadas detectadas:"
+    git status --short
+    err "Resolva (commit/stash/discard) antes de fazer deploy. Veja docs/PRE-DEPLOY.md."
+  fi
 
-step "git pull --ff-only origin main"
-git pull --ff-only origin main
+  step "git pull --ff-only origin main"
+  git pull --ff-only origin main
+
+  export SELF_REEXEC=1
+  exec "$0" "$@"
+fi
 
 step "pnpm install --frozen-lockfile"
 pnpm install --frozen-lockfile
+
+# pnpm v10 strict ignora o postinstall do @prisma/client. Como o schema
+# vem do @aupus/api-shared, e bumps dessa dep podem trazer schema novo,
+# precisa gerar o Client explicitamente apontando pro schema dele.
+# (ref: memory reference_pnpm10_prisma_generate.md)
+step "pnpm prisma generate"
+pnpm prisma generate --schema=node_modules/@aupus/api-shared/prisma/schema.prisma
 
 step "Snapshot de dist/ anterior em dist.previous/"
 rm -rf dist.previous
