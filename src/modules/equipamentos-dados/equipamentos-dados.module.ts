@@ -7,6 +7,7 @@ import { ConfiguracaoCustoService } from './services/configuracao-custo.service'
 import { FeriadosNacionaisService } from './services/feriados-nacionais.service';
 import { MqttIngestionService } from './services/mqtt-ingestion.service';
 import { GatewayGraficosService } from './services/gateway-graficos.service';
+import { GatewayDashboardService } from './services/gateway-dashboard.service';
 import { PrismaModule } from '@aupus/api-shared';
 
 @Module({
@@ -20,6 +21,7 @@ import { PrismaModule } from '@aupus/api-shared';
     FeriadosNacionaisService,
     MqttIngestionService,
     GatewayGraficosService,
+    GatewayDashboardService,
   ],
   exports: [
     EquipamentosDadosService,

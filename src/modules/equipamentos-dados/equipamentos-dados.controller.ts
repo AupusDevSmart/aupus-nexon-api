@@ -3,6 +3,7 @@ import { EquipamentosDadosService } from './equipamentos-dados.service';
 import { CalculoCustosService } from './services/calculo-custos.service';
 import { ConfiguracaoCustoService } from './services/configuracao-custo.service';
 import { GatewayGraficosService } from './services/gateway-graficos.service';
+import { GatewayDashboardService } from './services/gateway-dashboard.service';
 import { EquipamentoDadosQueryDto } from './dto/equipamento-dados-query.dto';
 import { CustosEnergiaQueryDto, PeriodoTipo } from './dto/custos-energia-query.dto';
 import { UpsertConfiguracaoCustoDto } from './dto/configuracao-custo.dto';
@@ -17,6 +18,7 @@ export class EquipamentosDadosController {
     private readonly custosService: CalculoCustosService,
     private readonly configuracaoCustoService: ConfiguracaoCustoService,
     private readonly gatewayGraficosService: GatewayGraficosService,
+    private readonly gatewayDashboardService: GatewayDashboardService,
   ) {}
 
   /**
@@ -117,6 +119,31 @@ export class EquipamentosDadosController {
   ) {
     this.logger.log(`GET /equipamentos-dados/${id}/gateway/grafico-mes`);
     return this.gatewayGraficosService.getGraficoMes(id, mes);
+  }
+
+  // GATEWAY V2 — endpoints novos que substituirao grafico-dia/grafico-mes
+  // quando o modal A966 migrar pro layout novo (cards demanda, fluxo,
+  // resumo dia, ultimas leituras, tendencia com seletor de periodo).
+
+  @Get(':id/gateway/dashboard')
+  async getGatewayDashboard(
+    @Param('id') id: string,
+    @Query('n') n?: string,
+  ) {
+    this.logger.log(`GET /equipamentos-dados/${id}/gateway/dashboard`);
+    const nNum = n ? Math.max(1, Math.min(50, Number(n))) : 5;
+    return this.gatewayDashboardService.getDashboard(id, nNum);
+  }
+
+  @Get(':id/gateway/tendencia')
+  async getGatewayTendencia(
+    @Param('id') id: string,
+    @Query('periodo') periodo: string,
+    @Query('inicio') inicio?: string,
+    @Query('fim') fim?: string,
+  ) {
+    this.logger.log(`GET /equipamentos-dados/${id}/gateway/tendencia?periodo=${periodo}`);
+    return this.gatewayDashboardService.getTendencia(id, periodo, inicio, fim);
   }
 
   // ============================================================================
