@@ -58,6 +58,12 @@ async function bootstrap() {
         const detalhes = errors.map((e) => ({
           property: e.property,
           value: e.value,
+          // Codepoints hex de cada char — diagnostica encoding/normalizacao
+          // (NFC vs NFD, double UTF-8, mojibake) quando value e' string.
+          valueCodepoints:
+            typeof e.value === 'string'
+              ? [...e.value].map((c) => c.codePointAt(0)!.toString(16)).join(' ')
+              : undefined,
           constraints: e.constraints,
         }));
         validationLogger.warn(
