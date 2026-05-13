@@ -1,5 +1,5 @@
 import './instrument';
-import { ValidationPipe } from '@nestjs/common';
+import { BadRequestException, Logger, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
@@ -42,6 +42,7 @@ async function bootstrap() {
   // ✅ Prefix global da API
   app.setGlobalPrefix('api/v1');
 
+  const validationLogger = new Logger('ValidationPipe');
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
@@ -49,6 +50,24 @@ async function bootstrap() {
       transform: true,
       transformOptions: {
         enableImplicitConversion: true,
+      },
+      // Loga detalhes (qual campo + qual constraint quebrou) antes de
+      // propagar como BadRequestException. Sem isso o Pino so registra
+      // 'Bad Request Exception' sem informacao util pra debugar.
+      exceptionFactory: (errors) => {
+        const detalhes = errors.map((e) => ({
+          property: e.property,
+          value: e.value,
+          constraints: e.constraints,
+        }));
+        validationLogger.warn(
+          `Validation failed: ${JSON.stringify(detalhes, null, 2)}`,
+        );
+        return new BadRequestException({
+          statusCode: 400,
+          message: 'Validation failed',
+          errors: detalhes,
+        });
       },
     }),
   );
