@@ -50,15 +50,20 @@ function calcularBucket(
   const kvar_ind = q_ind_kvarh * ENERGIA_PARA_POTENCIA;
   const kvar_cap = q_cap_kvarh * ENERGIA_PARA_POTENCIA;
 
-  // Resultante com sinal: positivo = predomina indutivo, negativo = capacitivo
+  // Resultante com sinal (so pra UI: tabela ultimas leituras e FP_natureza)
   const kvar_resultante = kvar_ind - kvar_cap;
-  const kvar_para_kVA = Math.abs(kvar_resultante);
+  // No kVA usa-se a SOMA dos 4 quadrantes (definicao do operador): cada
+  // quadrante e' um vetor, e o medidor reporta os 4 modulos. Somar os
+  // 4 da a magnitude total reativa.
+  const kvar_para_kVA = kvar_ind + kvar_cap;
 
   const kW_predominante = Math.max(kW_consumo, kW_injecao);
   const kVA = Math.sqrt(kW_predominante ** 2 + kvar_para_kVA ** 2);
   const FP = kVA === 0 ? 1.0 : kW_predominante / kVA;
   const FP_natureza: 'ind' | 'cap' = kvar_resultante >= 0 ? 'ind' : 'cap';
-  const fluxo_liquido_kw = kW_consumo - kW_injecao;
+  // Fluxo liquido = injecao - consumo. Positivo = exportando para a rede,
+  // negativo = importando da rede.
+  const fluxo_liquido_kw = kW_injecao - kW_consumo;
 
   return {
     kW_consumo,
