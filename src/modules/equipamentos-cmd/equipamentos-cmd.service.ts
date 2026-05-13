@@ -7,6 +7,7 @@ import {
   GatewayTimeoutException,
   ServiceUnavailableException,
 } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import { PrismaService } from '@aupus/api-shared';
 import { MqttService } from '../../shared/mqtt/mqtt.service';
 import { SendCommandDto } from './dto/send-command.dto';
@@ -253,10 +254,13 @@ export class EquipamentosCmdService {
     // 6. Wait pulso_ms — backend mantem o estado fisico do pulso
     await this.sleep(bo.pulso_ms);
 
-    // 7. Pulso OFF — fire-and-forget pra fechar o pulso no instante exato.
-    //    Sem ack pra evitar latencia adicional (mqtt QoS 1 garante delivery).
+    // 7. Pulso OFF — envelope completo {cmd_id, cmd} com novo UUID, sem aguardar ack.
+    //    Firmware do TON exige cmd_id no envelope (so payload string puro tambem
+    //    funciona, mas envelope mantem o padrao). Pulso fica preciso porque nao
+    //    espera ack do OFF (mqtt QoS 1 garante delivery em condicoes normais).
     try {
-      await this.mqtt.publish(`${topico}/cmd`, JSON.stringify({ cmd: cmdOff }), {
+      const offEnvelope = JSON.stringify({ cmd_id: randomUUID(), cmd: cmdOff });
+      await this.mqtt.publish(`${topico}/cmd`, offEnvelope, {
         qos: 1,
         retain: false,
       });
