@@ -33,7 +33,10 @@ if [ "${SELF_REEXEC:-}" != "1" ]; then
   git pull --ff-only origin main
 
   export SELF_REEXEC=1
-  exec "$0" "$@"
+  # exec bash explicito: quando invocado como `bash deploy.sh` (sem ./)
+  # o $0 e' so "deploy.sh" e exec "$0" procuraria no PATH. Passando como
+  # argumento pro bash, ele resolve via CWD (que ja eh o dirname do script).
+  exec bash "$0" "$@"
 fi
 
 step "pnpm install --frozen-lockfile"
