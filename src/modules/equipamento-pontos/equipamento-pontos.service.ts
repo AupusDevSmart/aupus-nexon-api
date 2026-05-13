@@ -58,13 +58,38 @@ export class EquipamentoPontosService {
       );
     }
 
+    const nome = dto.nome.trim();
+    const unidade = dto.unidade?.trim() ?? null;
+
+    // Reaproveita soft-deletado com mesmo nome (UPDATE deleted_at=null + refresh).
+    // Evita conflict no UNIQUE (equipamento_id, nome) quando user remove e recria
+    // ponto com o mesmo nome. Preserva o id e o audit trail.
+    const softDeletado = await this.prisma.equipamento_pontos.findFirst({
+      where: { equipamento_id: eqId, nome, deleted_at: { not: null } },
+      select: { id: true },
+    });
+    if (softDeletado) {
+      const row = await this.prisma.equipamento_pontos.update({
+        where: { id: softDeletado.id },
+        data: {
+          tipo: dto.tipo,
+          nome,
+          unidade,
+          ordem: dto.ordem ?? 0,
+          ativo: dto.ativo ?? true,
+          deleted_at: null,
+        },
+      });
+      return this.toResponse(row);
+    }
+
     try {
       const row = await this.prisma.equipamento_pontos.create({
         data: {
           equipamento_id: eqId,
           tipo: dto.tipo,
-          nome: dto.nome.trim(),
-          unidade: dto.unidade?.trim() ?? null,
+          nome,
+          unidade,
           ordem: dto.ordem ?? 0,
           ativo: dto.ativo ?? true,
         },
@@ -124,9 +149,18 @@ export class EquipamentoPontosService {
     const pId = pontoId.trim();
     await this.assertPontoExists(eqId, pId);
 
-    await this.prisma.equipamento_pontos.update({
-      where: { id: pId },
-      data: { deleted_at: new Date() },
+    // Cascade manual: ton_bo.equipamento_ponto_id -> NULL antes de soft-delete.
+    // FK do schema eh ON DELETE SET NULL mas so atua em hard delete; soft delete
+    // deixaria mapeamentos orfaos apontando pra ponto inexistente.
+    await this.prisma.$transaction(async (tx) => {
+      await tx.ton_bo.updateMany({
+        where: { equipamento_ponto_id: pId, deleted_at: null },
+        data: { equipamento_ponto_id: null },
+      });
+      await tx.equipamento_pontos.update({
+        where: { id: pId },
+        data: { deleted_at: new Date() },
+      });
     });
   }
 
