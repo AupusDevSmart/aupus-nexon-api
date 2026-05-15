@@ -14,7 +14,7 @@ import {
 import { ConfiguracaoDemandaService } from './configuracao-demanda.service';
 import { CreateConfiguracaoDemandaDto } from './dto/create-configuracao-demanda.dto';
 import { UpdateConfiguracaoDemandaDto } from './dto/update-configuracao-demanda.dto';
-import { JwtAuthGuard } from '@aupus/api-shared';
+import { JwtAuthGuard, CurrentUser } from '@aupus/api-shared';
 
 @Controller('configuracao-demanda')
 // @UseGuards(JwtAuthGuard) // Temporariamente desabilitado para testes
@@ -32,13 +32,13 @@ export class ConfiguracaoDemandaController {
   }
 
   @Get()
-  async findAll() {
-    return this.configuracaoDemandaService.findAll();
+  async findAll(@CurrentUser() user?: any) {
+    return this.configuracaoDemandaService.findAll(user);
   }
 
   @Get('unidade/:unidadeId')
-  async findByUnidade(@Param('unidadeId') unidadeId: string) {
-    const configuracao = await this.configuracaoDemandaService.findByUnidade(unidadeId);
+  async findByUnidade(@Param('unidadeId') unidadeId: string, @CurrentUser() user?: any) {
+    const configuracao = await this.configuracaoDemandaService.findByUnidade(unidadeId, user);
 
     if (!configuracao) {
       return {
@@ -68,7 +68,7 @@ export class ConfiguracaoDemandaController {
     @Request() req: any,
   ) {
     const userId = req.user?.id;
-    return this.configuracaoDemandaService.create(createDto, userId);
+    return this.configuracaoDemandaService.create(createDto, userId, req.user);
   }
 
   // IMPORTANTE: Rota mais específica deve vir ANTES da rota com parâmetro genérico
@@ -85,7 +85,7 @@ export class ConfiguracaoDemandaController {
 
     try {
       const userId = req.user?.id;
-      const result = await this.configuracaoDemandaService.updateByUnidade(unidadeId, updateDto, userId);
+      const result = await this.configuracaoDemandaService.updateByUnidade(unidadeId, updateDto, userId, req.user);
       console.log('✅ [CONTROLLER] Resposta do service:', result);
       return result;
     } catch (error) {
@@ -106,12 +106,12 @@ export class ConfiguracaoDemandaController {
     console.log('  - updateDto:', JSON.stringify(updateDto, null, 2));
 
     const userId = req.user?.id;
-    return this.configuracaoDemandaService.update(id, updateDto, userId);
+    return this.configuracaoDemandaService.update(id, updateDto, userId, req.user);
   }
 
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
-  async remove(@Param('id') id: string) {
-    return this.configuracaoDemandaService.remove(id);
+  async remove(@Param('id') id: string, @CurrentUser() user?: any) {
+    return this.configuracaoDemandaService.remove(id, user);
   }
 }

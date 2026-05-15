@@ -3,9 +3,10 @@ import {
   NotFoundException,
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Logger,
 } from '@nestjs/common';
-import { PrismaService } from '@aupus/api-shared';
+import { PrismaService, PermissionScopeService, ScopedUser } from '@aupus/api-shared';
 import { Prisma } from '@aupus/api-shared';
 
 import {
@@ -32,11 +33,15 @@ import {
 export class EquipamentoPontosService {
   private readonly logger = new Logger(EquipamentoPontosService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly scopeService: PermissionScopeService,
+  ) {}
 
-  async list(equipamentoId: string): Promise<EquipamentoPontoResponseDto[]> {
+  async list(equipamentoId: string, user?: ScopedUser): Promise<EquipamentoPontoResponseDto[]> {
     const eqId = equipamentoId.trim();
     await this.assertEquipamentoExists(eqId);
+    if (user) await this.scopeService.assertEntityInScope('equipamento', eqId, user);
 
     const rows = await this.prisma.equipamento_pontos.findMany({
       where: { equipamento_id: eqId, deleted_at: null },
@@ -48,9 +53,11 @@ export class EquipamentoPontosService {
   async create(
     equipamentoId: string,
     dto: CreateEquipamentoPontoDto,
+    user?: ScopedUser,
   ): Promise<EquipamentoPontoResponseDto> {
     const eqId = equipamentoId.trim();
     await this.assertEquipamentoAutomatizado(eqId);
+    if (user) await this.scopeService.assertEntityInScope('equipamento', eqId, user);
 
     if (!PONTO_TIPOS.includes(dto.tipo)) {
       throw new BadRequestException(
@@ -109,10 +116,12 @@ export class EquipamentoPontosService {
     equipamentoId: string,
     pontoId: string,
     dto: UpdateEquipamentoPontoDto,
+    user?: ScopedUser,
   ): Promise<EquipamentoPontoResponseDto> {
     const eqId = equipamentoId.trim();
     const pId = pontoId.trim();
     await this.assertPontoExists(eqId, pId);
+    if (user) await this.scopeService.assertEntityInScope('equipamento', eqId, user);
 
     if (dto.tipo !== undefined && !PONTO_TIPOS.includes(dto.tipo)) {
       throw new BadRequestException(
@@ -144,10 +153,11 @@ export class EquipamentoPontosService {
     }
   }
 
-  async remove(equipamentoId: string, pontoId: string): Promise<void> {
+  async remove(equipamentoId: string, pontoId: string, user?: ScopedUser): Promise<void> {
     const eqId = equipamentoId.trim();
     const pId = pontoId.trim();
     await this.assertPontoExists(eqId, pId);
+    if (user) await this.scopeService.assertEntityInScope('equipamento', eqId, user);
 
     // Cascade manual: ton_bo.equipamento_ponto_id -> NULL antes de soft-delete.
     // FK do schema eh ON DELETE SET NULL mas so atua em hard delete; soft delete

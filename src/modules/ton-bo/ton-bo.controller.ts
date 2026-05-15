@@ -17,7 +17,7 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
-import { JwtAuthGuard, Permissions } from '@aupus/api-shared';
+import { JwtAuthGuard, Permissions, CurrentUser } from '@aupus/api-shared';
 
 import { TonBoService } from './ton-bo.service';
 import {
@@ -52,8 +52,8 @@ export class TonBoController {
   })
   @ApiParam({ name: 'tonId', description: 'ID da TON (equipamento)' })
   @ApiResponse({ status: 200, type: [TonBoResponseDto] })
-  list(@Param('tonId') tonId: string): Promise<TonBoResponseDto[]> {
-    return this.service.list(tonId);
+  list(@Param('tonId') tonId: string, @CurrentUser() user?: any): Promise<TonBoResponseDto[]> {
+    return this.service.list(tonId, user);
   }
 
   @Post()
@@ -67,8 +67,9 @@ export class TonBoController {
   create(
     @Param('tonId') tonId: string,
     @Body() dto: CreateTonBoDto,
+    @CurrentUser() user?: any,
   ): Promise<TonBoResponseDto> {
-    return this.service.create(tonId, dto);
+    return this.service.create(tonId, dto, user);
   }
 
   @Patch(':boId')
@@ -81,8 +82,9 @@ export class TonBoController {
     @Param('tonId') tonId: string,
     @Param('boId') boId: string,
     @Body() dto: UpdateTonBoDto,
+    @CurrentUser() user?: any,
   ): Promise<TonBoResponseDto> {
-    return this.service.update(tonId, boId, dto);
+    return this.service.update(tonId, boId, dto, user);
   }
 
   @Delete(':boId')
@@ -93,7 +95,8 @@ export class TonBoController {
   remove(
     @Param('tonId') tonId: string,
     @Param('boId') boId: string,
+    @CurrentUser() user?: any,
   ): Promise<void> {
-    return this.service.remove(tonId, boId);
+    return this.service.remove(tonId, boId, user);
   }
 }

@@ -13,7 +13,7 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
-import { JwtAuthGuard, Permissions } from '@aupus/api-shared';
+import { JwtAuthGuard, Permissions, CurrentUser } from '@aupus/api-shared';
 
 import { EquipamentosCmdService } from './equipamentos-cmd.service';
 import { AcionarPontoResultDto } from './dto/acionar-ponto-result.dto';
@@ -59,7 +59,8 @@ export class EquipamentosAcionarPontoController {
   async acionar(
     @Param('id') id: string,
     @Param('pontoId') pontoId: string,
+    @CurrentUser() user?: any,
   ): Promise<AcionarPontoResultDto> {
-    return this.cmdService.acionarPonto(id, pontoId);
+    return this.cmdService.acionarPonto(id, pontoId, user);
   }
 }

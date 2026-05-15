@@ -1,6 +1,6 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
 import { randomBytes } from 'node:crypto';
-import { PrismaService } from '@aupus/api-shared';
+import { PrismaService, PermissionScopeService, ScopedUser } from '@aupus/api-shared';
 import { Prisma } from '@aupus/api-shared';
 import type {
   IotDiagrama,
@@ -43,14 +43,27 @@ const PROJETO_SELECT = {
  */
 @Injectable()
 export class IoTService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly scopeService: PermissionScopeService,
+  ) {}
 
   /** Gera um ID hex de 26 chars compativel com CHAR(26) — preserva o formato dos registros existentes. */
   private generateId(): string {
     return randomBytes(13).toString('hex');
   }
 
-  async getProjetosByUnidade(unidadeId: string): Promise<IotProjetoRow[]> {
+  /** Resolve unidade_id de um projeto IoT. */
+  private async unidadeIdDoProjeto(projetoId: string): Promise<string | null> {
+    const p = await this.prisma.iot_projetos.findFirst({
+      where: { id: projetoId.trim() },
+      select: { unidade_id: true },
+    });
+    return p?.unidade_id?.trim() ?? null;
+  }
+
+  async getProjetosByUnidade(unidadeId: string, user?: ScopedUser): Promise<IotProjetoRow[]> {
+    if (user) await this.scopeService.assertEntityInScope('unidade', unidadeId.trim(), user);
     const rows = await this.prisma.iot_projetos.findMany({
       where: { unidade_id: unidadeId.trim(), deleted_at: null },
       orderBy: { created_at: 'asc' },
@@ -59,15 +72,18 @@ export class IoTService {
     return rows.map(this.toProjetoRow);
   }
 
-  async getProjetoById(id: string): Promise<IotProjetoRow | null> {
+  async getProjetoById(id: string, user?: ScopedUser): Promise<IotProjetoRow | null> {
     const row = await this.prisma.iot_projetos.findFirst({
       where: { id: id.trim(), deleted_at: null },
       select: PROJETO_SELECT,
     });
-    return row ? this.toProjetoRow(row) : null;
+    if (!row) return null;
+    if (user) await this.scopeService.assertEntityInScope('unidade', row.unidade_id.trim(), user);
+    return this.toProjetoRow(row);
   }
 
-  async createProjeto(unidadeId: string, nome: string): Promise<IotProjetoRow> {
+  async createProjeto(unidadeId: string, nome: string, user?: ScopedUser): Promise<IotProjetoRow> {
+    if (user) await this.scopeService.assertEntityInScope('unidade', unidadeId.trim(), user);
     const created = await this.prisma.iot_projetos.create({
       data: {
         id: this.generateId(),
@@ -83,8 +99,13 @@ export class IoTService {
   async updateProjeto(
     id: string,
     data: { nome?: string; diagrama?: IotDiagrama },
+    user?: ScopedUser,
   ): Promise<IotProjetoRow> {
     const trimmedId = id.trim();
+    if (user) {
+      const unidadeId = await this.unidadeIdDoProjeto(trimmedId);
+      if (unidadeId) await this.scopeService.assertEntityInScope('unidade', unidadeId, user);
+    }
 
     return this.prisma.$transaction(async (tx) => {
       const existing = await tx.iot_projetos.findFirst({
@@ -128,15 +149,16 @@ export class IoTService {
     });
   }
 
-  async deleteProjeto(id: string): Promise<void> {
+  async deleteProjeto(id: string, user?: ScopedUser): Promise<void> {
     const trimmedId = id.trim();
     const existing = await this.prisma.iot_projetos.findFirst({
       where: { id: trimmedId, deleted_at: null },
-      select: { id: true },
+      select: { id: true, unidade_id: true },
     });
     if (!existing) {
       throw new NotFoundException(`Projeto IoT ${trimmedId} nao encontrado`);
     }
+    if (user) await this.scopeService.assertEntityInScope('unidade', existing.unidade_id.trim(), user);
     await this.prisma.iot_projetos.update({
       where: { id: trimmedId },
       data: { deleted_at: new Date() },

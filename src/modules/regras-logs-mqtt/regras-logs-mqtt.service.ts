@@ -1,5 +1,5 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
-import { PrismaService } from '@aupus/api-shared';
+import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
+import { PrismaService, PermissionScopeService, ScopedUser } from '@aupus/api-shared';
 import { CreateRegraLogDto } from './dto/create-regra-log.dto';
 import { UpdateRegraLogDto } from './dto/update-regra-log.dto';
 import { QueryRegrasLogsDto } from './dto/query-regras-logs.dto';
@@ -11,10 +11,12 @@ export class RegrasLogsMqttService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly engine: RegrasLogsMqttEngine,
+    private readonly scopeService: PermissionScopeService,
   ) {}
 
-  async create(dto: CreateRegraLogDto) {
+  async create(dto: CreateRegraLogDto, user?: ScopedUser) {
     const equipamentoId = dto.equipamento_id.trim();
+    if (user) await this.scopeService.assertEntityInScope('equipamento', equipamentoId, user);
     const result = await this.prisma.regras_logs_mqtt.create({
       data: {
         equipamento_id: equipamentoId,
@@ -33,7 +35,7 @@ export class RegrasLogsMqttService {
     return result;
   }
 
-  async findAll(query: QueryRegrasLogsDto) {
+  async findAll(query: QueryRegrasLogsDto, user?: ScopedUser) {
     const { page, limit, search, equipamentoId, severidade, ativo, orderBy, orderDirection } = query;
     const skip = (page - 1) * limit;
 
@@ -54,6 +56,14 @@ export class RegrasLogsMqttService {
         { mensagem: { contains: search, mode: 'insensitive' } },
         { campo_json: { contains: search, mode: 'insensitive' } },
       ];
+    }
+
+    // Scope RBAC: filtrar regras pelo equipamento.planta_id no escopo
+    const scope = await this.scopeService.getScope(user);
+    if (this.scopeService.isScoped(scope)) {
+      where.AND = scope.length === 0
+        ? [{ id: '__NEVER__' }]
+        : [{ equipamento: { unidade: { planta_id: { in: scope } } } }];
     }
 
     const [data, total] = await Promise.all([
@@ -78,7 +88,8 @@ export class RegrasLogsMqttService {
     };
   }
 
-  async findOne(id: string) {
+  async findOne(id: string, user?: ScopedUser) {
+    if (user) await this.scopeService.assertEntityInScope('regra_log_mqtt', id.trim(), user);
     const regra = await this.prisma.regras_logs_mqtt.findFirst({
       where: { id: id.trim(), deleted_at: null },
       include: { equipamento: { select: { id: true, nome: true } } },
@@ -87,8 +98,8 @@ export class RegrasLogsMqttService {
     return regra;
   }
 
-  async update(id: string, dto: UpdateRegraLogDto) {
-    await this.findOne(id);
+  async update(id: string, dto: UpdateRegraLogDto, user?: ScopedUser) {
+    await this.findOne(id, user);
     const data: any = { ...dto };
     if (data.equipamento_id) data.equipamento_id = data.equipamento_id.trim();
     if (data.nome) data.nome = data.nome.trim();
@@ -104,8 +115,8 @@ export class RegrasLogsMqttService {
     return result;
   }
 
-  async remove(id: string) {
-    await this.findOne(id);
+  async remove(id: string, user?: ScopedUser) {
+    await this.findOne(id, user);
     const result = await this.prisma.regras_logs_mqtt.update({
       where: { id: id.trim() },
       data: { deleted_at: new Date() },

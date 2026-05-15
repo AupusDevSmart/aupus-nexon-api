@@ -1,12 +1,15 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
-import { PrismaService } from '@aupus/api-shared';
+import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
+import { PrismaService, PermissionScopeService, ScopedUser } from '@aupus/api-shared';
 import { QueryLogsMqttDto } from './dto/query-logs-mqtt.dto';
 
 @Injectable()
 export class LogsMqttService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly scopeService: PermissionScopeService,
+  ) {}
 
-  async findAll(query: QueryLogsMqttDto) {
+  async findAll(query: QueryLogsMqttDto, user?: ScopedUser) {
     const {
       page,
       limit,
@@ -39,6 +42,14 @@ export class LogsMqttService {
       where.created_at = {};
       if (dataInicial) where.created_at.gte = new Date(dataInicial);
       if (dataFinal) where.created_at.lte = new Date(dataFinal);
+    }
+
+    // Scope RBAC: filtrar logs pela planta_id do equipamento (via unidade)
+    const scope = await this.scopeService.getScope(user);
+    if (this.scopeService.isScoped(scope)) {
+      where.AND = scope.length === 0
+        ? [{ id: '__NEVER__' }]
+        : [{ equipamento: { unidade: { planta_id: { in: scope } } } }];
     }
 
     const [data, total] = await Promise.all([
@@ -76,7 +87,8 @@ export class LogsMqttService {
     };
   }
 
-  async findOne(id: string) {
+  async findOne(id: string, user?: ScopedUser) {
+    if (user) await this.scopeService.assertEntityInScope('log_mqtt', id.trim(), user);
     const log = await this.prisma.logs_mqtt.findUnique({
       where: { id: id.trim() },
       include: {
@@ -100,8 +112,8 @@ export class LogsMqttService {
     return log;
   }
 
-  async remove(id: string) {
-    await this.findOne(id);
+  async remove(id: string, user?: ScopedUser) {
+    await this.findOne(id, user);
     return this.prisma.logs_mqtt.delete({ where: { id: id.trim() } });
   }
 }

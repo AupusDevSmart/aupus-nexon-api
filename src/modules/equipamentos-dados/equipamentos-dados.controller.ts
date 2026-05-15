@@ -1,4 +1,5 @@
 import { Controller, Get, Param, Query, Logger, Post, Put, Body } from '@nestjs/common';
+import { CurrentUser, PermissionScopeService } from '@aupus/api-shared';
 import { EquipamentosDadosService } from './equipamentos-dados.service';
 import { CalculoCustosService } from './services/calculo-custos.service';
 import { ConfiguracaoCustoService } from './services/configuracao-custo.service';
@@ -19,16 +20,23 @@ export class EquipamentosDadosController {
     private readonly configuracaoCustoService: ConfiguracaoCustoService,
     private readonly gatewayGraficosService: GatewayGraficosService,
     private readonly gatewayDashboardService: GatewayDashboardService,
+    private readonly scopeService: PermissionScopeService,
   ) {}
+
+  /** Helper: garante que o equipamento (single id) esta no escopo do user. */
+  private async assertEqInScope(id: string, user?: any): Promise<void> {
+    if (!user) return;
+    await this.scopeService.assertEntityInScope('equipamento', id.trim(), user);
+  }
 
   /**
    * GET /equipamentos-dados/:id/latest
    * Retorna o dado mais recente de um equipamento
    */
   @Get(':id/latest')
-  async getLatest(@Param('id') id: string) {
+  async getLatest(@Param('id') id: string, @CurrentUser() user?: any) {
     this.logger.log(`GET /equipamentos-dados/${id}/latest`);
-    return this.service.findLatest(id);
+    return this.service.findLatest(id, user);
   }
 
   /**
@@ -39,9 +47,10 @@ export class EquipamentosDadosController {
   async getHistory(
     @Param('id') id: string,
     @Query() query: EquipamentoDadosQueryDto,
+    @CurrentUser() user?: any,
   ) {
     this.logger.log(`GET /equipamentos-dados/${id}/history`);
-    return this.service.findHistory(id, query);
+    return this.service.findHistory(id, query, user);
   }
 
   /**
@@ -49,9 +58,9 @@ export class EquipamentosDadosController {
    * Retorna estatísticas de dados de um equipamento
    */
   @Get(':id/stats')
-  async getStats(@Param('id') id: string) {
+  async getStats(@Param('id') id: string, @CurrentUser() user?: any) {
     this.logger.log(`GET /equipamentos-dados/${id}/stats`);
-    return this.service.getStats(id);
+    return this.service.getStats(id, user);
   }
 
   /**
@@ -65,9 +74,10 @@ export class EquipamentosDadosController {
     @Query('intervalo') intervalo?: string, // '1' | '5' | '15' | '30' (minutos, default: 30)
     @Query('inicio') inicio?: string,   // ISO datetime - janela específica (zoom)
     @Query('fim') fim?: string,         // ISO datetime - janela específica (zoom)
+    @CurrentUser() user?: any,
   ) {
     this.logger.log(`GET /equipamentos-dados/${id}/grafico-dia?intervalo=${intervalo || '30'}`);
-    return this.service.getGraficoDia(id, data, intervalo, inicio, fim);
+    return this.service.getGraficoDia(id, data, intervalo, inicio, fim, user);
   }
 
   /**
@@ -78,9 +88,10 @@ export class EquipamentosDadosController {
   async getGraficoMes(
     @Param('id') id: string,
     @Query('mes') mes?: string, // formato: YYYY-MM (opcional, default: mês atual)
+    @CurrentUser() user?: any,
   ) {
     this.logger.log(`GET /equipamentos-dados/${id}/grafico-mes?mes=${mes || 'atual'}`);
-    return this.service.getGraficoMes(id, mes);
+    return this.service.getGraficoMes(id, mes, user);
   }
 
   /**
@@ -91,9 +102,10 @@ export class EquipamentosDadosController {
   async getGraficoAno(
     @Param('id') id: string,
     @Query('ano') ano?: string, // formato: YYYY (opcional, default: ano atual)
+    @CurrentUser() user?: any,
   ) {
     this.logger.log(`GET /equipamentos-dados/${id}/grafico-ano?ano=${ano || 'atual'}`);
-    return this.service.getGraficoAno(id, ano);
+    return this.service.getGraficoAno(id, ano, user);
   }
 
   // ============================================================================
@@ -107,8 +119,10 @@ export class EquipamentosDadosController {
     @Query('intervalo') intervalo?: string,
     @Query('inicio') inicio?: string,
     @Query('fim') fim?: string,
+    @CurrentUser() user?: any,
   ) {
     this.logger.log(`GET /equipamentos-dados/${id}/gateway/grafico-dia`);
+    await this.assertEqInScope(id, user);
     return this.gatewayGraficosService.getGraficoDia(id, data, intervalo, inicio, fim);
   }
 
@@ -116,8 +130,10 @@ export class EquipamentosDadosController {
   async getGatewayGraficoMes(
     @Param('id') id: string,
     @Query('mes') mes?: string,
+    @CurrentUser() user?: any,
   ) {
     this.logger.log(`GET /equipamentos-dados/${id}/gateway/grafico-mes`);
+    await this.assertEqInScope(id, user);
     return this.gatewayGraficosService.getGraficoMes(id, mes);
   }
 
@@ -129,8 +145,10 @@ export class EquipamentosDadosController {
   async getGatewayDashboard(
     @Param('id') id: string,
     @Query('n') n?: string,
+    @CurrentUser() user?: any,
   ) {
     this.logger.log(`GET /equipamentos-dados/${id}/gateway/dashboard`);
+    await this.assertEqInScope(id, user);
     const nNum = n ? Math.max(1, Math.min(50, Number(n))) : 5;
     return this.gatewayDashboardService.getDashboard(id, nNum);
   }
@@ -141,8 +159,10 @@ export class EquipamentosDadosController {
     @Query('periodo') periodo: string,
     @Query('inicio') inicio?: string,
     @Query('fim') fim?: string,
+    @CurrentUser() user?: any,
   ) {
     this.logger.log(`GET /equipamentos-dados/${id}/gateway/tendencia?periodo=${periodo}`);
+    await this.assertEqInScope(id, user);
     return this.gatewayDashboardService.getTendencia(id, periodo, inicio, fim);
   }
 
@@ -159,9 +179,10 @@ export class EquipamentosDadosController {
   async getGraficoDiaMultiplosInversoresAlias(
     @Body('equipamentosIds') equipamentosIds: string[],
     @Query('data') data?: string,
+    @CurrentUser() user?: any,
   ) {
     this.logger.log(`⚡ POST /multiplos-inversores/grafico-dia → V2 (${equipamentosIds.length} equipamentos)`);
-    return this.service.getGraficoDiaMultiplosInversores_V2(equipamentosIds, data);
+    return this.service.getGraficoDiaMultiplosInversores_V2(equipamentosIds, data, user);
   }
 
   /**
@@ -173,9 +194,10 @@ export class EquipamentosDadosController {
   async getGraficoMesMultiplosInversoresAlias(
     @Body('equipamentosIds') equipamentosIds: string[],
     @Query('mes') mes?: string,
+    @CurrentUser() user?: any,
   ) {
     this.logger.log(`⚡ POST /multiplos-inversores/grafico-mes → V2 (${equipamentosIds.length} equipamentos)`);
-    return this.service.getGraficoMesMultiplosInversores_V2(equipamentosIds, mes);
+    return this.service.getGraficoMesMultiplosInversores_V2(equipamentosIds, mes, user);
   }
 
   /**
@@ -187,9 +209,10 @@ export class EquipamentosDadosController {
   async getGraficoAnoMultiplosInversoresAlias(
     @Body('equipamentosIds') equipamentosIds: string[],
     @Query('ano') ano?: string,
+    @CurrentUser() user?: any,
   ) {
     this.logger.log(`⚡ POST /multiplos-inversores/grafico-ano → V2 (${equipamentosIds.length} equipamentos)`);
-    return this.service.getGraficoAnoMultiplosInversores_V2(equipamentosIds, ano);
+    return this.service.getGraficoAnoMultiplosInversores_V2(equipamentosIds, ano, user);
   }
 
   // ============================================================================
@@ -205,9 +228,10 @@ export class EquipamentosDadosController {
   async getGraficoDiaMultiplosV2(
     @Body('equipamentosIds') equipamentosIds: string[],
     @Body('data') data?: string,
+    @CurrentUser() user?: any,
   ) {
     this.logger.log(`⚡ POST /grafico-dia-multiplos-v2 (${equipamentosIds.length} equipamentos)`);
-    return this.service.getGraficoDiaMultiplosInversores_V2(equipamentosIds, data);
+    return this.service.getGraficoDiaMultiplosInversores_V2(equipamentosIds, data, user);
   }
 
   /**
@@ -219,9 +243,10 @@ export class EquipamentosDadosController {
   async getGraficoMesMultiplosV2(
     @Body('equipamentosIds') equipamentosIds: string[],
     @Body('mes') mes?: string,
+    @CurrentUser() user?: any,
   ) {
     this.logger.log(`⚡ POST /grafico-mes-multiplos-v2 (${equipamentosIds.length} equipamentos)`);
-    return this.service.getGraficoMesMultiplosInversores_V2(equipamentosIds, mes);
+    return this.service.getGraficoMesMultiplosInversores_V2(equipamentosIds, mes, user);
   }
 
   /**
@@ -233,9 +258,10 @@ export class EquipamentosDadosController {
   async getGraficoAnoMultiplosV2(
     @Body('equipamentosIds') equipamentosIds: string[],
     @Body('ano') ano?: string,
+    @CurrentUser() user?: any,
   ) {
     this.logger.log(`⚡ POST /grafico-ano-multiplos-v2 (${equipamentosIds.length} equipamentos)`);
-    return this.service.getGraficoAnoMultiplosInversores_V2(equipamentosIds, ano);
+    return this.service.getGraficoAnoMultiplosInversores_V2(equipamentosIds, ano, user);
   }
 
   // ============================================================================
@@ -250,9 +276,10 @@ export class EquipamentosDadosController {
   async getGraficoDiaMultiplos(
     @Body('equipamentosIds') equipamentosIds: string[],
     @Body('data') data?: string,
+    @CurrentUser() user?: any,
   ) {
     this.logger.log(`POST /grafico-dia-multiplos (${equipamentosIds.length} equipamentos) [DEPRECATED]`);
-    return this.service.getGraficoDiaMultiplosInversores(equipamentosIds, data);
+    return this.service.getGraficoDiaMultiplosInversores(equipamentosIds, data, user);
   }
 
   /**
@@ -263,9 +290,10 @@ export class EquipamentosDadosController {
   async getGraficoMesMultiplos(
     @Body('equipamentosIds') equipamentosIds: string[],
     @Body('mes') mes?: string,
+    @CurrentUser() user?: any,
   ) {
     this.logger.log(`POST /grafico-mes-multiplos (${equipamentosIds.length} equipamentos) [DEPRECATED]`);
-    return this.service.getGraficoMesMultiplosInversores(equipamentosIds, mes);
+    return this.service.getGraficoMesMultiplosInversores(equipamentosIds, mes, user);
   }
 
   /**
@@ -276,9 +304,10 @@ export class EquipamentosDadosController {
   async getGraficoAnoMultiplos(
     @Body('equipamentosIds') equipamentosIds: string[],
     @Body('ano') ano?: string,
+    @CurrentUser() user?: any,
   ) {
     this.logger.log(`POST /grafico-ano-multiplos (${equipamentosIds.length} equipamentos) [DEPRECATED]`);
-    return this.service.getGraficoAnoMultiplosInversores(equipamentosIds, ano);
+    return this.service.getGraficoAnoMultiplosInversores(equipamentosIds, ano, user);
   }
 
   /**
@@ -286,8 +315,9 @@ export class EquipamentosDadosController {
    * Retorna configuracao de tributos e tarifas personalizadas do equipamento
    */
   @Get(':id/configuracao-custo')
-  async getConfiguracaoCusto(@Param('id') id: string) {
+  async getConfiguracaoCusto(@Param('id') id: string, @CurrentUser() user?: any) {
     this.logger.log(`GET /equipamentos-dados/${id}/configuracao-custo`);
+    await this.assertEqInScope(id, user);
     return this.configuracaoCustoService.buscarOuDefault(id);
   }
 
@@ -299,8 +329,10 @@ export class EquipamentosDadosController {
   async upsertConfiguracaoCusto(
     @Param('id') id: string,
     @Body() dto: UpsertConfiguracaoCustoDto,
+    @CurrentUser() user?: any,
   ) {
     this.logger.log(`PUT /equipamentos-dados/${id}/configuracao-custo`);
+    await this.assertEqInScope(id, user);
     return this.configuracaoCustoService.upsert(id, dto);
   }
 
@@ -312,10 +344,12 @@ export class EquipamentosDadosController {
   async getCustosEnergia(
     @Param('id') id: string,
     @Query() query: CustosEnergiaQueryDto,
+    @CurrentUser() user?: any,
   ) {
     this.logger.log(
       `GET /equipamentos-dados/${id}/custos-energia?periodo=${query.periodo || 'custom'}&data=${query.data || ''}&timestamp_inicio=${query.timestamp_inicio || ''}&timestamp_fim=${query.timestamp_fim || ''}`,
     );
+    await this.assertEqInScope(id, user);
 
     // Determinar range de datas com base no período
     const { dataInicio, dataFim } = this.calcularRangeDatas(query);

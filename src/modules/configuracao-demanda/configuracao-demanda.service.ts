@@ -1,16 +1,20 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
-import { PrismaService } from '@aupus/api-shared';
+import { Injectable, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
+import { PrismaService, PermissionScopeService, ScopedUser } from '@aupus/api-shared';
 import { CreateConfiguracaoDemandaDto } from './dto/create-configuracao-demanda.dto';
 import { UpdateConfiguracaoDemandaDto } from './dto/update-configuracao-demanda.dto';
 
 @Injectable()
 export class ConfiguracaoDemandaService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private scopeService: PermissionScopeService,
+  ) {}
 
   /**
    * Busca configuração por unidade
    */
-  async findByUnidade(unidadeId: string) {
+  async findByUnidade(unidadeId: string, user?: ScopedUser) {
+    if (user) await this.scopeService.assertEntityInScope('unidade', unidadeId.trim(), user);
     try {
       const configuracao = await this.prisma.$queryRaw<any[]>`
         SELECT
@@ -75,9 +79,12 @@ export class ConfiguracaoDemandaService {
   /**
    * Lista todas as configurações
    */
-  async findAll() {
+  async findAll(user?: ScopedUser) {
     try {
-      const configuracoes = await this.prisma.$queryRaw<any[]>`
+      // Scope RBAC: filtrar por planta no escopo, se houver
+      const scope = await this.scopeService.getScope(user);
+      const configuracoes = !this.scopeService.isScoped(scope)
+        ? await this.prisma.$queryRaw<any[]>`
         SELECT
           c.id,
           c.unidade_id,
@@ -97,6 +104,30 @@ export class ConfiguracaoDemandaService {
         JOIN unidades u ON u.id = c.unidade_id
         JOIN plantas p ON p.id = u.planta_id
         ORDER BY p.nome, u.nome
+      `
+        : scope.length === 0
+        ? []
+        : await this.prisma.$queryRaw<any[]>`
+        SELECT
+          c.id,
+          c.unidade_id,
+          c.fonte,
+          c.equipamentos_ids,
+          c.mostrar_detalhes,
+          c.intervalo_atualizacao,
+          c.aplicar_perdas,
+          c.fator_perdas,
+          c.valor_contratado,
+          c.percentual_adicional,
+          c.created_at,
+          c.updated_at,
+          u.nome as unidade_nome,
+          p.nome as planta_nome
+        FROM configuracao_demanda c
+        JOIN unidades u ON u.id = c.unidade_id
+        JOIN plantas p ON p.id = u.planta_id
+        WHERE TRIM(p.id) = ANY(${scope})
+        ORDER BY p.nome, u.nome
       `;
 
       // Parse JSON fields
@@ -115,7 +146,8 @@ export class ConfiguracaoDemandaService {
   /**
    * Cria nova configuração
    */
-  async create(data: CreateConfiguracaoDemandaDto, userId?: string) {
+  async create(data: CreateConfiguracaoDemandaDto, userId?: string, user?: ScopedUser) {
+    if (user && data.unidade_id) await this.scopeService.assertEntityInScope('unidade', data.unidade_id.trim(), user);
     try {
       // Verificar se unidade existe
       const unidade = await this.prisma.unidades.findUnique({
@@ -187,7 +219,12 @@ export class ConfiguracaoDemandaService {
   /**
    * Atualiza configuração existente
    */
-  async update(id: string, data: UpdateConfiguracaoDemandaDto, userId?: string) {
+  async update(id: string, data: UpdateConfiguracaoDemandaDto, userId?: string, user?: ScopedUser) {
+    if (user) {
+      const existing = await this.prisma.$queryRaw<any[]>`SELECT unidade_id FROM configuracao_demanda WHERE id = ${id.trim()} LIMIT 1`;
+      const unidadeId = existing?.[0]?.unidade_id?.trim();
+      if (unidadeId) await this.scopeService.assertEntityInScope('unidade', unidadeId, user);
+    }
     console.log('\n⚠️ [SERVICE] update() chamado com ID:', id);
     console.log('  - Este ID parece ser unidadeId?', id.startsWith('cmh'));
 
@@ -288,7 +325,8 @@ export class ConfiguracaoDemandaService {
   /**
    * Atualiza configuração por unidade_id (cria se não existir)
    */
-  async updateByUnidade(unidadeId: string, data: UpdateConfiguracaoDemandaDto, userId?: string) {
+  async updateByUnidade(unidadeId: string, data: UpdateConfiguracaoDemandaDto, userId?: string, user?: ScopedUser) {
+    if (user) await this.scopeService.assertEntityInScope('unidade', unidadeId.trim(), user);
     console.log('\n🔍 [SERVICE] updateByUnidade iniciado');
     console.log('  - unidadeId:', unidadeId);
     console.log('  - data:', JSON.stringify(data, null, 2));
@@ -378,7 +416,12 @@ export class ConfiguracaoDemandaService {
   /**
    * Remove configuração
    */
-  async remove(id: string) {
+  async remove(id: string, user?: ScopedUser) {
+    if (user) {
+      const existing = await this.prisma.$queryRaw<any[]>`SELECT unidade_id FROM configuracao_demanda WHERE id = ${id.trim()} LIMIT 1`;
+      const unidadeId = existing?.[0]?.unidade_id?.trim();
+      if (unidadeId) await this.scopeService.assertEntityInScope('unidade', unidadeId, user);
+    }
     try {
       const result = await this.prisma.$executeRaw`
         DELETE FROM configuracao_demanda WHERE id = ${id}

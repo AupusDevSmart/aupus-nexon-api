@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { PrismaService } from '@aupus/api-shared';
+import { PrismaService, PermissionScopeService, ScopedUser } from '@aupus/api-shared';
 import { Prisma } from '@aupus/api-shared';
 import { CalculoCustosService } from '../equipamentos-dados/services/calculo-custos.service';
 
@@ -73,15 +73,17 @@ export class CoaService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly calculoCustosService: CalculoCustosService,
+    private readonly scopeService: PermissionScopeService,
   ) {}
 
   /**
    * Retorna dados agregados para o dashboard COA
-   * Com cache de 30 segundos para otimização
+   * Com cache de 30 segundos para otimização. Cache key inclui o user para
+   * nao compartilhar dados entre usuarios com scopes diferentes.
    */
-  async getDashboardData(clienteId?: string): Promise<DashboardData> {
-    this.logger.log(`[COA] getDashboardData chamado - clienteId: ${clienteId || 'none'}`);
-    const cacheKey = `dashboard-${clienteId || 'all'}`;
+  async getDashboardData(clienteId?: string, user?: ScopedUser): Promise<DashboardData> {
+    this.logger.log(`[COA] getDashboardData chamado - clienteId: ${clienteId || 'none'} user=${user?.id || 'none'} role=${user?.role || 'none'}`);
+    const cacheKey = `dashboard-${user?.id?.trim() || 'anon'}-${clienteId || 'all'}`;
     const cached = this.cache.get(cacheKey);
 
     // Retorna cache se ainda válido
@@ -94,7 +96,7 @@ export class CoaService {
 
     try {
       // Buscar dados agregados
-      const data = await this.fetchDashboardData(clienteId);
+      const data = await this.fetchDashboardData(clienteId, user);
 
       // Atualizar cache
       this.cache.set(cacheKey, {
@@ -196,13 +198,20 @@ export class CoaService {
   /**
    * Busca dados do banco de forma otimizada
    */
-  private async fetchDashboardData(clienteId?: string): Promise<DashboardData> {
+  private async fetchDashboardData(clienteId?: string, user?: ScopedUser): Promise<DashboardData> {
     // 1. Buscar estrutura de plantas e unidades
     // Nota: plantas não têm cliente_id direto, têm proprietario_id (usuário)
+    // Scope RBAC: operador/proprietario ve apenas as plantas vinculadas via planta_operadores / proprietario_id.
+    const scope = await this.scopeService.getScope(user);
+    const scopeFilter = this.scopeService.isScoped(scope)
+      ? (scope.length === 0 ? { id: '__NEVER__' } : { id: { in: scope } })
+      : {};
+
     const plantas = await this.prisma.plantas.findMany({
       where: {
         deleted_at: null,
         ...(clienteId && { proprietario_id: clienteId }),
+        ...scopeFilter,
       },
       select: {
         id: true,
@@ -613,9 +622,9 @@ export class CoaService {
   /**
    * Força atualização do cache (útil para testes ou refresh manual)
    */
-  async refreshCache(clienteId?: string): Promise<DashboardData> {
-    const cacheKey = `dashboard-${clienteId || 'all'}`;
+  async refreshCache(clienteId?: string, user?: ScopedUser): Promise<DashboardData> {
+    const cacheKey = `dashboard-${user?.id?.trim() || 'anon'}-${clienteId || 'all'}`;
     this.cache.delete(cacheKey);
-    return this.getDashboardData(clienteId);
+    return this.getDashboardData(clienteId, user);
   }
 }

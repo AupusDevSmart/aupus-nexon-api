@@ -1,18 +1,50 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { PrismaService } from '@aupus/api-shared';
+import { Injectable, Logger, NotFoundException, ForbiddenException } from '@nestjs/common';
+import { PrismaService, PermissionScopeService, ScopedUser } from '@aupus/api-shared';
 import { EquipamentoDadosQueryDto } from './dto/equipamento-dados-query.dto';
 
 @Injectable()
 export class EquipamentosDadosService {
   private readonly logger = new Logger(EquipamentosDadosService.name);
 
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private scopeService: PermissionScopeService,
+  ) {}
+
+  /** Helper interno: garante que o equipamento (single id) esta no escopo do user. */
+  private async assertEqInScope(equipamentoId: string, user?: ScopedUser): Promise<void> {
+    if (!user) return;
+    await this.scopeService.assertEntityInScope('equipamento', equipamentoId.trim(), user);
+  }
+
+  /**
+   * Helper interno: filtra um array de IDs de equipamento para apenas os que o user pode ver.
+   * Para users sem scope (admin/null), retorna o array original.
+   */
+  private async filterEqIdsByScope(equipamentosIds: string[], user?: ScopedUser): Promise<string[]> {
+    if (!user) return equipamentosIds;
+    const scope = await this.scopeService.getScope(user);
+    if (!this.scopeService.isScoped(scope)) return equipamentosIds;
+    if (scope.length === 0 || equipamentosIds.length === 0) return [];
+    const ids = equipamentosIds.map((id) => id.trim()).filter(Boolean);
+    const inScope = await this.prisma.equipamentos.findMany({
+      where: {
+        id: { in: ids },
+        unidade: { planta_id: { in: scope } },
+        deleted_at: null,
+      },
+      select: { id: true },
+    });
+    const allowed = new Set(inScope.map((e) => e.id.trim()));
+    return ids.filter((id) => allowed.has(id));
+  }
 
   /**
    * Buscar o dado mais recente de um equipamento
    */
-  async findLatest(equipamentoId: string) {
+  async findLatest(equipamentoId: string, user?: ScopedUser) {
     this.logger.log(`Buscando dado mais recente para equipamento ${equipamentoId}`);
+    await this.assertEqInScope(equipamentoId, user);
 
     // Limpar espaços do ID (problema de CHAR vs VARCHAR)
     const equipamentoIdLimpo = equipamentoId.trim();
@@ -74,8 +106,9 @@ export class EquipamentosDadosService {
   /**
    * Buscar histórico de dados de um equipamento
    */
-  async findHistory(equipamentoId: string, query: EquipamentoDadosQueryDto) {
+  async findHistory(equipamentoId: string, query: EquipamentoDadosQueryDto, user?: ScopedUser) {
     this.logger.log(`Buscando histórico para equipamento ${equipamentoId}`);
+    await this.assertEqInScope(equipamentoId, user);
 
     // Limpar espaços do ID (problema de CHAR vs VARCHAR)
     const equipamentoIdLimpo = equipamentoId.trim();
@@ -159,7 +192,8 @@ export class EquipamentosDadosService {
   /**
    * Buscar estatísticas de dados de um equipamento
    */
-  async getStats(equipamentoId: string) {
+  async getStats(equipamentoId: string, user?: ScopedUser) {
+    await this.assertEqInScope(equipamentoId, user);
     this.logger.log(`Buscando estatísticas para equipamento ${equipamentoId}`);
 
     const stats = await this.prisma.equipamentos_dados.aggregate({
@@ -190,7 +224,8 @@ export class EquipamentosDadosService {
    * Gráfico do Dia - Curva de potência ao longo do dia
    * Retorna dados agregados de 1 minuto para o dia especificado
    */
-  async getGraficoDia(equipamentoId: string, data?: string, intervalo?: string, inicio?: string, fim?: string) {
+  async getGraficoDia(equipamentoId: string, data?: string, intervalo?: string, inicio?: string, fim?: string, user?: ScopedUser) {
+    await this.assertEqInScope(equipamentoId, user);
     // Se intervalo NÃO foi fornecido explicitamente, retorna dados brutos (comportamento legado)
     // Outros hooks (M160, demanda) dependem dos campos JSON crus da DB
     if (!intervalo) {
@@ -318,7 +353,8 @@ export class EquipamentosDadosService {
    * Gráfico do Mês - Energia gerada por dia
    * Soma a energia de todos os minutos de cada dia
    */
-  async getGraficoMes(equipamentoId: string, mes?: string) {
+  async getGraficoMes(equipamentoId: string, mes?: string, user?: ScopedUser) {
+    await this.assertEqInScope(equipamentoId, user);
     console.log(`\n📊 [GRÁFICO MÊS] ========================================`);
     console.log(`📊 [GRÁFICO MÊS] Equipamento: ${equipamentoId}`);
     console.log(`📊 [GRÁFICO MÊS] Mês solicitado: ${mes || 'atual'}`);
@@ -414,7 +450,8 @@ export class EquipamentosDadosService {
    * Gráfico do Dia para Múltiplos Equipamentos - Soma das potências
    * Agrega dados de múltiplos equipamentos selecionados (usando equipamentos_dados)
    */
-  async getGraficoDiaMultiplosInversores(equipamentosIds: string[], data?: string) {
+  async getGraficoDiaMultiplosInversores(equipamentosIds: string[], data?: string, user?: ScopedUser) {
+    equipamentosIds = await this.filterEqIdsByScope(equipamentosIds, user);
     // ✅ VALIDAÇÃO: Limitar número de equipamentos para evitar sobrecarga
     if (equipamentosIds.length > 5) {
       throw new NotFoundException(
@@ -657,7 +694,8 @@ export class EquipamentosDadosService {
    * Gráfico do Mês para Múltiplos Equipamentos - Soma das energias
    * Agrega dados de múltiplos equipamentos selecionados (usando equipamentos_dados)
    */
-  async getGraficoMesMultiplosInversores(equipamentosIds: string[], mes?: string) {
+  async getGraficoMesMultiplosInversores(equipamentosIds: string[], mes?: string, user?: ScopedUser) {
+    equipamentosIds = await this.filterEqIdsByScope(equipamentosIds, user);
     // ✅ VALIDAÇÃO: Limitar número de equipamentos para evitar sobrecarga
     if (equipamentosIds.length > 5) {
       throw new NotFoundException(
@@ -832,7 +870,8 @@ export class EquipamentosDadosService {
    * Gráfico do Ano para Múltiplos Equipamentos - Soma das energias
    * Agrega dados de múltiplos equipamentos selecionados (usando equipamentos_dados)
    */
-  async getGraficoAnoMultiplosInversores(equipamentosIds: string[], ano?: string) {
+  async getGraficoAnoMultiplosInversores(equipamentosIds: string[], ano?: string, user?: ScopedUser) {
+    equipamentosIds = await this.filterEqIdsByScope(equipamentosIds, user);
     // ✅ VALIDAÇÃO: Limitar número de equipamentos para evitar sobrecarga
     if (equipamentosIds.length > 5) {
       throw new NotFoundException(
@@ -1011,7 +1050,8 @@ export class EquipamentosDadosService {
    * Gráfico do Ano - Energia gerada por mês
    * Soma a energia de todos os minutos de cada mês
    */
-  async getGraficoAno(equipamentoId: string, ano?: string) {
+  async getGraficoAno(equipamentoId: string, ano?: string, user?: ScopedUser) {
+    await this.assertEqInScope(equipamentoId, user);
     console.log(`\n📊 [GRÁFICO ANO] ========================================`);
     console.log(`📊 [GRÁFICO ANO] Equipamento: ${equipamentoId}`);
     console.log(`📊 [GRÁFICO ANO] Ano solicitado: ${ano || 'atual'}`);
@@ -1124,7 +1164,8 @@ export class EquipamentosDadosService {
    * 🚀 OTIMIZADO - Gráfico do Dia (Múltiplos Equipamentos)
    * Agregação no PostgreSQL (5 min intervals)
    */
-  async getGraficoDiaMultiplosInversores_V2(equipamentosIds: string[], data?: string) {
+  async getGraficoDiaMultiplosInversores_V2(equipamentosIds: string[], data?: string, user?: ScopedUser) {
+    equipamentosIds = await this.filterEqIdsByScope(equipamentosIds, user);
     // Validação
     if (equipamentosIds.length > 5) {
       throw new NotFoundException('Máximo de 5 equipamentos permitidos por vez');
@@ -1228,7 +1269,8 @@ export class EquipamentosDadosService {
    * 🚀 OTIMIZADO - Gráfico do Mês (Múltiplos Equipamentos)
    * Agregação no PostgreSQL (daily)
    */
-  async getGraficoMesMultiplosInversores_V2(equipamentosIds: string[], mes?: string) {
+  async getGraficoMesMultiplosInversores_V2(equipamentosIds: string[], mes?: string, user?: ScopedUser) {
+    equipamentosIds = await this.filterEqIdsByScope(equipamentosIds, user);
     // Validação
     if (equipamentosIds.length > 5) {
       throw new NotFoundException('Máximo de 5 equipamentos permitidos por vez');
@@ -1326,7 +1368,8 @@ export class EquipamentosDadosService {
    * 🚀 OTIMIZADO - Gráfico do Ano (Múltiplos Equipamentos)
    * Agregação no PostgreSQL (monthly)
    */
-  async getGraficoAnoMultiplosInversores_V2(equipamentosIds: string[], ano?: string) {
+  async getGraficoAnoMultiplosInversores_V2(equipamentosIds: string[], ano?: string, user?: ScopedUser) {
+    equipamentosIds = await this.filterEqIdsByScope(equipamentosIds, user);
     // Validação
     if (equipamentosIds.length > 5) {
       throw new NotFoundException('Máximo de 5 equipamentos permitidos por vez');

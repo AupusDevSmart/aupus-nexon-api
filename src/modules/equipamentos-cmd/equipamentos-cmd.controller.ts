@@ -14,7 +14,7 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
-import { JwtAuthGuard, Permissions } from '@aupus/api-shared';
+import { JwtAuthGuard, Permissions, CurrentUser } from '@aupus/api-shared';
 
 import { EquipamentosCmdService } from './equipamentos-cmd.service';
 import { SendCommandDto } from './dto/send-command.dto';
@@ -65,7 +65,8 @@ export class EquipamentosCmdController {
   async send(
     @Param('id') id: string,
     @Body() dto: SendCommandDto,
+    @CurrentUser() user?: any,
   ): Promise<CommandResultDto> {
-    return this.cmdService.sendCommand(id, dto);
+    return this.cmdService.sendCommand(id, dto, user);
   }
 }

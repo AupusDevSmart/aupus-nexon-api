@@ -3,9 +3,10 @@ import {
   NotFoundException,
   ConflictException,
   BadRequestException,
+  ForbiddenException,
   Logger,
 } from '@nestjs/common';
-import { PrismaService } from '@aupus/api-shared';
+import { PrismaService, PermissionScopeService, ScopedUser } from '@aupus/api-shared';
 import { Prisma } from '@aupus/api-shared';
 
 import {
@@ -34,16 +35,20 @@ import {
 export class TonBoService {
   private readonly logger = new Logger(TonBoService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly scopeService: PermissionScopeService,
+  ) {}
 
   /**
    * Retorna sempre 6 entradas (BO01..BO06) pra alimentar grid do frontend.
    * BOs nao persistidos vem com id=null e valores default — frontend faz
    * POST quando user salvar a primeira config.
    */
-  async list(tonId: string): Promise<TonBoResponseDto[]> {
+  async list(tonId: string, user?: ScopedUser): Promise<TonBoResponseDto[]> {
     const tId = tonId.trim();
     await this.assertTonExists(tId);
+    if (user) await this.scopeService.assertEntityInScope('equipamento', tId, user);
 
     const rows = await this.prisma.ton_bo.findMany({
       where: { ton_id: tId, deleted_at: null },
@@ -73,9 +78,11 @@ export class TonBoService {
   async create(
     tonId: string,
     dto: CreateTonBoDto,
+    user?: ScopedUser,
   ): Promise<TonBoResponseDto> {
     const tId = tonId.trim();
     await this.assertTonExists(tId);
+    if (user) await this.scopeService.assertEntityInScope('equipamento', tId, user);
 
     if (dto.equipamento_ponto_id) {
       await this.assertPontoComando(dto.equipamento_ponto_id.trim());
@@ -111,10 +118,12 @@ export class TonBoService {
     tonId: string,
     boId: string,
     dto: UpdateTonBoDto,
+    user?: ScopedUser,
   ): Promise<TonBoResponseDto> {
     const tId = tonId.trim();
     const bId = boId.trim();
     await this.assertBoExists(tId, bId);
+    if (user) await this.scopeService.assertEntityInScope('equipamento', tId, user);
 
     if (dto.equipamento_ponto_id !== undefined && dto.equipamento_ponto_id !== null) {
       await this.assertPontoComando(dto.equipamento_ponto_id.trim());
@@ -151,10 +160,11 @@ export class TonBoService {
     }
   }
 
-  async remove(tonId: string, boId: string): Promise<void> {
+  async remove(tonId: string, boId: string, user?: ScopedUser): Promise<void> {
     const tId = tonId.trim();
     const bId = boId.trim();
     await this.assertBoExists(tId, bId);
+    if (user) await this.scopeService.assertEntityInScope('equipamento', tId, user);
 
     await this.prisma.ton_bo.update({
       where: { id: bId },

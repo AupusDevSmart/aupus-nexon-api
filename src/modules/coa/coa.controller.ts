@@ -2,7 +2,7 @@ import { Controller, Get, Query, UseGuards, HttpCode, HttpStatus, Logger } from 
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import { CoaService, DashboardData } from './coa.service';
 import { JwtAuthGuard } from '@aupus/api-shared';
-import { UserProprietarioId } from '@aupus/api-shared';
+import { UserProprietarioId, CurrentUser } from '@aupus/api-shared';
 
 @ApiTags('COA - Centro de Operações')
 @Controller('coa')
@@ -30,11 +30,12 @@ export class CoaController {
   })
   async getDashboardData(
     @Query('clienteId') clienteId?: string,
-    @UserProprietarioId() autoProprietarioId?: string | null
+    @UserProprietarioId() autoProprietarioId?: string | null,
+    @CurrentUser() user?: any,
   ): Promise<DashboardData> {
     const effectiveClienteId = autoProprietarioId || clienteId;
     this.logger.log(`[COA Controller] GET /dashboard - autoProprietarioId: ${autoProprietarioId}, clienteId: ${clienteId}, effective: ${effectiveClienteId}`);
-    const result = await this.coaService.getDashboardData(effectiveClienteId);
+    const result = await this.coaService.getDashboardData(effectiveClienteId, user);
     this.logger.log(`[COA Controller] Dashboard data returned - ${result.plantas.length} plantas, ${result.resumoGeral.totalUnidades} unidades`);
     return result;
   }
@@ -57,9 +58,10 @@ export class CoaController {
   })
   async refreshDashboard(
     @Query('clienteId') clienteId?: string,
-    @UserProprietarioId() autoProprietarioId?: string | null
+    @UserProprietarioId() autoProprietarioId?: string | null,
+    @CurrentUser() user?: any,
   ): Promise<DashboardData> {
     const effectiveClienteId = autoProprietarioId || clienteId;
-    return this.coaService.refreshCache(effectiveClienteId);
+    return this.coaService.refreshCache(effectiveClienteId, user);
   }
 }

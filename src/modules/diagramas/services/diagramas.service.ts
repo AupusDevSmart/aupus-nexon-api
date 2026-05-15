@@ -1,18 +1,49 @@
-import { Injectable, NotFoundException, BadRequestException, ConflictException } from '@nestjs/common';
-import { PrismaService } from '@aupus/api-shared';
+import { Injectable, NotFoundException, BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
+import { PrismaService, PermissionScopeService, ScopedUser } from '@aupus/api-shared';
 import { CreateDiagramaDto } from '../dto/create-diagrama.dto';
 import { UpdateDiagramaDto } from '../dto/update-diagrama.dto';
 import { SaveLayoutDto } from '../dto/save-layout.dto';
 
 @Injectable()
 export class DiagramasService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly scopeService: PermissionScopeService,
+  ) {}
+
+  /** Resolve planta_id de um diagrama (via unidade). null se nao encontrar. */
+  private async plantaIdDoDiagrama(diagramaId: string): Promise<string | null> {
+    const d = await this.prisma.diagramas_unitarios.findFirst({
+      where: { id: diagramaId },
+      select: { unidade_id: true },
+    });
+    if (!d?.unidade_id) return null;
+    const u = await this.prisma.unidades.findFirst({
+      where: { id: d.unidade_id.trim() },
+      select: { planta_id: true },
+    });
+    return u?.planta_id?.trim() ?? null;
+  }
+
+  /**
+   * Assert publico: usado pelas rotas internas do DiagramasController
+   * (equipamentos/conexoes/layout) para garantir que o usuario esta no escopo
+   * da planta do diagrama antes de mutar.
+   */
+  async assertDiagramaInScope(diagramaId: string, user?: ScopedUser): Promise<void> {
+    if (!user) return;
+    const plantaId = await this.plantaIdDoDiagrama(diagramaId);
+    if (plantaId) await this.scopeService.assertPlantaInScope(plantaId, user);
+  }
 
   /**
    * Cria um novo diagrama para uma unidade
    */
-  async create(createDiagramaDto: CreateDiagramaDto) {
+  async create(createDiagramaDto: CreateDiagramaDto, user?: ScopedUser) {
     const { unidadeId, nome, descricao, ativo, configuracoes } = createDiagramaDto;
+
+    // Scope RBAC: a unidade-alvo deve estar no escopo
+    if (user) await this.scopeService.assertEntityInScope('unidade', unidadeId, user);
 
     // Verificar se a unidade existe
     const unidade = await this.prisma.unidades.findUnique({
@@ -62,7 +93,8 @@ export class DiagramasService {
   /**
    * Busca todos os diagramas de uma unidade
    */
-  async findByUnidade(unidadeId: string, proprietarioId?: string | null) {
+  async findByUnidade(unidadeId: string, proprietarioId?: string | null, user?: ScopedUser) {
+    if (user) await this.scopeService.assertEntityInScope('unidade', unidadeId, user);
     // Verificar se a unidade existe e pertence ao proprietário (se fornecido)
     const whereUnidade: any = {
       id: unidadeId,
@@ -141,7 +173,11 @@ export class DiagramasService {
   /**
    * Busca um diagrama por ID com opção de incluir dados em tempo real
    */
-  async findOne(id: string, includeData = false, proprietarioId?: string | null) {
+  async findOne(id: string, includeData = false, proprietarioId?: string | null, user?: ScopedUser) {
+    if (user) {
+      const plantaId = await this.plantaIdDoDiagrama(id);
+      if (plantaId) await this.scopeService.assertPlantaInScope(plantaId, user);
+    }
     const diagrama = await this.prisma.diagramas_unitarios.findFirst({
       where: {
         id,
@@ -311,7 +347,11 @@ export class DiagramasService {
   /**
    * Atualiza um diagrama
    */
-  async update(id: string, updateDiagramaDto: UpdateDiagramaDto) {
+  async update(id: string, updateDiagramaDto: UpdateDiagramaDto, user?: ScopedUser) {
+    if (user) {
+      const plantaId = await this.plantaIdDoDiagrama(id);
+      if (plantaId) await this.scopeService.assertPlantaInScope(plantaId, user);
+    }
     // Verificar se o diagrama existe
     const diagramaExistente = await this.prisma.diagramas_unitarios.findFirst({
       where: { id, deleted_at: null },
@@ -368,7 +408,11 @@ export class DiagramasService {
   /**
    * Remove um diagrama (soft delete)
    */
-  async remove(id: string) {
+  async remove(id: string, user?: ScopedUser) {
+    if (user) {
+      const plantaId = await this.plantaIdDoDiagrama(id);
+      if (plantaId) await this.scopeService.assertPlantaInScope(plantaId, user);
+    }
     // Verificar se o diagrama existe
     const diagrama = await this.prisma.diagramas_unitarios.findFirst({
       where: { id, deleted_at: null },
@@ -446,7 +490,11 @@ export class DiagramasService {
    * Estratégia: DELETE ALL + INSERT ALL em uma única transação
    * ~10x mais rápido que múltiplas requisições PATCH
    */
-  async saveLayout(diagramaId: string, dto: SaveLayoutDto) {
+  async saveLayout(diagramaId: string, dto: SaveLayoutDto, user?: ScopedUser) {
+    if (user) {
+      const plantaId = await this.plantaIdDoDiagrama(diagramaId);
+      if (plantaId) await this.scopeService.assertPlantaInScope(plantaId, user);
+    }
     // Verificar se o diagrama existe
     const diagrama = await this.prisma.diagramas_unitarios.findFirst({
       where: { id: diagramaId, deleted_at: null },

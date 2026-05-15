@@ -6,9 +6,10 @@ import {
   BadGatewayException,
   GatewayTimeoutException,
   ServiceUnavailableException,
+  ForbiddenException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import { PrismaService } from '@aupus/api-shared';
+import { PrismaService, PermissionScopeService, ScopedUser } from '@aupus/api-shared';
 import { MqttService } from '../../shared/mqtt/mqtt.service';
 import { SendCommandDto } from './dto/send-command.dto';
 import { CommandResultDto } from './dto/command-result.dto';
@@ -36,13 +37,16 @@ export class EquipamentosCmdService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly mqtt: MqttService,
+    private readonly scopeService: PermissionScopeService,
   ) {}
 
   async sendCommand(
     equipamentoId: string,
     dto: SendCommandDto,
+    user?: ScopedUser,
   ): Promise<CommandResultDto> {
     const trimmedId = equipamentoId.trim();
+    if (user) await this.scopeService.assertEntityInScope('equipamento', trimmedId, user);
 
     const equipamento = await this.prisma.equipamentos.findFirst({
       where: { id: trimmedId, deleted_at: null },
@@ -143,9 +147,11 @@ export class EquipamentosCmdService {
   async acionarPonto(
     equipamentoId: string,
     pontoId: string,
+    user?: ScopedUser,
   ): Promise<AcionarPontoResultDto> {
     const eqId = equipamentoId.trim();
     const pId = pontoId.trim();
+    if (user) await this.scopeService.assertEntityInScope('equipamento', eqId, user);
 
     // 1. Equipamento + ponto
     const equipamento = await this.prisma.equipamentos.findFirst({

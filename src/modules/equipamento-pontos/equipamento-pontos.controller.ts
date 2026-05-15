@@ -17,7 +17,7 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
-import { JwtAuthGuard, Permissions } from '@aupus/api-shared';
+import { JwtAuthGuard, Permissions, CurrentUser } from '@aupus/api-shared';
 
 import { EquipamentoPontosService } from './equipamento-pontos.service';
 import {
@@ -45,8 +45,8 @@ export class EquipamentoPontosController {
   @ApiOperation({ summary: 'Lista pontos do equipamento' })
   @ApiParam({ name: 'id', description: 'ID do equipamento' })
   @ApiResponse({ status: 200, type: [EquipamentoPontoResponseDto] })
-  list(@Param('id') id: string): Promise<EquipamentoPontoResponseDto[]> {
-    return this.service.list(id);
+  list(@Param('id') id: string, @CurrentUser() user?: any): Promise<EquipamentoPontoResponseDto[]> {
+    return this.service.list(id, user);
   }
 
   @Post()
@@ -64,8 +64,9 @@ export class EquipamentoPontosController {
   create(
     @Param('id') id: string,
     @Body() dto: CreateEquipamentoPontoDto,
+    @CurrentUser() user?: any,
   ): Promise<EquipamentoPontoResponseDto> {
-    return this.service.create(id, dto);
+    return this.service.create(id, dto, user);
   }
 
   @Patch(':pontoId')
@@ -78,8 +79,9 @@ export class EquipamentoPontosController {
     @Param('id') id: string,
     @Param('pontoId') pontoId: string,
     @Body() dto: UpdateEquipamentoPontoDto,
+    @CurrentUser() user?: any,
   ): Promise<EquipamentoPontoResponseDto> {
-    return this.service.update(id, pontoId, dto);
+    return this.service.update(id, pontoId, dto, user);
   }
 
   @Delete(':pontoId')
@@ -91,7 +93,8 @@ export class EquipamentoPontosController {
   remove(
     @Param('id') id: string,
     @Param('pontoId') pontoId: string,
+    @CurrentUser() user?: any,
   ): Promise<void> {
-    return this.service.remove(id, pontoId);
+    return this.service.remove(id, pontoId, user);
   }
 }

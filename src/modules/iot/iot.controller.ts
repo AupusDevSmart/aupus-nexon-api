@@ -17,7 +17,7 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
-import { JwtAuthGuard } from '@aupus/api-shared';
+import { JwtAuthGuard, CurrentUser } from '@aupus/api-shared';
 
 import { IoTService } from './iot.service';
 import { CreateIotProjetoDto } from './dto/create-iot-projeto.dto';
@@ -55,8 +55,9 @@ export class IoTController {
   @ApiResponse({ status: 200, description: 'Array de projetos IoT' })
   async listProjetos(
     @Query() query: ListIotProjetosQueryDto,
+    @CurrentUser() user?: any,
   ): Promise<{ data: IotProjetoRow[] }> {
-    const data = await this.iotService.getProjetosByUnidade(query.unidade_id);
+    const data = await this.iotService.getProjetosByUnidade(query.unidade_id, user);
     return { data };
   }
 
@@ -65,8 +66,9 @@ export class IoTController {
   @ApiResponse({ status: 200, description: 'Projeto IoT (ou null se ausente)' })
   async getProjeto(
     @Param('id') id: string,
+    @CurrentUser() user?: any,
   ): Promise<{ data: IotProjetoRow | null }> {
-    const data = await this.iotService.getProjetoById(id);
+    const data = await this.iotService.getProjetoById(id, user);
     return { data };
   }
 
@@ -76,8 +78,9 @@ export class IoTController {
   @ApiResponse({ status: 201, description: 'Projeto IoT criado' })
   async createProjeto(
     @Body() dto: CreateIotProjetoDto,
+    @CurrentUser() user?: any,
   ): Promise<{ data: IotProjetoRow }> {
-    const data = await this.iotService.createProjeto(dto.unidade_id, dto.nome);
+    const data = await this.iotService.createProjeto(dto.unidade_id, dto.nome, user);
     return { data };
   }
 
@@ -88,8 +91,9 @@ export class IoTController {
   async updateProjeto(
     @Param('id') id: string,
     @Body() dto: UpdateIotProjetoDto,
+    @CurrentUser() user?: any,
   ): Promise<{ data: IotProjetoRow }> {
-    const data = await this.iotService.updateProjeto(id, dto);
+    const data = await this.iotService.updateProjeto(id, dto, user);
     return { data };
   }
 
@@ -100,8 +104,9 @@ export class IoTController {
   @ApiResponse({ status: 404, description: 'Projeto nao encontrado' })
   async deleteProjeto(
     @Param('id') id: string,
+    @CurrentUser() user?: any,
   ): Promise<{ success: true }> {
-    await this.iotService.deleteProjeto(id);
+    await this.iotService.deleteProjeto(id, user);
     return { success: true };
   }
 }

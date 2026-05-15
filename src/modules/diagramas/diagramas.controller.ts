@@ -33,7 +33,7 @@ import {
   CreateConexoesBulkDto,
 } from './dto/create-conexao.dto';
 import { SaveLayoutDto } from './dto/save-layout.dto';
-import { UserProprietarioId } from '@aupus/api-shared';
+import { UserProprietarioId, CurrentUser } from '@aupus/api-shared';
 
 @ApiTags('Diagramas Sinópticos')
 // @ApiBearerAuth() // TODO: Descomentar quando implementar autenticação
@@ -55,13 +55,13 @@ export class DiagramasController {
     description: 'Diagrama criado com sucesso',
   })
   @ApiResponse({ status: 404, description: 'Unidade não encontrada' })
-  async create(@Body() createDiagramaDto: CreateDiagramaDto) {
+  async create(@Body() createDiagramaDto: CreateDiagramaDto, @CurrentUser() user?: any) {
     console.log('📝 [DiagramasController] CREATE - Recebendo request para criar diagrama');
     console.log('   📋 Body completo:', JSON.stringify(createDiagramaDto, null, 2));
     console.log('   📋 Propriedades do body:', Object.keys(createDiagramaDto));
 
     try {
-      const diagrama = await this.diagramasService.create(createDiagramaDto);
+      const diagrama = await this.diagramasService.create(createDiagramaDto, user);
       console.log('   ✅ Diagrama criado com ID:', diagrama.id);
       return diagrama;
     } catch (error) {
@@ -83,8 +83,9 @@ export class DiagramasController {
   async findByUnidade(
     @Param('unidadeId') unidadeId: string,
     @UserProprietarioId() autoProprietarioId: string | null,
+    @CurrentUser() user?: any,
   ) {
-    return this.diagramasService.findByUnidade(unidadeId, autoProprietarioId);
+    return this.diagramasService.findByUnidade(unidadeId, autoProprietarioId, user);
   }
 
   @Get(':id')
@@ -101,10 +102,11 @@ export class DiagramasController {
   async findOne(
     @Param('id') id: string,
     @Query('includeData') includeData?: string,
-    @UserProprietarioId() autoProprietarioId?: string | null
+    @UserProprietarioId() autoProprietarioId?: string | null,
+    @CurrentUser() user?: any,
   ) {
     const includeDataBool = includeData === 'true';
-    return this.diagramasService.findOne(id, includeDataBool, autoProprietarioId);
+    return this.diagramasService.findOne(id, includeDataBool, autoProprietarioId, user);
   }
 
   @Patch(':id')
@@ -115,13 +117,14 @@ export class DiagramasController {
   async update(
     @Param('id') id: string,
     @Body() updateDiagramaDto: UpdateDiagramaDto,
+    @CurrentUser() user?: any,
   ) {
     console.log('🔄 [DiagramasController] UPDATE - Recebendo request para atualizar diagrama');
     console.log('   📋 Diagrama ID:', id);
     console.log('   📋 Body completo:', JSON.stringify(updateDiagramaDto, null, 2));
     console.log('   📋 Propriedades do body:', Object.keys(updateDiagramaDto));
 
-    const diagrama = await this.diagramasService.update(id, updateDiagramaDto);
+    const diagrama = await this.diagramasService.update(id, updateDiagramaDto, user);
 
     console.log('   ✅ Diagrama atualizado com sucesso');
     return diagrama;
@@ -133,8 +136,8 @@ export class DiagramasController {
   @ApiParam({ name: 'id', description: 'ID do diagrama' })
   @ApiResponse({ status: 200, description: 'Diagrama removido com sucesso' })
   @ApiResponse({ status: 404, description: 'Diagrama não encontrado' })
-  async remove(@Param('id') id: string) {
-    return this.diagramasService.remove(id);
+  async remove(@Param('id') id: string, @CurrentUser() user?: any) {
+    return this.diagramasService.remove(id, user);
   }
 
   // ==================== ROTAS DE EQUIPAMENTOS ====================
@@ -151,7 +154,9 @@ export class DiagramasController {
   async addEquipamento(
     @Param('diagramaId') diagramaId: string,
     @Body() dto: AddEquipamentoDiagramaDto,
+    @CurrentUser() user?: any,
   ) {
+    await this.diagramasService.assertDiagramaInScope(diagramaId, user);
     return this.equipamentosDiagramaService.addEquipamento(diagramaId, dto);
   }
 
@@ -168,7 +173,9 @@ export class DiagramasController {
     @Param('diagramaId') diagramaId: string,
     @Param('equipamentoId') equipamentoId: string,
     @Body() dto: UpdateEquipamentoDiagramaDto,
+    @CurrentUser() user?: any,
   ) {
+    await this.diagramasService.assertDiagramaInScope(diagramaId, user);
     return this.equipamentosDiagramaService.updateEquipamento(
       diagramaId,
       equipamentoId,
@@ -189,7 +196,9 @@ export class DiagramasController {
   async removeEquipamento(
     @Param('diagramaId') diagramaId: string,
     @Param('equipamentoId') equipamentoId: string,
+    @CurrentUser() user?: any,
   ) {
+    await this.diagramasService.assertDiagramaInScope(diagramaId, user);
     return this.equipamentosDiagramaService.removeEquipamento(
       diagramaId,
       equipamentoId,
@@ -204,7 +213,8 @@ export class DiagramasController {
     status: 200,
     description: 'Todos os equipamentos foram removidos',
   })
-  async removeAllEquipamentos(@Param('diagramaId') diagramaId: string) {
+  async removeAllEquipamentos(@Param('diagramaId') diagramaId: string, @CurrentUser() user?: any) {
+    await this.diagramasService.assertDiagramaInScope(diagramaId, user);
     console.log('🗑️ [DiagramasController] REMOVE_ALL_EQUIPAMENTOS - Removendo todos os equipamentos');
     console.log('   📋 Diagrama ID:', diagramaId);
 
@@ -224,7 +234,9 @@ export class DiagramasController {
   async addEquipamentosBulk(
     @Param('diagramaId') diagramaId: string,
     @Body() dto: AddEquipamentosBulkDto,
+    @CurrentUser() user?: any,
   ) {
+    await this.diagramasService.assertDiagramaInScope(diagramaId, user);
     console.log('📦 [DiagramasController] BULK - Adicionando equipamentos em lote');
     console.log('   📋 Diagrama ID:', diagramaId);
     console.log('   📋 Quantidade de equipamentos:', dto.equipamentos?.length || 0);
@@ -275,7 +287,9 @@ export class DiagramasController {
   async createConexao(
     @Param('diagramaId') diagramaId: string,
     @Body() dto: CreateConexaoDto,
+    @CurrentUser() user?: any,
   ) {
+    await this.diagramasService.assertDiagramaInScope(diagramaId, user);
     return this.conexoesDiagramaService.create(diagramaId, dto);
   }
 
@@ -292,7 +306,9 @@ export class DiagramasController {
     @Param('diagramaId') diagramaId: string,
     @Param('conexaoId') conexaoId: string,
     @Body() _dto: any,
+    @CurrentUser() user?: any,
   ) {
+    await this.diagramasService.assertDiagramaInScope(diagramaId, user);
     return this.conexoesDiagramaService.update(diagramaId, conexaoId, _dto);
   }
 
@@ -306,7 +322,9 @@ export class DiagramasController {
   async removeConexao(
     @Param('diagramaId') diagramaId: string,
     @Param('conexaoId') conexaoId: string,
+    @CurrentUser() user?: any,
   ) {
+    await this.diagramasService.assertDiagramaInScope(diagramaId, user);
     return this.conexoesDiagramaService.remove(diagramaId, conexaoId);
   }
 
@@ -320,7 +338,9 @@ export class DiagramasController {
   async createConexoesBulk(
     @Param('diagramaId') diagramaId: string,
     @Body() dto: CreateConexoesBulkDto,
+    @CurrentUser() user?: any,
   ) {
+    await this.diagramasService.assertDiagramaInScope(diagramaId, user);
     return this.conexoesDiagramaService.createBulk(diagramaId, dto);
   }
 
@@ -332,7 +352,8 @@ export class DiagramasController {
     status: 200,
     description: 'Todas as conexões foram removidas',
   })
-  async removeAllConexoes(@Param('diagramaId') diagramaId: string) {
+  async removeAllConexoes(@Param('diagramaId') diagramaId: string, @CurrentUser() user?: any) {
+    await this.diagramasService.assertDiagramaInScope(diagramaId, user);
     console.log('🗑️ [DiagramasController] REMOVE_ALL - Removendo todas as conexões');
     console.log('   📋 Diagrama ID:', diagramaId);
 
@@ -350,7 +371,8 @@ export class DiagramasController {
     status: 200,
     description: 'Conexões duplicadas removidas',
   })
-  async removeDuplicateConexoes(@Param('diagramaId') diagramaId: string) {
+  async removeDuplicateConexoes(@Param('diagramaId') diagramaId: string, @CurrentUser() user?: any) {
+    await this.diagramasService.assertDiagramaInScope(diagramaId, user);
     console.log('🧹 [DiagramasController] REMOVE_DUPLICATES - Removendo duplicatas');
     console.log('   📋 Diagrama ID:', diagramaId);
 
@@ -386,6 +408,7 @@ export class DiagramasController {
   async saveLayout(
     @Param('id') diagramaId: string,
     @Body() dto: SaveLayoutDto,
+    @CurrentUser() user?: any,
   ) {
     const startTime = Date.now();
 
@@ -394,7 +417,7 @@ export class DiagramasController {
     console.log('   📋 Equipamentos:', dto.equipamentos?.length || 0);
     console.log('   📋 Conexões:', dto.conexoes?.length || 0);
 
-    const resultado = await this.diagramasService.saveLayout(diagramaId, dto);
+    const resultado = await this.diagramasService.saveLayout(diagramaId, dto, user);
 
     const tempoMs = Date.now() - startTime;
     console.log(`   ✅ Layout salvo em ${tempoMs}ms`);

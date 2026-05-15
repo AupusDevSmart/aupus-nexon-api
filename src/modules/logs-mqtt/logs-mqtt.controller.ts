@@ -7,6 +7,7 @@ import {
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
+import { CurrentUser } from '@aupus/api-shared';
 import { LogsMqttService } from './logs-mqtt.service';
 import { QueryLogsMqttDto } from './dto/query-logs-mqtt.dto';
 
@@ -15,18 +16,18 @@ export class LogsMqttController {
   constructor(private readonly service: LogsMqttService) {}
 
   @Get()
-  findAll(@Query() query: QueryLogsMqttDto) {
-    return this.service.findAll(query);
+  findAll(@Query() query: QueryLogsMqttDto, @CurrentUser() user?: any) {
+    return this.service.findAll(query, user);
   }
 
   @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.service.findOne(id);
+  findOne(@Param('id') id: string, @CurrentUser() user?: any) {
+    return this.service.findOne(id, user);
   }
 
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
-  remove(@Param('id') id: string) {
-    return this.service.remove(id);
+  remove(@Param('id') id: string, @CurrentUser() user?: any) {
+    return this.service.remove(id, user);
   }
 }
