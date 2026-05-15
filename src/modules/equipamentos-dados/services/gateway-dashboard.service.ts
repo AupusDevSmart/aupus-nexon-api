@@ -111,6 +111,7 @@ export class GatewayDashboardService {
     }
 
     const { dataInicioDia, agora } = this.janelaHoje();
+    const { dataInicioMes } = this.janelaMesAtual();
 
     // 1. Ultimas N leituras (mais recentes primeiro)
     const ultimasRaw = await this.prisma.equipamentos_dados.findMany({
@@ -213,6 +214,39 @@ export class GatewayDashboardService {
         ? { kw: Number(picoInjecaoRow[0].kw), timestamp: picoInjecaoRow[0].timestamp_dados }
         : null;
 
+    // 3b. Picos do MES corrente (do dia 1 do mes BRT ate agora). Usado pelo
+    // toggle "Atual / Mes" nos gauges de demanda do modal.
+    const picoConsumoMesRow: any[] = await this.prisma.$queryRaw`
+      SELECT timestamp_dados,
+             COALESCE((dados->'data'->>'phf')::numeric, (dados->>'phf')::numeric) * ${KD_A966_SSU} * ${ENERGIA_PARA_POTENCIA} AS kw
+        FROM equipamentos_dados
+       WHERE equipamento_id = ${id}
+         AND timestamp_dados >= ${dataInicioMes}
+         AND timestamp_dados <  ${agora}
+         AND COALESCE((dados->'data'->>'phf')::numeric, (dados->>'phf')::numeric) IS NOT NULL
+       ORDER BY kw DESC
+       LIMIT 1
+    `;
+    const picoInjecaoMesRow: any[] = await this.prisma.$queryRaw`
+      SELECT timestamp_dados,
+             COALESCE((dados->'data'->>'phr')::numeric, (dados->>'phr')::numeric) * ${KD_A966_SSU} * ${ENERGIA_PARA_POTENCIA} AS kw
+        FROM equipamentos_dados
+       WHERE equipamento_id = ${id}
+         AND timestamp_dados >= ${dataInicioMes}
+         AND timestamp_dados <  ${agora}
+         AND COALESCE((dados->'data'->>'phr')::numeric, (dados->>'phr')::numeric) IS NOT NULL
+       ORDER BY kw DESC
+       LIMIT 1
+    `;
+    const pico_consumo_mes =
+      picoConsumoMesRow[0]
+        ? { kw: Number(picoConsumoMesRow[0].kw), timestamp: picoConsumoMesRow[0].timestamp_dados }
+        : null;
+    const pico_injecao_mes =
+      picoInjecaoMesRow[0]
+        ? { kw: Number(picoInjecaoMesRow[0].kw), timestamp: picoInjecaoMesRow[0].timestamp_dados }
+        : null;
+
     // 4. Comunicacao: leituras esperadas ate agora baseado nas horas decorridas no dia.
     // Evita mostrar 0% as 00:00; mostra qualidade real ate o momento.
     const horasDecorridas = (agora.getTime() - dataInicioDia.getTime()) / 3_600_000;
@@ -243,6 +277,11 @@ export class GatewayDashboardService {
         q_cap_kvarh,
         pico_consumo,
         pico_injecao,
+      },
+      resumo_mes: {
+        mes: dataInicioMes.toISOString().slice(0, 7), // YYYY-MM
+        pico_consumo: pico_consumo_mes,
+        pico_injecao: pico_injecao_mes,
       },
       ultimas_leituras,
       comunicacao: {
@@ -365,6 +404,15 @@ export class GatewayDashboardService {
     const { horas, intervaloMin } = map[periodo as Exclude<Periodo, 'custom'>];
     const dataInicio = new Date(agora.getTime() - horas * 3_600_000);
     return { dataInicio, dataFim: agora, intervaloMin };
+  }
+
+  /** Primeiro dia do mes corrente em BRT (mesmo tratamento de TZ da janelaHoje). */
+  private janelaMesAtual() {
+    const agora = new Date();
+    const brt = agora.toLocaleDateString('en-CA', { timeZone: TZ_BRASILIA });
+    const [ano, mes] = brt.split('-').map(Number);
+    const dataInicioMes = new Date(Date.UTC(ano, mes - 1, 1, 0, 0, 0, 0));
+    return { dataInicioMes, agora };
   }
 
   /** Inicio do dia atual em BRT (UTC equivalente) e timestamp atual. */
