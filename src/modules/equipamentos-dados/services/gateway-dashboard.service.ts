@@ -50,12 +50,11 @@ function calcularBucket(
   const kvar_ind = q_ind_kvarh * ENERGIA_PARA_POTENCIA;
   const kvar_cap = q_cap_kvarh * ENERGIA_PARA_POTENCIA;
 
-  // Resultante com sinal (so pra UI: tabela ultimas leituras e FP_natureza)
+  // Reativo total = resultante Qind - Qcap (com sinal). Sinal define
+  // a natureza predominante (positivo = indutivo, negativo = capacitivo).
   const kvar_resultante = kvar_ind - kvar_cap;
-  // No kVA usa-se a SOMA dos 4 quadrantes (definicao do operador): cada
-  // quadrante e' um vetor, e o medidor reporta os 4 modulos. Somar os
-  // 4 da a magnitude total reativa.
-  const kvar_para_kVA = kvar_ind + kvar_cap;
+  // No kVA usa-se a magnitude da resultante (modulo), por Pitagoras.
+  const kvar_para_kVA = Math.abs(kvar_resultante);
 
   const kW_predominante = Math.max(kW_consumo, kW_injecao);
   const kVA = Math.sqrt(kW_predominante ** 2 + kvar_para_kVA ** 2);
