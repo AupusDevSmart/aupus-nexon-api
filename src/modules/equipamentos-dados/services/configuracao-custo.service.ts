@@ -16,7 +16,23 @@ export interface ConfiguracaoCustoData {
   te_d: number | null;
   tusd_b: number | null;
   te_b: number | null;
+  // Horarios dos postos tarifarios — read-only, vem da concessionaria
+  // ligada a unidade do equipamento. Defaults conservadores se nao houver
+  // unidade/concessionaria. Edicao acontece no cadastro de concessionarias.
+  horarios: {
+    hora_inicio_ponta: number;
+    hora_fim_ponta: number;
+    hora_inicio_reservado_decimal: number;
+    hora_fim_reservado: number;
+  };
 }
+
+const HORARIOS_DEFAULT = {
+  hora_inicio_ponta: 18,
+  hora_fim_ponta: 21,
+  hora_inicio_reservado_decimal: 21.5,
+  hora_fim_reservado: 6,
+};
 
 @Injectable()
 export class ConfiguracaoCustoService {
@@ -27,9 +43,12 @@ export class ConfiguracaoCustoService {
    * Retorna defaults (tributos zerados, sem tarifa custom) se nao existir.
    */
   async buscarOuDefault(equipamentoId: string): Promise<ConfiguracaoCustoData> {
-    const config = await this.prisma.configuracoes_custo_equipamento.findUnique({
-      where: { equipamento_id: equipamentoId },
-    });
+    const [config, horarios] = await Promise.all([
+      this.prisma.configuracoes_custo_equipamento.findUnique({
+        where: { equipamento_id: equipamentoId },
+      }),
+      this.buscarHorariosConcessionaria(equipamentoId),
+    ]);
 
     if (!config) {
       return {
@@ -46,6 +65,7 @@ export class ConfiguracaoCustoService {
         te_d: null,
         tusd_b: null,
         te_b: null,
+        horarios,
       };
     }
 
@@ -63,6 +83,34 @@ export class ConfiguracaoCustoService {
       te_d: this.toNumberOrNull(config.te_d),
       tusd_b: this.toNumberOrNull(config.tusd_b),
       te_b: this.toNumberOrNull(config.te_b),
+      horarios,
+    };
+  }
+
+  /**
+   * Busca horarios dos postos via equipamento -> unidade -> concessionaria.
+   * Retorna defaults se nao houver concessionaria vinculada.
+   */
+  private async buscarHorariosConcessionaria(
+    equipamentoId: string,
+  ): Promise<ConfiguracaoCustoData['horarios']> {
+    const equipamento = await this.prisma.equipamentos.findUnique({
+      where: { id: equipamentoId },
+      select: {
+        unidade: { select: { concessionaria: true } },
+      },
+    });
+    const conc = equipamento?.unidade?.concessionaria as any;
+    if (!conc) return HORARIOS_DEFAULT;
+    return {
+      hora_inicio_ponta: Number(conc.hora_inicio_ponta ?? HORARIOS_DEFAULT.hora_inicio_ponta),
+      hora_fim_ponta: Number(conc.hora_fim_ponta ?? HORARIOS_DEFAULT.hora_fim_ponta),
+      hora_inicio_reservado_decimal: Number(
+        conc.hora_inicio_reservado_decimal ?? HORARIOS_DEFAULT.hora_inicio_reservado_decimal,
+      ),
+      hora_fim_reservado: Number(
+        conc.hora_fim_reservado ?? HORARIOS_DEFAULT.hora_fim_reservado,
+      ),
     };
   }
 

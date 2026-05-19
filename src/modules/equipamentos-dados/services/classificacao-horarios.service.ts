@@ -43,7 +43,12 @@ export class ClassificacaoHorariosService {
     timestamp: Date,
     unidade: DadosUnidade,
     tarifas: TarifasConcessionaria,
+    horariosOverride?: Partial<ConfiguracaoHorarios>,
   ): ClassificacaoHorario {
+    // Mescla defaults com override (vindo da concessionaria do equipamento).
+    // Mantem percentual_desconto_irrigante sempre dos defaults (nao vem do DB).
+    const config: ConfiguracaoHorarios = { ...this.config, ...(horariosOverride ?? {}) };
+
     // O banco armazena timestamps em BRT sem timezone (Prisma lê como UTC)
     // Usar os componentes UTC diretamente pois já representam horário de Brasília
     const hora = timestamp.getUTCHours();
@@ -60,8 +65,8 @@ export class ClassificacaoHorariosService {
       return this.criarClassificacaoIrrigante(unidade, tarifas);
     }
 
-    // ✅ PRIORIDADE 2: Horário Reservado noturno (21:30-06:00)
-    const isHorarioReservado = this.isHorarioReservado(horaDecimal);
+    // ✅ PRIORIDADE 2: Horário Reservado noturno (21:30-06:00 por default)
+    const isHorarioReservado = this.isHorarioReservado(horaDecimal, config);
     if (isHorarioReservado) {
       if (unidade.irrigante) {
         // HR com desconto irrigante
@@ -72,23 +77,24 @@ export class ClassificacaoHorariosService {
       }
     }
 
-    // ✅ PRIORIDADE 3: Ponta (18:00-21:00) - TODOS OS DIAS
-    if (hora >= this.config.hora_inicio_ponta && hora < this.config.hora_fim_ponta) {
+    // ✅ PRIORIDADE 3: Ponta (18:00-21:00 por default) - TODOS OS DIAS
+    if (hora >= config.hora_inicio_ponta && hora < config.hora_fim_ponta) {
       return this.criarClassificacaoPonta(unidade, tarifas);
     }
 
-    // ✅ PRIORIDADE 4: Fora Ponta (06:00-18:00 + 21:00-21:30)
+    // ✅ PRIORIDADE 4: Fora Ponta (resto do dia)
     return this.criarClassificacaoForaPonta(unidade, tarifas);
   }
 
   /**
-   * Verifica se hora está no Horário Reservado (21:30 - 06:00)
+   * Verifica se hora está no Horário Reservado (default 21:30 - 06:00).
+   * Recebe config pra suportar horarios customizados por concessionaria.
    */
-  private isHorarioReservado(horaDecimal: number): boolean {
-    // Período atravessa meia-noite: 21:30 até 06:00
+  private isHorarioReservado(horaDecimal: number, config: ConfiguracaoHorarios): boolean {
+    // Período atravessa meia-noite: hora_inicio até hora_fim (do dia seguinte)
     return (
-      horaDecimal >= this.config.hora_inicio_irrigante_decimal || // >= 21:30
-      horaDecimal < this.config.hora_fim_irrigante // < 06:00
+      horaDecimal >= config.hora_inicio_irrigante_decimal ||
+      horaDecimal < config.hora_fim_irrigante
     );
   }
 

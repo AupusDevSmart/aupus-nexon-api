@@ -51,8 +51,9 @@ export class CalculoCustosService {
     console.log(`   Periodo: ${dataInicio.toLocaleString('pt-BR')} ate ${dataFim.toLocaleString('pt-BR')}`);
     console.log(`   Tipo: ${periodo || 'custom'}`);
 
-    // 1. Buscar dados da unidade e tarifas da concessionaria
-    const { unidade, tarifas: tarifasConcessionaria } = await this.buscarDadosUnidadeETarifas(equipamentoId);
+    // 1. Buscar dados da unidade e tarifas da concessionaria + horarios dos postos
+    const { unidade, tarifas: tarifasConcessionaria, horarios } =
+      await this.buscarDadosUnidadeETarifas(equipamentoId);
     console.log(`   Unidade: ${unidade.nome} (Grupo ${unidade.grupo}, Irrigante: ${unidade.irrigante ? 'SIM' : 'NAO'})`);
 
     // 2. Buscar configuracao de custo (tributos + tarifa personalizada)
@@ -80,8 +81,8 @@ export class CalculoCustosService {
     const leituras = await this.buscarLeiturasPeriodo(equipamentoId, dataInicio, dataFim);
     console.log(`   Leituras encontradas: ${leituras.length}`);
 
-    // 5. Agregar energia por tipo de horario
-    const agregacao = this.agregarEnergiaPorTipo(leituras, unidade, tarifas);
+    // 5. Agregar energia por tipo de horario (horarios vem da concessionaria)
+    const agregacao = this.agregarEnergiaPorTipo(leituras, unidade, tarifas, horarios);
     console.log(`   Energia total: ${agregacao.energia_total_kwh.toFixed(3)} kWh`);
 
     // 6. Decidir se inclui demanda no custo
@@ -153,7 +154,11 @@ export class CalculoCustosService {
    */
   private async buscarDadosUnidadeETarifas(
     equipamentoId: string,
-  ): Promise<{ unidade: DadosUnidade; tarifas: TarifasConcessionaria }> {
+  ): Promise<{
+    unidade: DadosUnidade;
+    tarifas: TarifasConcessionaria;
+    horarios: Partial<import('../interfaces/calculo-custos.interface').ConfiguracaoHorarios>;
+  }> {
     // Buscar equipamento com unidade e concessionária
     const equipamento = await this.prisma.equipamentos.findUnique({
       where: { id: equipamentoId },
@@ -193,7 +198,18 @@ export class CalculoCustosService {
     // Montar tarifas com base no grupo e subgrupo
     const tarifas: TarifasConcessionaria = this.montarTarifas(unidade, concessionariaDb);
 
-    return { unidade, tarifas };
+    // Horarios dos postos tarifarios — vem da concessionaria (com defaults via schema).
+    // Mapeia hora_inicio_reservado_decimal -> hora_inicio_irrigante_decimal (mesma janela
+    // do reservado se aplica tambem ao desconto irrigante).
+    const concAny = concessionariaDb as any;
+    const horarios = {
+      hora_inicio_ponta: Number(concAny.hora_inicio_ponta ?? 18),
+      hora_fim_ponta: Number(concAny.hora_fim_ponta ?? 21),
+      hora_inicio_irrigante_decimal: Number(concAny.hora_inicio_reservado_decimal ?? 21.5),
+      hora_fim_irrigante: Number(concAny.hora_fim_reservado ?? 6),
+    };
+
+    return { unidade, tarifas, horarios };
   }
 
   /**
@@ -365,6 +381,7 @@ export class CalculoCustosService {
     leituras: LeituraMQTT[],
     unidade: DadosUnidade,
     tarifas: TarifasConcessionaria,
+    horarios: Partial<import('../interfaces/calculo-custos.interface').ConfiguracaoHorarios>,
   ): AgregacaoEnergia {
     const agregacao: AgregacaoEnergia = {
       energia_ponta_kwh: 0,
@@ -385,11 +402,13 @@ export class CalculoCustosService {
         continue;
       }
 
-      // Classificar horário
+      // Classificar horário (horarios vem da concessionaria; fallback nos defaults
+      // do ClassificacaoHorariosService se algum campo estiver null/undefined).
       const classificacao = this.classificacaoService.classificar(
         leitura.timestamp,
         unidade,
         tarifas,
+        horarios,
       );
 
       // Agregar energia por tipo
