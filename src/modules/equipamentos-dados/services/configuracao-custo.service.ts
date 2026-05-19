@@ -22,7 +22,7 @@ export interface ConfiguracaoCustoData {
   horarios: {
     hora_inicio_ponta: number;
     hora_fim_ponta: number;
-    hora_inicio_reservado_decimal: number;
+    hora_inicio_reservado: number;
     hora_fim_reservado: number;
   };
 }
@@ -30,7 +30,7 @@ export interface ConfiguracaoCustoData {
 const HORARIOS_DEFAULT = {
   hora_inicio_ponta: 18,
   hora_fim_ponta: 21,
-  hora_inicio_reservado_decimal: 21.5,
+  hora_inicio_reservado: 21.5,
   hora_fim_reservado: 6,
 };
 
@@ -105,8 +105,8 @@ export class ConfiguracaoCustoService {
     return {
       hora_inicio_ponta: Number(conc.hora_inicio_ponta ?? HORARIOS_DEFAULT.hora_inicio_ponta),
       hora_fim_ponta: Number(conc.hora_fim_ponta ?? HORARIOS_DEFAULT.hora_fim_ponta),
-      hora_inicio_reservado_decimal: Number(
-        conc.hora_inicio_reservado_decimal ?? HORARIOS_DEFAULT.hora_inicio_reservado_decimal,
+      hora_inicio_reservado: Number(
+        conc.hora_inicio_reservado ?? HORARIOS_DEFAULT.hora_inicio_reservado,
       ),
       hora_fim_reservado: Number(
         conc.hora_fim_reservado ?? HORARIOS_DEFAULT.hora_fim_reservado,

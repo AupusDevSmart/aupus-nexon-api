@@ -205,7 +205,9 @@ export class CalculoCustosService {
     const horarios = {
       hora_inicio_ponta: Number(concAny.hora_inicio_ponta ?? 18),
       hora_fim_ponta: Number(concAny.hora_fim_ponta ?? 21),
-      hora_inicio_irrigante_decimal: Number(concAny.hora_inicio_reservado_decimal ?? 21.5),
+      // ConfiguracaoHorarios usa nomes legados *_irrigante_*; mapeia do banco
+      // que agora chama *_reservado (semantica unificada).
+      hora_inicio_irrigante_decimal: Number(concAny.hora_inicio_reservado ?? 21.5),
       hora_fim_irrigante: Number(concAny.hora_fim_reservado ?? 6),
     };
 
