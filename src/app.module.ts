@@ -44,6 +44,7 @@ import {
   CategoriasEquipamentosModule,
   ConcessionariasModule,
 } from '@aupus/api-shared';
+import { IotCatalogModule } from './modules/iot-catalog/iot-catalog.module';
 
 @Module({
   imports: [
@@ -76,6 +77,7 @@ import {
     ConcessionariasModule,
 
     // NexOn-only
+    IotCatalogModule,
     DiagramasModule,
     EquipamentosDadosModule,
     ConfiguracaoDemandaModule,
