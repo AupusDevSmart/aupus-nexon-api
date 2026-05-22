@@ -305,26 +305,35 @@ export class CoaService {
           AND e.deleted_at IS NULL
       ),
       EnergiaM160 AS (
-        -- ✅ M160: energia do dia via delta-phf (cumulativo do medidor).
+        -- ✅ M160: energia do dia via delta-phf cumulativo do medidor.
         -- Ver docs/tickets/powermeter-delta-phf.md.
-        -- Antes somava consumo_phf <= 5; firmware ocasionalmente envia
-        -- consumo_phf ≈ phf cumulativo (10k+ kWh em 30s), e o cap de 5
-        -- ainda inclui leituras gemeas + compensacao extra de gap, divergindo
-        -- do medidor real. Agora soma phf[i] - phf[i-1] por equipamento, igual
-        -- ao algoritmo do endpoint /custos-energia. Reset (delta < 0) eh ignorado.
+        --
+        -- Algoritmo: phf[i] - MAX(phf[anteriores]) por equipamento.
+        -- - Glitch isolado de phf (firmware envia snapshot velho, ex: 10557
+        --   → 175 → 10557) é descartado porque quando phf "volta", MAX já
+        --   contém 10557 e o delta dá zero.
+        -- - LAG() puro teria contado +10382 falsos quando phf voltasse ao
+        --   normal — bug descoberto em 22/05 com CHINT.
+        -- - Trade-off: reset real de medidor (raro) tambem eh descartado.
         SELECT
           unidade_id,
-          SUM(GREATEST(delta_phf, 0)) AS energia_dia_kwh
-        FROM (
-          SELECT
-            unidade_id,
-            CAST(dados->>'phf' AS NUMERIC) - LAG(CAST(dados->>'phf' AS NUMERIC))
-              OVER (PARTITION BY equipamento_id ORDER BY timestamp_dados ASC) AS delta_phf
-          FROM DadosDia
-          WHERE (tipo_equipamento ILIKE '%M-160%' OR tipo_equipamento ILIKE '%M160%')
-            AND dados->>'phf' IS NOT NULL
-        ) AS deltas
-        WHERE delta_phf IS NOT NULL
+          SUM(
+            GREATEST(
+              COALESCE(
+                CAST(dados->>'phf' AS NUMERIC) - MAX(CAST(dados->>'phf' AS NUMERIC))
+                  OVER (
+                    PARTITION BY equipamento_id
+                    ORDER BY timestamp_dados ASC
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                  ),
+                0
+              ),
+              0
+            )
+          ) AS energia_dia_kwh
+        FROM DadosDia
+        WHERE (tipo_equipamento ILIKE '%M-160%' OR tipo_equipamento ILIKE '%M160%')
+          AND dados->>'phf' IS NOT NULL
         GROUP BY unidade_id
       ),
       EnergiaInversores AS (

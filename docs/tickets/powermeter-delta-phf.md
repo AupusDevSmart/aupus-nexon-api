@@ -118,3 +118,83 @@ Rodar contra fixtures sintéticos. Resultados esperados:
   Backup → preview-rollback → COMMIT em outro ticket.
 - **Fix do firmware**: a regressão do snapshot delta em NVM. Ticket de firmware
   separado.
+
+## Hotfix 22/05: glitch isolado de phf
+
+A primeira versão do delta-phf não cobria o **padrão real** observado em prod no
+CHINT. Após deploy do PR, o modal passou a mostrar ~91.841 kWh (5× pior que os
+16k iniciais).
+
+### Diferença entre o cenário testado e o real
+
+**Spec original cobria** (caso `4. reset do medidor`):
+```
+phf:  9998 → 9999.5 → 0.5 → 1.0
+```
+Sequência monotonicamente crescente *dentro de cada segmento*. Reset
+único, segmento novo cresce normalmente.
+
+**Padrão real do CHINT** (não estava na spec):
+```
+phf: 10557 → 10557 → 175 → 10557 → 10557
+                     ↑ glitch isolado, firmware enviou snapshot velho
+```
+Uma única leitura "abaixo" entre duas normais. Algoritmo anterior:
+- Linha 175: `delta = -10382` → ignorava E **atualizava `phfPrev = 175`**.
+- Linha 10557 (volta): `delta = +10382` → contava como consumo legítimo.
+- Cada glitch somava ~10.000 kWh falsos. 10 glitches no período = +90k.
+
+### Correção aplicada
+
+Algoritmo TypeScript em `buscarLeiturasPeriodo` (calculo-custos.service.ts):
+
+```ts
+// ANTES (errado pro CHINT)
+if (delta < 0) resetCount++;
+phfPrev = phf;  // ← glitch virava nova baseline
+
+// DEPOIS
+if (delta > 0) {
+  energia_kwh = delta;
+  phfPrev = phf;          // só avança baseline quando phf cresce
+} else if (delta < 0) {
+  glitchCount++;
+  // NÃO atualiza phfPrev — descarta glitch isolado
+}
+```
+
+SQL (`coa.service.ts` + 2 gráficos em `equipamentos-dados.service.ts`): usa
+`MAX(phf) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)` em vez de
+`LAG(phf)`. Quando `phf` volta de um glitch, `MAX` já contém o último valor
+saudável → delta = 0 → não soma falso positivo.
+
+```sql
+GREATEST(
+  COALESCE(
+    phf - MAX(phf) OVER (
+      PARTITION BY equipamento_id
+      ORDER BY timestamp_dados ASC
+      ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+    ),
+    0
+  ),
+  0
+)
+```
+
+### Trade-off conhecido
+
+**Reset real de medidor** (eletromecânico zerado em manutenção — evento anual ou
+menos) também é descartado pelo novo algoritmo, pois é indistinguível de glitch
+sem heurística adicional. Se ocorrer em prod, próxima evolução: detectar N+
+leituras consecutivas estáveis em valor baixo = reset real, reiniciar
+`phfPrev`.
+
+### Cobertura de teste pós-hotfix
+
+`calculo-custos.delta-phf.spec.ts` agora cobre:
+- `4. phf cai e nao volta` — caso reset real (descartado, comportamento documentado).
+- `4b. PADRAO REAL CHINT` — `10557 → 10557 → 175 → 10557 → 10557`. Total esperado: 0.
+- `4c. PADRAO REAL CHINT estendido` — 2 glitches em sequência com consumo real entre.
+
+11/11 testes verdes após hotfix.

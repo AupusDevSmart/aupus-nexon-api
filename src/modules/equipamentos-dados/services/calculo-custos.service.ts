@@ -368,21 +368,47 @@ export class CalculoCustosService {
 
     const leituras: LeituraMQTT[] = [];
     let phfPrev: number | null = null;
-    let resetCount = 0;
+    let glitchCount = 0;
 
     for (const d of dados) {
       const dadosJson = d.dados as any;
       const phf = this.extrairPhf(dadosJson);
 
       let energia_kwh = 0;
-      if (phf !== null && phfPrev !== null) {
-        const delta = phf - phfPrev;
-        if (delta > 0) {
-          energia_kwh = delta;
-        } else if (delta < 0) {
-          // Reset do medidor (phf zerou ou voltou). Zero a contribuição desta
-          // leitura e reinicia a serie a partir daqui.
-          resetCount++;
+
+      if (phf !== null) {
+        if (phfPrev === null) {
+          // Primeira leitura do periodo: define baseline, nao conta energia.
+          phfPrev = phf;
+        } else {
+          const delta = phf - phfPrev;
+          if (delta > 0) {
+            // Caso normal: phf cresceu, conta o delta.
+            energia_kwh = delta;
+            phfPrev = phf;
+          } else if (delta < 0) {
+            // Glitch: phf caiu. Padrao real do CHINT — leitura solitaria com
+            // phf corrompido (firmware enviando snapshot velho de NVM) entre
+            // duas leituras normais. Ex: 10557 → 175 → 10557 → 10557.
+            //
+            // Algoritmo anterior atualizava phfPrev=175 na queda, e tratava a
+            // proxima leitura (10557) como consumo legitimo de +10381, causando
+            // soma falsa de +90k kWh nas 10 leituras outlier do CHINT.
+            //
+            // Correcao: NAO atualiza phfPrev. Mantém o ultimo valor "saudavel"
+            // ate uma proxima leitura voltar a crescer a partir dele.
+            //
+            // Trade-off conhecido: RESET REAL de medidor (eletromecanico zerado
+            // em manutencao — evento anual ou menos) tambem seria descartado.
+            // Se ocorrer, adicionar heuristica de detecao (ex: N+ leituras
+            // consecutivas estaveis em valor baixo = reset real, reiniciar
+            // phfPrev). Por ora, descartar todo decremento eh o melhor
+            // compromisso porque cobre o caso real em prod.
+            glitchCount++;
+          } else {
+            // delta == 0: phf estavel (medidor parado ou janela curta), nada
+            // a contar. phfPrev ja igual a phf — sem atualizacao necessaria.
+          }
         }
       }
 
@@ -399,15 +425,12 @@ export class CalculoCustosService {
         energia_kwh,
         potencia_kw,
       });
-
-      // Atualiza estado pra próxima iteração (incluindo após reset).
-      if (phf !== null) phfPrev = phf;
     }
 
-    if (resetCount > 0) {
+    if (glitchCount > 0) {
       console.log(
-        `   ↺ ${resetCount} reset(s) de medidor detectado(s) em ${equipamentoId}; ` +
-        `segmento(s) somado(s) separadamente.`,
+        `   ⚠️ ${glitchCount} glitch(es) de phf descartado(s) em ${equipamentoId} ` +
+        `(leituras com phf abaixo do anterior — provavelmente snapshot velho do firmware).`,
       );
     }
 

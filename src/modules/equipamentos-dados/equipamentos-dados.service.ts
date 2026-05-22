@@ -392,8 +392,21 @@ export class EquipamentosDadosService {
           SELECT
             timestamp_dados,
             dados,
-            CAST(dados->>'phf' AS NUMERIC) - LAG(CAST(dados->>'phf' AS NUMERIC))
-              OVER (ORDER BY timestamp_dados ASC) AS delta_phf
+            -- delta-phf vs MAX(phf) das leituras anteriores. Glitch isolado
+            -- (10557 → 175 → 10557) eh descartado: quando phf volta, MAX
+            -- ja contém 10557 e o delta dá 0. LAG() puro contaria +10382 falsos.
+            -- Ver docs/tickets/powermeter-delta-phf.md.
+            GREATEST(
+              COALESCE(
+                CAST(dados->>'phf' AS NUMERIC) - MAX(CAST(dados->>'phf' AS NUMERIC))
+                  OVER (
+                    ORDER BY timestamp_dados ASC
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                  ),
+                0
+              ),
+              0
+            ) AS delta_phf
           FROM equipamentos_dados
           WHERE equipamento_id = ${equipamentoId}
             AND timestamp_dados >= ${dataInicio}
@@ -1110,7 +1123,11 @@ export class EquipamentosDadosService {
         TO_CHAR(timestamp_dados, 'TMMonth') as mes_nome,
         SUM(
           COALESCE(
-            CASE WHEN delta_phf IS NOT NULL AND delta_phf > 0 THEN delta_phf END,
+            -- Se a leitura tem phf (medidor tipo M-160), confia no delta-phf
+            -- (ja >= 0 graças ao GREATEST). Inclui zero — medidor parado nao
+            -- deve cair pra fallback de coluna energia_kwh com valor legado.
+            CASE WHEN dados->>'phf' IS NOT NULL THEN delta_phf END,
+            -- Senao: inversor PV (energy.period_energy_kwh) ou generico (coluna).
             (dados->'energy'->>'period_energy_kwh')::numeric,
             (dados->>'energia_kwh')::numeric
           )

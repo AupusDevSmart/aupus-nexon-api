@@ -135,11 +135,15 @@ describe('CalculoCustosService — delta-phf', () => {
       expect(leituras[2].energia_kwh).toBeCloseTo(4.7, 5);
     });
 
-    it('4. reset do medidor (phf cai): soma por segmento, descarta queda', async () => {
+    it('4. phf cai e nao volta (raro reset real): descarta queda e tudo apos', async () => {
+      // Comportamento documentado: phfPrev mantem o ultimo valor saudavel.
+      // Se phf cai e fica baixo, todas as leituras subsequentes sao descartadas
+      // ate phf voltar >= phfPrev. Reset real de medidor (raro) cai aqui.
+      // Trade-off conhecido — ver calculo-custos.service.ts buscarLeiturasPeriodo.
       prisma.equipamentos_dados.findMany.mockResolvedValue([
         leitura('2026-05-01T00:00:00Z', 9998),
         leitura('2026-05-01T00:00:30Z', 9999.5),
-        // Reset — medidor volta pra zero/quase zero
+        // "Reset" — phf cai e nao volta (cenario raro/improvavel)
         leitura('2026-05-01T00:01:00Z', 0.5),
         leitura('2026-05-01T00:01:30Z', 1.0),
       ]);
@@ -151,11 +155,67 @@ describe('CalculoCustosService — delta-phf', () => {
       );
 
       const total = leituras.reduce((s: number, l: any) => s + l.energia_kwh, 0);
-      // Segmento 1: 9998 -> 9999.5 = 1.5
-      // Reset (descartado): 9999.5 -> 0.5 = -9999, ignorado
-      // Segmento 2: 0.5 -> 1.0 = 0.5
-      // Total = 1.5 + 0.5 = 2.0
-      expect(total).toBeCloseTo(2.0, 5);
+      // Segmento normal: 9998 -> 9999.5 = 1.5
+      // 0.5 cai abaixo de 9999.5 → glitch descartado, phfPrev mantem 9999.5
+      // 1.0 cai abaixo de 9999.5 → glitch descartado
+      // Total = 1.5 (descarta o reset real porque eh indistinguivel de glitch
+      // sem heuristica adicional — TODO no codigo).
+      expect(total).toBeCloseTo(1.5, 5);
+    });
+
+    it('4b. PADRAO REAL CHINT: glitch isolado de phf entre leituras normais', async () => {
+      // Cenario observado em prod (05/05/2026 ~23:54-23:59):
+      //   23:54  phf=10557.6  (normal)
+      //   23:55  phf=10557.6  (normal)
+      //   23:56  phf=  175.96 (glitch — firmware snapshot velho)
+      //   23:57  phf=10557.6  (voltou ao normal)
+      //   23:58  phf=10557.6  (normal)
+      // Energia real consumida nesse intervalo: ZERO (phf estavel).
+      // Bug do algoritmo anterior: 23:56 (delta -10381) virava phfPrev=175,
+      // e 23:57 (delta +10381) era contado como consumo, somando +10381 falsos.
+      prisma.equipamentos_dados.findMany.mockResolvedValue([
+        leitura('2026-05-05T23:54:00Z', 10557.6),
+        leitura('2026-05-05T23:55:00Z', 10557.6),
+        leitura('2026-05-05T23:56:00Z', 175.96), // glitch isolado
+        leitura('2026-05-05T23:57:00Z', 10557.6), // volta ao normal
+        leitura('2026-05-05T23:58:00Z', 10557.6),
+      ]);
+
+      const leituras = await (service as any).buscarLeiturasPeriodo(
+        'eq1',
+        new Date('2026-05-05T23:00:00Z'),
+        new Date('2026-05-06T00:00:00Z'),
+      );
+
+      const total = leituras.reduce((s: number, l: any) => s + l.energia_kwh, 0);
+      // Total deve ser 0 — phf esta estavel exceto pelo glitch que eh descartado.
+      // Se voltar a falhar com >10000, algoritmo regrediu pro bug original.
+      expect(total).toBeCloseTo(0, 5);
+    });
+
+    it('4c. PADRAO REAL CHINT estendido: 2 glitches isolados em sequencia', async () => {
+      // Cobertura defensiva: 2 glitches em janela curta nao devem somar nada.
+      prisma.equipamentos_dados.findMany.mockResolvedValue([
+        leitura('2026-05-05T00:00:00Z', 10000),
+        leitura('2026-05-05T00:00:30Z', 100), // glitch 1
+        leitura('2026-05-05T00:01:00Z', 10001), // volta
+        leitura('2026-05-05T00:01:30Z', 50), // glitch 2
+        leitura('2026-05-05T00:02:00Z', 10002), // volta + consumo real 1 kWh
+      ]);
+
+      const leituras = await (service as any).buscarLeiturasPeriodo(
+        'eq1',
+        new Date('2026-05-05T00:00:00Z'),
+        new Date('2026-05-05T01:00:00Z'),
+      );
+
+      const total = leituras.reduce((s: number, l: any) => s + l.energia_kwh, 0);
+      // 10000 -> 100 (glitch, descarta) phfPrev=10000
+      // 10000 -> 10001 (+1) phfPrev=10001
+      // 10001 -> 50 (glitch, descarta) phfPrev=10001
+      // 10001 -> 10002 (+1) phfPrev=10002
+      // Total = 2 kWh (consumo real entre os patamares de glitches)
+      expect(total).toBeCloseTo(2, 5);
     });
 
     it('5. phf=null em alguma leitura: pula sem quebrar', async () => {
