@@ -382,13 +382,28 @@ export class EquipamentosDadosService {
     console.log(`📊 [GRÁFICO MÊS]   Até: ${dataFim.toISOString()}`);
     console.log(`📊 [GRÁFICO MÊS] Tipo do equipamento: ${equipamento.tipo_equipamento_rel?.codigo}`);
 
-    // ✅ Usar apenas equipamentos_dados (tabela inversor_leituras foi removida)
+    // ✅ Energia diaria com 3 fontes (mesmo COALESCE, mas M-160 muda):
+    //   1. Para M-160: SUM(delta-phf positivo) — phf[i] - phf[i-1] por dia.
+    //      Ver docs/tickets/powermeter-delta-phf.md (substitui consumo_phf<=5).
+    //   2. Para inversor PV: energy.period_energy_kwh (cru, ja em kWh).
+    //   3. Fallback generico: coluna energia_kwh.
     const dados = await this.prisma.$queryRaw<Array<any>>`
+        WITH leituras AS (
+          SELECT
+            timestamp_dados,
+            dados,
+            CAST(dados->>'phf' AS NUMERIC) - LAG(CAST(dados->>'phf' AS NUMERIC))
+              OVER (ORDER BY timestamp_dados ASC) AS delta_phf
+          FROM equipamentos_dados
+          WHERE equipamento_id = ${equipamentoId}
+            AND timestamp_dados >= ${dataInicio}
+            AND timestamp_dados < ${dataFim}
+        )
         SELECT
           DATE(timestamp_dados) as data,
           SUM(
             COALESCE(
-              CASE WHEN (dados->>'consumo_phf')::numeric <= 5 THEN (dados->>'consumo_phf')::numeric END,
+              CASE WHEN delta_phf IS NOT NULL AND delta_phf > 0 THEN delta_phf END,
               (dados->'energy'->>'period_energy_kwh')::numeric,
               (dados->>'energia_kwh')::numeric
             )
@@ -400,15 +415,11 @@ export class EquipamentosDadosService {
               (dados->>'power_avg')::numeric
             )
           ) as potencia_media_kw
-        FROM equipamentos_dados
-        WHERE equipamento_id = ${equipamentoId}
-          AND timestamp_dados >= ${dataInicio}
-          AND timestamp_dados < ${dataFim}
-          AND (
-            dados->>'consumo_phf' IS NOT NULL
-            OR dados->'energy'->>'period_energy_kwh' IS NOT NULL
-            OR dados->>'energia_kwh' IS NOT NULL
-          )
+        FROM leituras
+        WHERE
+          dados->>'phf' IS NOT NULL
+          OR dados->'energy'->>'period_energy_kwh' IS NOT NULL
+          OR dados->>'energia_kwh' IS NOT NULL
         GROUP BY DATE(timestamp_dados)
         ORDER BY data ASC
       `;
@@ -1077,15 +1088,29 @@ export class EquipamentosDadosService {
     console.log(`📊 [GRÁFICO ANO]   Até: ${dataFim.toISOString()}`);
     console.log(`📊 [GRÁFICO ANO] Tipo do equipamento: ${equipamento.tipo_equipamento_rel?.codigo}`);
 
-    // ✅ Usar apenas equipamentos_dados (tabela inversor_leituras foi removida)
+    // ✅ Energia mensal com 3 fontes (mesma logica do grafico de mes):
+    //   1. M-160: SUM(delta-phf positivo) — ver docs/tickets/powermeter-delta-phf.md
+    //   2. Inversor PV: energy.period_energy_kwh
+    //   3. Fallback: coluna energia_kwh
     const dados = await this.prisma.$queryRaw<Array<any>>`
+      WITH leituras AS (
+        SELECT
+          timestamp_dados,
+          dados,
+          CAST(dados->>'phf' AS NUMERIC) - LAG(CAST(dados->>'phf' AS NUMERIC))
+            OVER (ORDER BY timestamp_dados ASC) AS delta_phf
+        FROM equipamentos_dados
+        WHERE equipamento_id = ${equipamentoId}
+          AND timestamp_dados >= ${dataInicio}
+          AND timestamp_dados < ${dataFim}
+      )
       SELECT
         DATE_TRUNC('month', timestamp_dados) as mes,
         TO_CHAR(timestamp_dados, 'YYYY-MM') as mes_formatado,
         TO_CHAR(timestamp_dados, 'TMMonth') as mes_nome,
         SUM(
           COALESCE(
-            CASE WHEN (dados->>'consumo_phf')::numeric <= 5 THEN (dados->>'consumo_phf')::numeric END,
+            CASE WHEN delta_phf IS NOT NULL AND delta_phf > 0 THEN delta_phf END,
             (dados->'energy'->>'period_energy_kwh')::numeric,
             (dados->>'energia_kwh')::numeric
           )
@@ -1097,15 +1122,11 @@ export class EquipamentosDadosService {
             (dados->>'power_avg')::numeric
           )
         ) as potencia_media_kw
-      FROM equipamentos_dados
-      WHERE equipamento_id = ${equipamentoId}
-        AND timestamp_dados >= ${dataInicio}
-        AND timestamp_dados < ${dataFim}
-        AND (
-          dados->>'consumo_phf' IS NOT NULL
-          OR dados->'energy'->>'period_energy_kwh' IS NOT NULL
-          OR dados->>'energia_kwh' IS NOT NULL
-        )
+      FROM leituras
+      WHERE
+        dados->>'phf' IS NOT NULL
+        OR dados->'energy'->>'period_energy_kwh' IS NOT NULL
+        OR dados->>'energia_kwh' IS NOT NULL
       GROUP BY DATE_TRUNC('month', timestamp_dados), TO_CHAR(timestamp_dados, 'YYYY-MM'), TO_CHAR(timestamp_dados, 'TMMonth')
       ORDER BY mes ASC
     `;

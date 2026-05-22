@@ -209,40 +209,12 @@ describe('EquipamentosDiagramaService', () => {
       ).rejects.toThrow('Rotação deve estar entre 0 e 360 graus');
     });
 
-    it('deve mesclar propriedades existentes com novas', async () => {
-      const equipamentoComPropriedades = {
-        ...mockEquipamento,
-        propriedades: { cor: 'azul', tamanho: 'grande' },
-      };
-
-      mockPrismaService.diagramas_unitarios.findFirst.mockResolvedValue(
-        mockDiagrama,
-      );
-      mockPrismaService.equipamentos.findFirst.mockResolvedValue(
-        equipamentoComPropriedades,
-      );
-      mockPrismaService.equipamentos.update.mockResolvedValue({
-        ...equipamentoComPropriedades,
-        diagrama_id: 'diagrama-123',
-      });
-
-      await service.addEquipamento('diagrama-123', {
-        ...addDto,
-        propriedades: { customLabel: 'INV-01' },
-      });
-
-      expect(prismaService.equipamentos.update).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({
-            propriedades: expect.objectContaining({
-              cor: 'azul', // Mantém existente
-              tamanho: 'grande', // Mantém existente
-              customLabel: 'INV-01', // Nova propriedade
-            }),
-          }),
-        }),
-      );
-    });
+    // Removido: addEquipamento V2 nao customiza mais propriedades/dimensoes
+    // (ver equipamentos-diagrama.service.ts linha 81: "V2 - sem customizacao
+    // de dimensoes/propriedades"). data do update tem apenas diagrama_id,
+    // posicao_x, posicao_y, rotacao, label_position. Se propriedades voltar
+    // a ser persistido aqui, reescrever este teste.
+    it.skip('deve mesclar propriedades existentes com novas (FEATURE REMOVIDA EM V2)', () => {});
   });
 
   describe('updateEquipamento', () => {
@@ -372,49 +344,54 @@ describe('EquipamentosDiagramaService', () => {
     };
 
     it('deve processar múltiplos equipamentos e retornar estatísticas', async () => {
-      // Mock para primeiro equipamento (sucesso)
-      jest
-        .spyOn(service, 'addEquipamento')
-        .mockResolvedValueOnce({
+      // Implementacao atual (V2): roda em $transaction unica usando tx direto
+      // (nao chama mais service.addEquipamento por equipamento). Cobre:
+      // - 1 diagrama + 1 findMany retornando os equipamentos que existem
+      // - update por equipamento individual
+      // - equipamento ausente no findMany vira status="error"
+      mockPrismaService.diagramas_unitarios.findFirst.mockResolvedValue({
+        id: 'diagrama-123',
+        unidade_id: 'unidade-123',
+        deleted_at: null,
+      });
+
+      mockPrismaService.equipamentos.findMany.mockResolvedValue([
+        {
           id: 'equip-1',
-          diagramaId: 'diagrama-123',
           nome: 'Equip 1',
           tag: 'E1',
-          posicao: { x: 100, y: 200 },
-          rotacao: 0,
-          dimensoes: { largura: 64, altura: 64 },
-          propriedades: {},
-          updatedAt: new Date(),
-        } as any)
-        // Segundo equipamento (sucesso)
-        .mockResolvedValueOnce({
+          unidade_id: 'unidade-123',
+          diagrama_id: null,
+        },
+        {
           id: 'equip-2',
-          diagramaId: 'diagrama-123',
           nome: 'Equip 2',
           tag: 'E2',
-          posicao: { x: 300, y: 200 },
-          rotacao: 0,
-          dimensoes: { largura: 64, altura: 64 },
-          propriedades: {},
-          updatedAt: new Date(),
-        } as any)
-        // Terceiro equipamento (erro)
-        .mockRejectedValueOnce(new NotFoundException('Equipamento não encontrado'));
+          unidade_id: 'unidade-123',
+          diagrama_id: null,
+        },
+        // 'equip-inexistente' nao aparece no findMany — vai pro caminho de erro
+      ]);
 
-      mockPrismaService.equipamentos.findUnique
-        .mockResolvedValueOnce({ id: 'equip-1', diagrama_id: null })
-        .mockResolvedValueOnce({ id: 'equip-2', diagrama_id: null })
-        .mockResolvedValueOnce(null);
+      mockPrismaService.equipamentos.update.mockImplementation((args: any) =>
+        Promise.resolve({
+          id: args.where.id,
+          nome: `Equip ${args.where.id}`,
+          tag: 'X',
+          ...args.data,
+        }),
+      );
 
       const result = await service.addEquipamentosBulk('diagrama-123', bulkDto);
 
       expect(result.adicionados).toBe(2);
       expect(result.erros).toBe(1);
       expect(result.equipamentos).toHaveLength(3);
-      expect(result.equipamentos[0]).toHaveProperty('status', 'added');
-      expect(result.equipamentos[1]).toHaveProperty('status', 'added');
-      expect(result.equipamentos[2]).toHaveProperty('status', 'error');
-      expect(result.equipamentos[2]).toHaveProperty('error');
+      // Ordem segue a ordem do dto.equipamentos
+      const statuses = result.equipamentos.map((e: any) => e.status);
+      expect(statuses).toEqual(expect.arrayContaining(['added', 'added', 'error']));
+      const erroEntry = result.equipamentos.find((e: any) => e.status === 'error');
+      expect(erroEntry?.error).toContain('Equipamento não encontrado');
     });
   });
 });

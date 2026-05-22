@@ -305,16 +305,26 @@ export class CoaService {
           AND e.deleted_at IS NULL
       ),
       EnergiaM160 AS (
-        -- ✅ M160: SOMAR consumo_phf do JSON (fonte de verdade do medidor)
-        -- consumo_phf = energia real medida nos últimos 30s
-        -- Filtra spikes >5 kWh/leitura (mesma regra de CalculoCustosService.MAX_CONSUMO_POR_LEITURA)
-        -- para alinhar com o "Energia Total" do modal de medidor.
+        -- ✅ M160: energia do dia via delta-phf (cumulativo do medidor).
+        -- Ver docs/tickets/powermeter-delta-phf.md.
+        -- Antes somava consumo_phf <= 5; firmware ocasionalmente envia
+        -- consumo_phf ≈ phf cumulativo (10k+ kWh em 30s), e o cap de 5
+        -- ainda inclui leituras gemeas + compensacao extra de gap, divergindo
+        -- do medidor real. Agora soma phf[i] - phf[i-1] por equipamento, igual
+        -- ao algoritmo do endpoint /custos-energia. Reset (delta < 0) eh ignorado.
         SELECT
           unidade_id,
-          SUM(COALESCE(CAST(dados->>'consumo_phf' AS NUMERIC), 0)) as energia_dia_kwh
-        FROM DadosDia
-        WHERE (tipo_equipamento ILIKE '%M-160%' OR tipo_equipamento ILIKE '%M160%')
-          AND COALESCE(CAST(dados->>'consumo_phf' AS NUMERIC), 0) <= 5
+          SUM(GREATEST(delta_phf, 0)) AS energia_dia_kwh
+        FROM (
+          SELECT
+            unidade_id,
+            CAST(dados->>'phf' AS NUMERIC) - LAG(CAST(dados->>'phf' AS NUMERIC))
+              OVER (PARTITION BY equipamento_id ORDER BY timestamp_dados ASC) AS delta_phf
+          FROM DadosDia
+          WHERE (tipo_equipamento ILIKE '%M-160%' OR tipo_equipamento ILIKE '%M160%')
+            AND dados->>'phf' IS NOT NULL
+        ) AS deltas
+        WHERE delta_phf IS NOT NULL
         GROUP BY unidade_id
       ),
       EnergiaInversores AS (
