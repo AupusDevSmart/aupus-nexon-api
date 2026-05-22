@@ -65,7 +65,11 @@ export class IotCatalogController {
   @Get('device-catalog.js')
   @Public()
   @Header('Content-Type', 'application/javascript; charset=utf-8')
-  @Header('Cache-Control', 'public, max-age=60, must-revalidate')
+  // no-cache: browser DEVE revalidar a cada navegacao (HEAD/304 via ETag).
+  // max-age=0 sozinho deixa o browser usar cache stale entre navegacoes da
+  // mesma aba; no-cache forca o revalidate. Round-trip e cheap (304 sem body)
+  // e garante que mudancas via UI admin propagam imediatamente sem F5 manual.
+  @Header('Cache-Control', 'no-cache, must-revalidate')
   @ApiOperation({
     summary: 'Catalogo IoT em formato JS legado (compat com firmware-generator)',
     description: 'Gera o equivalente do antigo /iot-device-catalog.v2.js a partir do DB.',

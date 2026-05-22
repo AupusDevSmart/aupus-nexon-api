@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   Logger,
@@ -6,6 +7,7 @@ import {
 } from '@nestjs/common';
 import * as crypto from 'crypto';
 import { PrismaService } from '@aupus/api-shared';
+import { formatMappingIssues, validateMapeamento } from './mapping-validation';
 import { CreateIotDeviceModeloDto } from './dto/create-iot-device-modelo.dto';
 import { CreateIotDeviceTipoDto } from './dto/create-iot-device-tipo.dto';
 import {
@@ -293,6 +295,17 @@ export class IotCatalogService {
       );
     }
 
+    // Valida shape do mapeamento (block/offset/dataType/etc.) antes de gravar.
+    // Erros aqui evitam firmware quebrado em runtime no ESP32.
+    if (dto.mapeamento) {
+      const issues = validateMapeamento(dto.mapeamento);
+      if (issues.length > 0) {
+        throw new BadRequestException(
+          `Mapeamento invalido: ${formatMappingIssues(issues)}`,
+        );
+      }
+    }
+
     const catalogId = dto.catalog_id ?? deriveCatalogId(dto.fabricante, dto.modelo);
     const mapeamento = {
       catalog_id: catalogId,
@@ -333,6 +346,16 @@ export class IotCatalogService {
       });
       if (conflict) {
         throw new ConflictException(`Modelo ${fab}/${mod} ja em uso por outro registro`);
+      }
+    }
+
+    // Valida shape do mapeamento se informado (mesma protecao do create).
+    if (dto.mapeamento) {
+      const issues = validateMapeamento(dto.mapeamento);
+      if (issues.length > 0) {
+        throw new BadRequestException(
+          `Mapeamento invalido: ${formatMappingIssues(issues)}`,
+        );
       }
     }
 
