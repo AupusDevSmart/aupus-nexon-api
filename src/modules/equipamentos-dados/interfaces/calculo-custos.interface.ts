@@ -45,9 +45,9 @@ export interface DadosUnidade {
 
 export interface LeituraMQTT {
   timestamp: Date;
+  /** Delta de phf no intervalo [leitura anterior → esta] em kWh. >= 0. */
   energia_kwh: number;
   potencia_kw: number;
-  _forcaForaPonta?: boolean; // Leitura virtual de compensação de gap - sempre Fora Ponta
 }
 
 export interface AgregacaoEnergia {

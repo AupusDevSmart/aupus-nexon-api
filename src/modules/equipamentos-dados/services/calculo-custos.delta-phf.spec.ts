@@ -1,0 +1,211 @@
+/**
+ * Testes do refactor delta-phf — ver docs/tickets/powermeter-delta-phf.md.
+ *
+ * Foco: validar que CalculoCustosService passa a confiar em phf cumulativo
+ * em vez de SUM(consumo_phf <= 5), cobrindo:
+ *   1. Periodo sem outliers/gaps → total = phf_final - phf_inicial
+ *   2. Outlier no meio (consumo_phf gigante, phf consistente) → ignora outlier
+ *   3. Gap de leituras → delta-phf cobre por natureza, sem dupla contagem
+ *   4. Reset de medidor (phf cai) → soma por segmento
+ */
+import { Test } from '@nestjs/testing';
+import { PrismaService } from '@aupus/api-shared';
+import { CalculoCustosService } from './calculo-custos.service';
+import { ClassificacaoHorariosService } from './classificacao-horarios.service';
+import { ConfiguracaoCustoService } from './configuracao-custo.service';
+import {
+  DadosUnidade,
+  TarifasConcessionaria,
+  TipoHorario,
+} from '../interfaces/calculo-custos.interface';
+
+function makePrismaMock(rows: Array<{ timestamp_dados: Date; dados: any; potencia_ativa_kw?: number | null }>) {
+  return {
+    equipamentos_dados: {
+      findMany: jest.fn().mockResolvedValue(rows),
+    },
+  };
+}
+
+function leitura(ts: string, phf: number | null, extras: Record<string, unknown> = {}) {
+  const dados: Record<string, unknown> = { ...extras };
+  if (phf !== null) dados.phf = phf;
+  return { timestamp_dados: new Date(ts), dados, potencia_ativa_kw: null };
+}
+
+describe('CalculoCustosService — delta-phf', () => {
+  let service: CalculoCustosService;
+  let prisma: any;
+
+  // ClassificacaoHorariosService eh chamado dentro de agregarEnergiaPorTipo;
+  // mockamos pra sempre retornar FORA_PONTA, simplificando asserts (total = soma das partes).
+  const classificacao = {
+    classificar: jest.fn().mockReturnValue({
+      tipo: TipoHorario.FORA_PONTA,
+      tarifa_tusd: 0,
+      tarifa_te: 0,
+      tarifa_total: 0,
+      desconto_irrigante: false,
+    }),
+  };
+
+  beforeEach(async () => {
+    prisma = makePrismaMock([]);
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        CalculoCustosService,
+        { provide: PrismaService, useValue: prisma },
+        { provide: ClassificacaoHorariosService, useValue: classificacao },
+        { provide: ConfiguracaoCustoService, useValue: {} },
+      ],
+    }).compile();
+    service = moduleRef.get(CalculoCustosService);
+  });
+
+  describe('buscarLeiturasPeriodo', () => {
+    it('1. periodo sem outliers/gaps: energia por leitura = phf[i] - phf[i-1]', async () => {
+      prisma.equipamentos_dados.findMany.mockResolvedValue([
+        leitura('2026-05-01T00:00:00Z', 100),
+        leitura('2026-05-01T00:00:30Z', 100.5),
+        leitura('2026-05-01T00:01:00Z', 101.2),
+        leitura('2026-05-01T00:01:30Z', 102.0),
+      ]);
+
+      const leituras = await (service as any).buscarLeiturasPeriodo(
+        'eq1',
+        new Date('2026-05-01T00:00:00Z'),
+        new Date('2026-05-01T01:00:00Z'),
+      );
+
+      expect(leituras).toHaveLength(4);
+      expect(leituras[0].energia_kwh).toBe(0); // primeira: sem antecessor
+      expect(leituras[1].energia_kwh).toBeCloseTo(0.5, 5);
+      expect(leituras[2].energia_kwh).toBeCloseTo(0.7, 5);
+      expect(leituras[3].energia_kwh).toBeCloseTo(0.8, 5);
+
+      const total = leituras.reduce((s: number, l: any) => s + l.energia_kwh, 0);
+      // == phf_final - phf_inicial
+      expect(total).toBeCloseTo(102.0 - 100, 5);
+    });
+
+    it('2. outlier no meio: consumo_phf gigante eh ignorado, phf manda', async () => {
+      prisma.equipamentos_dados.findMany.mockResolvedValue([
+        leitura('2026-05-01T00:00:00Z', 165, { consumo_phf: 0.4 }),
+        leitura('2026-05-01T00:00:30Z', 165.5, { consumo_phf: 0.5 }),
+        // Bug do firmware: consumo_phf gigante, mas phf cresceu so 0.7
+        leitura('2026-05-01T00:01:00Z', 166.2, { consumo_phf: 10381.6 }),
+        leitura('2026-05-01T00:01:30Z', 167.0, { consumo_phf: 0.8 }),
+      ]);
+
+      const leituras = await (service as any).buscarLeiturasPeriodo(
+        'eq1',
+        new Date('2026-05-01T00:00:00Z'),
+        new Date('2026-05-01T01:00:00Z'),
+      );
+
+      const total = leituras.reduce((s: number, l: any) => s + l.energia_kwh, 0);
+      // Soma e' 167 - 165 = 2.0 kWh — NAO os 10384.8 que consumo_phf somaria.
+      expect(total).toBeCloseTo(2.0, 5);
+    });
+
+    it('3. gap > 10 min entre leituras: delta cobre, sem dupla contagem', async () => {
+      // Cenario: 2 leituras antes do gap, depois 1h sem dados, depois 2 leituras.
+      // phf cresce continuamente — total final deve ser phf_final - phf_inicial,
+      // independente do tamanho do gap.
+      prisma.equipamentos_dados.findMany.mockResolvedValue([
+        leitura('2026-05-01T00:00:00Z', 100),
+        leitura('2026-05-01T00:00:30Z', 100.5),
+        // gap de 1h
+        leitura('2026-05-01T01:00:30Z', 105.2),
+        leitura('2026-05-01T01:01:00Z', 105.7),
+      ]);
+
+      const leituras = await (service as any).buscarLeiturasPeriodo(
+        'eq1',
+        new Date('2026-05-01T00:00:00Z'),
+        new Date('2026-05-01T02:00:00Z'),
+      );
+
+      expect(leituras).toHaveLength(4);
+      const total = leituras.reduce((s: number, l: any) => s + l.energia_kwh, 0);
+      expect(total).toBeCloseTo(105.7 - 100, 5);
+      // O delta do gap (4.7 kWh) vai pra leitura DEPOIS do gap (timestamp em 01:00:30),
+      // que eh exatamente o comportamento desejado: nao cria leitura virtual nova.
+      expect(leituras[2].energia_kwh).toBeCloseTo(4.7, 5);
+    });
+
+    it('4. reset do medidor (phf cai): soma por segmento, descarta queda', async () => {
+      prisma.equipamentos_dados.findMany.mockResolvedValue([
+        leitura('2026-05-01T00:00:00Z', 9998),
+        leitura('2026-05-01T00:00:30Z', 9999.5),
+        // Reset — medidor volta pra zero/quase zero
+        leitura('2026-05-01T00:01:00Z', 0.5),
+        leitura('2026-05-01T00:01:30Z', 1.0),
+      ]);
+
+      const leituras = await (service as any).buscarLeiturasPeriodo(
+        'eq1',
+        new Date('2026-05-01T00:00:00Z'),
+        new Date('2026-05-01T01:00:00Z'),
+      );
+
+      const total = leituras.reduce((s: number, l: any) => s + l.energia_kwh, 0);
+      // Segmento 1: 9998 -> 9999.5 = 1.5
+      // Reset (descartado): 9999.5 -> 0.5 = -9999, ignorado
+      // Segmento 2: 0.5 -> 1.0 = 0.5
+      // Total = 1.5 + 0.5 = 2.0
+      expect(total).toBeCloseTo(2.0, 5);
+    });
+
+    it('5. phf=null em alguma leitura: pula sem quebrar', async () => {
+      prisma.equipamentos_dados.findMany.mockResolvedValue([
+        leitura('2026-05-01T00:00:00Z', 100),
+        leitura('2026-05-01T00:00:30Z', null, { Pt: 50 }), // sem phf
+        leitura('2026-05-01T00:01:00Z', 101.5),
+      ]);
+
+      const leituras = await (service as any).buscarLeiturasPeriodo(
+        'eq1',
+        new Date('2026-05-01T00:00:00Z'),
+        new Date('2026-05-01T01:00:00Z'),
+      );
+
+      // Total = (100 → 101.5) = 1.5, mesmo com leitura sem phf no meio
+      const total = leituras.reduce((s: number, l: any) => s + l.energia_kwh, 0);
+      expect(total).toBeCloseTo(1.5, 5);
+    });
+  });
+
+  describe('agregarEnergiaPorTipo', () => {
+    const unidade: DadosUnidade = {
+      id: 'u1',
+      nome: 'Teste',
+      grupo: 'A',
+      subgrupo: 'A4',
+      irrigante: false,
+      concessionaria_id: 'c1',
+    };
+    const tarifas: TarifasConcessionaria = { tusd_p: 0, te_p: 0, tusd_fp: 0, te_fp: 0 };
+
+    it('6. ignora leituras com energia_kwh=0 (primeira leitura, reset)', () => {
+      const leituras = [
+        { timestamp: new Date('2026-05-01T00:00:00Z'), energia_kwh: 0, potencia_kw: 0 },
+        { timestamp: new Date('2026-05-01T00:00:30Z'), energia_kwh: 0.5, potencia_kw: 60 },
+        { timestamp: new Date('2026-05-01T00:01:00Z'), energia_kwh: 0.7, potencia_kw: 84 },
+      ];
+
+      const agregacao = (service as any).agregarEnergiaPorTipo(
+        leituras,
+        unidade,
+        tarifas,
+        {},
+      );
+
+      // Energia total = 0 + 0.5 + 0.7 = 1.2 (classificacao mockada como FORA_PONTA)
+      expect(agregacao.energia_total_kwh).toBeCloseTo(1.2, 5);
+      expect(agregacao.energia_fora_ponta_kwh).toBeCloseTo(1.2, 5);
+      // demanda_maxima considera todas as leituras (incluindo as com energia=0)
+      expect(agregacao.demanda_maxima_kw).toBe(84);
+    });
+  });
+});

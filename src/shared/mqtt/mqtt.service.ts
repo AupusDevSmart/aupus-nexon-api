@@ -1243,6 +1243,49 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
         potenciaMediaKw = resumo.Pt / 1000;
       }
 
+      // ✅ Guarda anti-outlier no consumo_phf
+      //
+      // Firmware envia consumo_phf como delta da janela de ~30s (modo 'delta').
+      // Há um bug conhecido em que a "primeira amostra" da janela fica num
+      // snapshot antigo/zerado em NVM, fazendo consumo_phf ≈ phf cumulativo
+      // (ex: consumo_phf=10381 com phf=10557). Mais de 5 kWh em 30s equivale
+      // a > 600 kW — fisicamente impossível neste medidor.
+      //
+      // Quando detectado, substituímos o valor pelo delta-phf real
+      // (phf_atual - phf_anterior). Mantém phf cru intocado.
+      // Falha da query NÃO bloqueia a gravação — fallback é manter como veio.
+      const MAX_CONSUMO_PHF_POR_LEITURA = 5; // kWh
+      if (typeof resumo.consumo_phf === 'number' && resumo.consumo_phf > MAX_CONSUMO_PHF_POR_LEITURA) {
+        try {
+          const ultima = await this.prisma.equipamentos_dados.findFirst({
+            where: {
+              equipamento_id: equipamentoId,
+              timestamp_dados: { lt: timestamp },
+            },
+            orderBy: { timestamp_dados: 'desc' },
+            select: { dados: true },
+          });
+
+          const phfAtual = Number(resumo.phf ?? 0);
+          const phfAnterior = ultima ? Number((ultima.dados as any)?.phf ?? 0) : 0;
+          const deltaPhf = phfAtual - phfAnterior;
+          const corrigido = deltaPhf >= 0 ? deltaPhf : 0;
+
+          console.warn(
+            `[M-160] consumo_phf outlier corrigido em ${equipamentoId} @ ` +
+            `${timestamp.toISOString()}: ${resumo.consumo_phf} → ${corrigido} ` +
+            `(phf ${phfAnterior} → ${phfAtual})`,
+          );
+
+          resumo.consumo_phf = corrigido;
+        } catch (err) {
+          console.warn(
+            `[M-160] Falha ao calcular delta-phf de fallback em ${equipamentoId}: ` +
+            `${err instanceof Error ? err.message : String(err)}. Salvando consumo_phf como veio.`,
+          );
+        }
+      }
+
       // ✅ SALVAR APENAS JSON ORIGINAL (sem adicionar campos extras)
       // Remover campos que não vieram do MQTT (_validation_errors, etc.)
       const dadosProcessados = { ...resumo };
