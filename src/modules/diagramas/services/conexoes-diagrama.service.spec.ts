@@ -148,9 +148,15 @@ describe('ConexoesDiagramaService', () => {
       mockPrismaService.diagramas_unitarios.findFirst.mockResolvedValue(
         mockDiagrama,
       );
-      mockPrismaService.equipamentos.findFirst
-        .mockResolvedValueOnce(mockEquipOrigem)
-        .mockResolvedValueOnce(null);
+      // Mock baseado em ID — sobrevive a multiplas chamadas (cada `service.create`
+      // chama equipamentos.findFirst 2x: origem + destino).
+      // mockResolvedValueOnce nao serve aqui porque o teste invoca create() 2x
+      // pra verificar instance + mensagem, esgotando a queue.
+      mockPrismaService.equipamentos.findFirst.mockImplementation((args: any) => {
+        const id = args?.where?.id;
+        if (id === 'equip-origem') return Promise.resolve(mockEquipOrigem);
+        return Promise.resolve(null); // destino nao encontrado
+      });
 
       await expect(service.create('diagrama-123', createDto)).rejects.toThrow(
         BadRequestException,
@@ -164,9 +170,12 @@ describe('ConexoesDiagramaService', () => {
       mockPrismaService.diagramas_unitarios.findFirst.mockResolvedValue(
         mockDiagrama,
       );
-      mockPrismaService.equipamentos.findFirst
-        .mockResolvedValueOnce(mockEquipOrigem)
-        .mockResolvedValueOnce(mockEquipDestino);
+      mockPrismaService.equipamentos.findFirst.mockImplementation((args: any) => {
+        const id = args?.where?.id;
+        if (id === 'equip-origem') return Promise.resolve(mockEquipOrigem);
+        if (id === 'equip-destino') return Promise.resolve(mockEquipDestino);
+        return Promise.resolve(null);
+      });
 
       const dtoComPortaInvalida = {
         ...createDto,

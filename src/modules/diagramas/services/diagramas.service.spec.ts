@@ -1,6 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { DiagramasService } from './diagramas.service';
-import { PrismaService } from '@aupus/api-shared';
+import { PermissionScopeService, PrismaService } from '@aupus/api-shared';
 import { NotFoundException } from '@nestjs/common';
 
 describe('DiagramasService', () => {
@@ -32,6 +32,16 @@ describe('DiagramasService', () => {
     $transaction: jest.fn((callback) => callback(mockPrismaService)),
   };
 
+  // Stub minimo do PermissionScopeService (dependencia injetada apos refactor RBAC).
+  // Apenas precisamos resolver DI; metodos podem ser jest.fn() vazios pois testes
+  // de DiagramasService nao exercitam scope check explicitamente.
+  const mockPermissionScopeService = {
+    canAccessUnidade: jest.fn().mockResolvedValue(true),
+    canAccessPlanta: jest.fn().mockResolvedValue(true),
+    getUserAccessibleUnidades: jest.fn().mockResolvedValue([]),
+    getUserAccessiblePlantas: jest.fn().mockResolvedValue([]),
+  };
+
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -39,6 +49,10 @@ describe('DiagramasService', () => {
         {
           provide: PrismaService,
           useValue: mockPrismaService,
+        },
+        {
+          provide: PermissionScopeService,
+          useValue: mockPermissionScopeService,
         },
       ],
     }).compile();
@@ -199,6 +213,19 @@ describe('DiagramasService', () => {
     });
 
     it('deve incluir equipamentos posicionados no diagrama', async () => {
+      // Apos refactor pra JOIN em diagramas.service, o tipo agora vem
+      // populado em `tipo_equipamento_rel` direto na linha do equipamento
+      // (em vez de query separada em tipos_equipamentos.findMany).
+      const tipoMock = {
+        id: 'tipo-1',
+        codigo: 'INV',
+        nome: 'Inversor',
+        largura_padrao: 64,
+        altura_padrao: 64,
+        icone_svg: '<svg>...</svg>',
+        categoria: { id: 'cat-1', nome: 'CONVERSAO' },
+      };
+
       const mockEquipamentos = [
         {
           id: 'equip-1',
@@ -213,18 +240,7 @@ describe('DiagramasService', () => {
           altura_customizada: null,
           status: 'NORMAL',
           propriedades: {},
-        },
-      ];
-
-      const mockTipos = [
-        {
-          id: 'tipo-1',
-          codigo: 'INV',
-          nome: 'Inversor',
-          categoria: 'CONVERSAO',
-          largura_padrao: 64,
-          altura_padrao: 64,
-          icone_svg: '<svg>...</svg>',
+          tipo_equipamento_rel: tipoMock, // ← populado via include do Prisma
         },
       ];
 
@@ -235,7 +251,6 @@ describe('DiagramasService', () => {
       mockPrismaService.equipamentos.findMany.mockResolvedValue(
         mockEquipamentos,
       );
-      mockPrismaService.tipos_equipamentos.findMany.mockResolvedValue(mockTipos);
       mockPrismaService.equipamentos_conexoes.findMany.mockResolvedValue([]);
 
       const result = await service.findOne('diagrama-123');
