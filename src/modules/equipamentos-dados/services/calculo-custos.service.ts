@@ -1,4 +1,8 @@
-import { Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { PrismaService } from '@aupus/api-shared';
 import { ClassificacaoHorariosService } from './classificacao-horarios.service';
 import { ConfiguracaoCustoService, ConfiguracaoCustoData } from './configuracao-custo.service';
@@ -32,6 +36,9 @@ export class CalculoCustosService {
   /**
    * Calcula custos de energia para um equipamento em um período
    */
+  /** Período máximo aceito pelo cálculo (em milissegundos). 2 anos. */
+  private readonly PERIODO_MAX_MS = 2 * 365 * 24 * 60 * 60 * 1000;
+
   async calcularCustos(
     equipamentoId: string,
     dataInicio: Date,
@@ -45,7 +52,26 @@ export class CalculoCustosService {
     periodo_tipo?: string;
     tributos: TributosConfig;
     tarifa_fonte: 'CONCESSIONARIA' | 'PERSONALIZADA';
+    aviso?: string;
   }> {
+    // Validações de entrada (mensagens em PT-BR direto pro usuário)
+    if (!(dataInicio instanceof Date) || isNaN(dataInicio.getTime())) {
+      throw new BadRequestException('Data inicial inválida.');
+    }
+    if (!(dataFim instanceof Date) || isNaN(dataFim.getTime())) {
+      throw new BadRequestException('Data final inválida.');
+    }
+    if (dataInicio >= dataFim) {
+      throw new BadRequestException(
+        'Data inicial deve ser anterior à data final.',
+      );
+    }
+    if (dataFim.getTime() - dataInicio.getTime() > this.PERIODO_MAX_MS) {
+      throw new BadRequestException(
+        'Período máximo permitido: 2 anos. Selecione um intervalo menor.',
+      );
+    }
+
     console.log(`\n[CUSTOS] Iniciando calculo de custos`);
     console.log(`   Equipamento: ${equipamentoId}`);
     console.log(`   Periodo: ${dataInicio.toLocaleString('pt-BR')} ate ${dataFim.toLocaleString('pt-BR')}`);
@@ -77,6 +103,10 @@ export class CalculoCustosService {
 
     console.log(`   Tributos: ICMS=${(tributos.icms * 100).toFixed(2)}% PIS=${(tributos.pis * 100).toFixed(2)}% COFINS=${(tributos.cofins * 100).toFixed(2)}% Perdas=${(tributos.perdas || 0).toFixed(2)}%`);
 
+    // Aviso (nao-fatal) quando concessionaria nao tem tarifa do grupo da unidade.
+    // Custos ainda sao calculados (com tarifa zerada), mas a UI pode alertar.
+    const avisoTarifa = this.detectarTarifaFaltando(unidade, tarifas);
+
     // 4. Buscar leituras MQTT do periodo
     const leituras = await this.buscarLeiturasPeriodo(equipamentoId, dataInicio, dataFim);
     console.log(`   Leituras encontradas: ${leituras.length}`);
@@ -94,6 +124,12 @@ export class CalculoCustosService {
     console.log(`   Custo c/ tributos: R$ ${custos.custo_total.toFixed(2)} (fator: ${custos.fator_tributos.toFixed(4)}x)`);
     console.log('');
 
+    // Aviso de empty: total de leituras COM phf (a base do delta) eh 0.
+    // Eh diferente de "energia 0" — significa "sem leituras no periodo".
+    const aviso = leituras.length === 0
+      ? 'Nenhuma leitura encontrada para o período selecionado.'
+      : avisoTarifa;
+
     return {
       unidade,
       tarifas,
@@ -102,7 +138,34 @@ export class CalculoCustosService {
       periodo_tipo: periodo,
       tributos,
       tarifa_fonte: tarifaFonte,
+      ...(aviso ? { aviso } : {}),
     };
+  }
+
+  /**
+   * Detecta se a concessionaria nao tem tarifa configurada pro grupo da
+   * unidade. Retorna mensagem amigavel pra UI ou undefined se OK.
+   *
+   * Grupo A precisa de tusd_p OU te_p OU tusd_fp OU te_fp configurados.
+   * Grupo B precisa de tusd_b OU te_b.
+   */
+  private detectarTarifaFaltando(
+    unidade: DadosUnidade,
+    tarifas: TarifasConcessionaria,
+  ): string | undefined {
+    if (unidade.grupo === 'A') {
+      const temAlguma = (tarifas.tusd_p || tarifas.te_p ||
+                        tarifas.tusd_fp || tarifas.te_fp);
+      if (!temAlguma) {
+        return `Concessionária sem tarifa configurada para o Grupo A da unidade (${unidade.subgrupo}). Custos exibidos com tarifa zerada.`;
+      }
+    } else if (unidade.grupo === 'B') {
+      const temAlguma = (tarifas.tusd_b || tarifas.te_b);
+      if (!temAlguma) {
+        return `Concessionária sem tarifa configurada para o Grupo B da unidade. Custos exibidos com tarifa zerada.`;
+      }
+    }
+    return undefined;
   }
 
   /**
@@ -171,15 +234,22 @@ export class CalculoCustosService {
       },
     });
 
-    if (!equipamento || !equipamento.unidade) {
-      throw new Error('Equipamento ou unidade não encontrado');
+    if (!equipamento) {
+      throw new NotFoundException('Equipamento não encontrado.');
+    }
+    if (!equipamento.unidade) {
+      throw new NotFoundException(
+        'Equipamento não está vinculado a uma unidade. Verifique o cadastro.',
+      );
     }
 
     const unidadeDb = equipamento.unidade;
     const concessionariaDb = unidadeDb.concessionaria;
 
     if (!concessionariaDb) {
-      throw new Error('Concessionária não encontrada para esta unidade');
+      throw new NotFoundException(
+        'Unidade sem concessionária cadastrada. Configure no cadastro da unidade.',
+      );
     }
 
     // Montar dados da unidade

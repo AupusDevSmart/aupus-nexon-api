@@ -522,9 +522,10 @@ export class EquipamentosDadosController {
     dataInicio: Date,
     dataFim: Date,
   ) {
-    const { unidade, tarifas, agregacao, custos, tributos, tarifa_fonte } = resultado;
+    const { unidade, tarifas, agregacao, custos, tributos, tarifa_fonte, aviso } = resultado;
 
     return {
+      ...(aviso ? { aviso } : {}),
       periodo: {
         tipo: query.periodo,
         data_inicio: dataInicio.toISOString(),

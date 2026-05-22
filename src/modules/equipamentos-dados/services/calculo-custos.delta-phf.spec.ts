@@ -8,6 +8,7 @@
  *   3. Gap de leituras → delta-phf cobre por natureza, sem dupla contagem
  *   4. Reset de medidor (phf cai) → soma por segmento
  */
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { PrismaService } from '@aupus/api-shared';
 import { CalculoCustosService } from './calculo-custos.service';
@@ -173,6 +174,45 @@ describe('CalculoCustosService — delta-phf', () => {
       // Total = (100 → 101.5) = 1.5, mesmo com leitura sem phf no meio
       const total = leituras.reduce((s: number, l: any) => s + l.energia_kwh, 0);
       expect(total).toBeCloseTo(1.5, 5);
+    });
+  });
+
+  describe('validacoes de entrada em calcularCustos', () => {
+    it('7. rejeita BadRequestException quando dataInicio >= dataFim', async () => {
+      await expect(
+        service.calcularCustos(
+          'eq1',
+          new Date('2026-05-22T00:00:00Z'),
+          new Date('2026-05-21T00:00:00Z'),
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      await expect(
+        service.calcularCustos(
+          'eq1',
+          new Date('2026-05-22T00:00:00Z'),
+          new Date('2026-05-21T00:00:00Z'),
+        ),
+      ).rejects.toThrow(/anterior à data final/);
+    });
+
+    it('8. rejeita BadRequestException quando periodo > 2 anos', async () => {
+      await expect(
+        service.calcularCustos(
+          'eq1',
+          new Date('2020-01-01T00:00:00Z'),
+          new Date('2026-05-22T00:00:00Z'),
+        ),
+      ).rejects.toThrow(/Período máximo permitido: 2 anos/);
+    });
+
+    it('9. rejeita BadRequestException quando data eh invalida', async () => {
+      await expect(
+        service.calcularCustos(
+          'eq1',
+          new Date('invalida'),
+          new Date('2026-05-22T00:00:00Z'),
+        ),
+      ).rejects.toThrow(/Data inicial inválida/);
     });
   });
 
