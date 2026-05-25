@@ -304,8 +304,8 @@ export class CoaService {
         WHERE ed.timestamp_dados >= CURRENT_DATE::timestamp
           AND e.deleted_at IS NULL
       ),
-      EnergiaM160 AS (
-        -- ✅ M160: energia do dia via delta-phf cumulativo do medidor.
+      EnergiaM160Deltas AS (
+        -- ✅ M160: delta-phf cumulativo do medidor por leitura.
         -- Ver docs/tickets/powermeter-delta-phf.md.
         --
         -- Algoritmo: phf[i] - MAX(phf[anteriores]) por equipamento.
@@ -315,25 +315,32 @@ export class CoaService {
         -- - LAG() puro teria contado +10382 falsos quando phf voltasse ao
         --   normal — bug descoberto em 22/05 com CHINT.
         -- - Trade-off: reset real de medidor (raro) tambem eh descartado.
+        --
+        -- NOTA: a window function (MAX OVER) precisa ficar em CTE separada
+        -- da agregação (SUM) — Postgres não aceita SUM(... MAX() OVER ...).
         SELECT
           unidade_id,
-          SUM(
-            GREATEST(
-              COALESCE(
-                CAST(dados->>'phf' AS NUMERIC) - MAX(CAST(dados->>'phf' AS NUMERIC))
-                  OVER (
-                    PARTITION BY equipamento_id
-                    ORDER BY timestamp_dados ASC
-                    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
-                  ),
-                0
-              ),
+          GREATEST(
+            COALESCE(
+              CAST(dados->>'phf' AS NUMERIC) - MAX(CAST(dados->>'phf' AS NUMERIC))
+                OVER (
+                  PARTITION BY equipamento_id
+                  ORDER BY timestamp_dados ASC
+                  ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                ),
               0
-            )
-          ) AS energia_dia_kwh
+            ),
+            0
+          ) AS delta_kwh
         FROM DadosDia
         WHERE (tipo_equipamento ILIKE '%M-160%' OR tipo_equipamento ILIKE '%M160%')
           AND dados->>'phf' IS NOT NULL
+      ),
+      EnergiaM160 AS (
+        SELECT
+          unidade_id,
+          SUM(delta_kwh) AS energia_dia_kwh
+        FROM EnergiaM160Deltas
         GROUP BY unidade_id
       ),
       EnergiaInversores AS (
