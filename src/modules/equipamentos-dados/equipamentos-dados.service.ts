@@ -1200,33 +1200,69 @@ export class EquipamentosDadosService {
 
   /**
    * 🚀 OTIMIZADO - Gráfico do Dia (Múltiplos Equipamentos)
-   * Agregação no PostgreSQL (5 min intervals)
+   * Agregação no PostgreSQL com bucket dinâmico (5/30 min) baseado no range.
+   *
+   * Aceita configuração por equipamento (sinal +/- para geração/consumo e multiplicador),
+   * permitindo cálculo de demanda líquida e agrupamentos heterogêneos.
    */
-  async getGraficoDiaMultiplosInversores_V2(equipamentosIds: string[], data?: string, user?: ScopedUser) {
-    equipamentosIds = await this.filterEqIdsByScope(equipamentosIds, user);
-    // Validação
-    if (equipamentosIds.length > 5) {
-      throw new NotFoundException('Máximo de 5 equipamentos permitidos por vez');
+  async getGraficoDiaMultiplosInversores_V2(
+    equipamentos: EquipamentoAgregacaoConfig[],
+    opts: OpcoesGraficoDia = {},
+    user?: ScopedUser,
+  ) {
+    const equipsFiltrados = await this.filtrarEquipamentosPorScope(equipamentos, user);
+    if (equipsFiltrados.length === 0) {
+      return {
+        data: opts.data ?? new Date().toISOString().split('T')[0],
+        total_pontos: 0,
+        total_inversores: 0,
+        inversores: [],
+        dados: [],
+        agregacao: '5_minutos',
+        energia_kwh: 0,
+        registros_processados: 0,
+      };
+    }
+    if (equipsFiltrados.length > LIMITE_EQUIPAMENTOS) {
+      throw new NotFoundException(`Máximo de ${LIMITE_EQUIPAMENTOS} equipamentos permitidos por vez`);
     }
 
-    // Parse de data
-    let dataConsulta: Date;
+    const ids = equipsFiltrados.map(e => e.id);
+    const configMap = new Map(equipsFiltrados.map(e => [e.id, e]));
+
+    // Janela de tempo: inicio/fim > data > últimas 24h
+    let dataInicio: Date;
     let dataFim: Date;
 
-    if (data) {
-      dataConsulta = new Date(data);
-      dataConsulta.setHours(0, 0, 0, 0);
-      dataFim = new Date(dataConsulta);
+    if (opts.inicio && opts.fim) {
+      dataInicio = new Date(opts.inicio);
+      dataFim = new Date(opts.fim);
+      const rangeDias = (dataFim.getTime() - dataInicio.getTime()) / 86400000;
+      if (rangeDias > MAX_DIAS_CUSTOM) {
+        throw new NotFoundException(`Range máximo do filtro personalizado é ${MAX_DIAS_CUSTOM} dias`);
+      }
+    } else if (opts.data) {
+      dataInicio = new Date(opts.data);
+      dataInicio.setHours(0, 0, 0, 0);
+      dataFim = new Date(dataInicio);
       dataFim.setDate(dataFim.getDate() + 1);
     } else {
       dataFim = new Date();
-      dataConsulta = new Date(dataFim);
-      dataConsulta.setHours(dataConsulta.getHours() - 24);
+      dataInicio = new Date(dataFim);
+      dataInicio.setHours(dataInicio.getHours() - 24);
     }
 
-    console.log(`⚡ [V2 DIA] Agregação no banco: ${equipamentosIds.length} equipamentos`);
+    // Bucket: 5min para janelas até 24h, 30min para janelas maiores
+    const rangeHoras = (dataFim.getTime() - dataInicio.getTime()) / 3600000;
+    const bucketMin = rangeHoras > 24 ? 30 : 5;
+    const fatorPerdas = opts.fatorPerdas ?? 0;
 
-    // ✅ AGREGAÇÃO NO BANCO (5 minutos)
+    this.logger.log(`⚡ [V2 DIA] ${equipsFiltrados.length} equipamentos, ${bucketMin}min, ${rangeHoras.toFixed(1)}h`);
+
+    // CTE: calcula o intervalo (bucket) UMA vez por linha, depois agrupa.
+    // Sem CTE, repetir a expressao no SELECT e no GROUP BY com ${bucketMin}
+    // parametrizado faz Postgres tratar como duas expressoes distintas e
+    // reclama: "column timestamp_dados must appear in GROUP BY".
     const dadosAgregados = await this.prisma.$queryRaw<Array<{
       intervalo: Date;
       equipamento_id: string;
@@ -1234,40 +1270,38 @@ export class EquipamentosDadosService {
       energia_total: number;
       num_leituras: number;
     }>>`
+      WITH base AS (
+        SELECT
+          DATE_TRUNC('minute', timestamp_dados) -
+            (EXTRACT(minute FROM timestamp_dados)::int % ${bucketMin}) * INTERVAL '1 minute' AS intervalo,
+          equipamento_id,
+          potencia_ativa_kw,
+          energia_kwh
+        FROM equipamentos_dados
+        WHERE equipamento_id = ANY(${ids}::text[])
+          AND timestamp_dados >= ${dataInicio}
+          AND timestamp_dados < ${dataFim}
+      )
       SELECT
-        DATE_TRUNC('minute', timestamp_dados) -
-          (EXTRACT(minute FROM timestamp_dados)::int % 5) * INTERVAL '1 minute' as intervalo,
+        intervalo,
         equipamento_id,
-        AVG(potencia_ativa_kw) as potencia_media,
-        SUM(energia_kwh) as energia_total,
-        COUNT(*) as num_leituras
-      FROM equipamentos_dados
-      WHERE equipamento_id = ANY(${equipamentosIds}::uuid[])
-        AND timestamp_dados >= ${dataConsulta}
-        AND timestamp_dados < ${dataFim}
-      GROUP BY
-        DATE_TRUNC('minute', timestamp_dados) -
-          (EXTRACT(minute FROM timestamp_dados)::int % 5) * INTERVAL '1 minute',
-        equipamento_id
+        AVG(potencia_ativa_kw) AS potencia_media,
+        SUM(energia_kwh) AS energia_total,
+        COUNT(*) AS num_leituras
+      FROM base
+      GROUP BY intervalo, equipamento_id
       ORDER BY intervalo ASC
     `;
 
-    console.log(`⚡ [V2 DIA] Registros agregados: ${dadosAgregados.length}`);
-
-    // Buscar nomes dos equipamentos
-    const equipamentos = await this.prisma.equipamentos.findMany({
-      where: { id: { in: equipamentosIds } },
-      select: { id: true, nome: true }
+    const equipamentosDb = await this.prisma.equipamentos.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, nome: true },
     });
-
-    const equipamentosMap = new Map(equipamentos.map(e => [e.id, e.nome]));
-
-    // Transformar para formato do gráfico
+    const equipamentosMap = new Map(equipamentosDb.map(e => [e.id.trim(), e.nome]));
     const pontosMap = new Map<string, any>();
 
     dadosAgregados.forEach(row => {
       const intervaloKey = row.intervalo.toISOString();
-
       if (!pontosMap.has(intervaloKey)) {
         pontosMap.set(intervaloKey, {
           timestamp: row.intervalo,
@@ -1275,56 +1309,93 @@ export class EquipamentosDadosService {
           potencia_kw: 0,
           energia_kwh: 0,
           num_leituras: 0,
-          equipamentos: {}
+          equipamentos: {},
         });
       }
 
-      const ponto = pontosMap.get(intervaloKey);
-      ponto.potencia_kw += Number(row.potencia_media);
-      ponto.energia_kwh += Number(row.energia_total);
-      ponto.num_leituras += Number(row.num_leituras);
+      // Trim do equipamento_id porque vem do Postgres como char(26) padded com
+      // espacos (CLAUDE.md "Armadilhas Conhecidas"). configMap eh indexado por
+      // ID trimmed que veio do request; sem trim, lookup falha silenciosamente
+      // e os agregados zeram.
+      const cfg = configMap.get(row.equipamento_id.trim());
+      if (!cfg) return;
 
-      ponto.equipamentos[equipamentosMap.get(row.equipamento_id)] = {
-        potencia: Number(row.potencia_media),
-        energia: Number(row.energia_total)
+      const potBruta = Number(row.potencia_media) * cfg.multiplicador;
+      const enBruta = Number(row.energia_total) * cfg.multiplicador;
+      // Perdas só em geração (sinal = 1)
+      const reducao = cfg.sinal === 1 && fatorPerdas > 0 ? 1 - fatorPerdas / 100 : 1;
+      const potAjustada = potBruta * reducao * cfg.sinal;
+      const enAjustada = enBruta * reducao * cfg.sinal;
+
+      const ponto = pontosMap.get(intervaloKey);
+      ponto.potencia_kw += potAjustada;
+      ponto.energia_kwh += enAjustada;
+      ponto.num_leituras += Number(row.num_leituras);
+      ponto.equipamentos[equipamentosMap.get(row.equipamento_id.trim()) ?? row.equipamento_id.trim()] = {
+        potencia: potAjustada,
+        energia: enAjustada,
       };
     });
 
+    const pontos = Array.from(pontosMap.values()).sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+    const energiaTotal = pontos.reduce((sum, p) => sum + p.energia_kwh, 0);
+
     return {
-      data: dataConsulta.toISOString().split('T')[0],
-      total_pontos: pontosMap.size,
-      total_inversores: equipamentos.length,
-      inversores: equipamentos.map(e => ({ id: e.id, nome: e.nome })),
-      dados: Array.from(pontosMap.values()).sort((a, b) =>
-        a.timestamp.getTime() - b.timestamp.getTime()
-      ),
-      agregacao: '5_minutos',
-      registros_processados: dadosAgregados.length
+      data: dataInicio.toISOString().split('T')[0],
+      inicio: dataInicio.toISOString(),
+      fim: dataFim.toISOString(),
+      total_pontos: pontos.length,
+      total_inversores: equipamentosDb.length,
+      inversores: equipamentosDb.map(e => ({ id: e.id.trim(), nome: e.nome })),
+      dados: pontos,
+      agregacao: `${bucketMin}_minutos`,
+      energia_kwh: energiaTotal,
+      registros_processados: dadosAgregados.length,
     };
   }
 
   /**
    * 🚀 OTIMIZADO - Gráfico do Mês (Múltiplos Equipamentos)
-   * Agregação no PostgreSQL (daily)
+   * Agregação no PostgreSQL (diária).
+   *
+   * Aceita configuração por equipamento (sinal +/- e multiplicador) para suportar
+   * cálculo de demanda líquida em agrupamentos heterogêneos.
    */
-  async getGraficoMesMultiplosInversores_V2(equipamentosIds: string[], mes?: string, user?: ScopedUser) {
-    equipamentosIds = await this.filterEqIdsByScope(equipamentosIds, user);
-    // Validação
-    if (equipamentosIds.length > 5) {
-      throw new NotFoundException('Máximo de 5 equipamentos permitidos por vez');
+  async getGraficoMesMultiplosInversores_V2(
+    equipamentos: EquipamentoAgregacaoConfig[],
+    opts: OpcoesGraficoPeriodo = {},
+    user?: ScopedUser,
+  ) {
+    const equipsFiltrados = await this.filtrarEquipamentosPorScope(equipamentos, user);
+    if (equipsFiltrados.length === 0) {
+      const agora = new Date();
+      return {
+        mes: opts.mes ?? `${agora.getFullYear()}-${String(agora.getMonth() + 1).padStart(2, '0')}`,
+        total_dias: 0,
+        total_inversores: 0,
+        energia_total_kwh: 0,
+        inversores: [],
+        dados: [],
+        agregacao: 'dia',
+        registros_processados: 0,
+      };
+    }
+    if (equipsFiltrados.length > LIMITE_EQUIPAMENTOS) {
+      throw new NotFoundException(`Máximo de ${LIMITE_EQUIPAMENTOS} equipamentos permitidos por vez`);
     }
 
-    // Parse de data
-    const now = new Date();
-    const ano = mes ? parseInt(mes.split('-')[0]) : now.getFullYear();
-    const mesNum = mes ? parseInt(mes.split('-')[1]) : now.getMonth() + 1;
+    const ids = equipsFiltrados.map(e => e.id);
+    const configMap = new Map(equipsFiltrados.map(e => [e.id, e]));
+    const fatorPerdas = opts.fatorPerdas ?? 0;
 
+    const now = new Date();
+    const ano = opts.mes ? parseInt(opts.mes.split('-')[0]) : now.getFullYear();
+    const mesNum = opts.mes ? parseInt(opts.mes.split('-')[1]) : now.getMonth() + 1;
     const dataInicio = new Date(ano, mesNum - 1, 1);
     const dataFim = new Date(ano, mesNum, 1);
 
-    console.log(`⚡ [V2 MÊS] Agregação no banco: ${equipamentosIds.length} equipamentos`);
+    this.logger.log(`⚡ [V2 MÊS] ${equipsFiltrados.length} equipamentos, ${ano}-${mesNum}`);
 
-    // ✅ AGREGAÇÃO NO BANCO (diária)
     const dadosAgregados = await this.prisma.$queryRaw<Array<{
       dia: Date;
       equipamento_id: string;
@@ -1339,29 +1410,22 @@ export class EquipamentosDadosService {
         AVG(potencia_ativa_kw) as potencia_media,
         COUNT(*) as num_leituras
       FROM equipamentos_dados
-      WHERE equipamento_id = ANY(${equipamentosIds}::uuid[])
+      WHERE equipamento_id = ANY(${ids}::text[])
         AND timestamp_dados >= ${dataInicio}
         AND timestamp_dados < ${dataFim}
       GROUP BY DATE_TRUNC('day', timestamp_dados), equipamento_id
       ORDER BY dia ASC
     `;
 
-    console.log(`⚡ [V2 MÊS] Registros agregados: ${dadosAgregados.length}`);
-
-    // Buscar nomes dos equipamentos
-    const equipamentos = await this.prisma.equipamentos.findMany({
-      where: { id: { in: equipamentosIds } },
-      select: { id: true, nome: true }
+    const equipamentosDb = await this.prisma.equipamentos.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, nome: true },
     });
-
-    const equipamentosMap = new Map(equipamentos.map(e => [e.id, e.nome]));
-
-    // Transformar para formato do gráfico
+    const equipamentosMap = new Map(equipamentosDb.map(e => [e.id.trim(), e.nome]));
     const pontosMap = new Map<string, any>();
 
     dadosAgregados.forEach(row => {
       const diaKey = row.dia.toISOString().split('T')[0];
-
       if (!pontosMap.has(diaKey)) {
         pontosMap.set(diaKey, {
           data: diaKey,
@@ -1369,57 +1433,84 @@ export class EquipamentosDadosService {
           energia_kwh: 0,
           potencia_media_kw: 0,
           num_leituras: 0,
-          equipamentos: {}
+          equipamentos: {},
         });
       }
 
-      const ponto = pontosMap.get(diaKey);
-      ponto.energia_kwh += Number(row.energia_total);
-      ponto.potencia_media_kw += Number(row.potencia_media);
-      ponto.num_leituras += Number(row.num_leituras);
+      // Trim do equipamento_id porque vem do Postgres como char(26) padded com
+      // espacos (CLAUDE.md "Armadilhas Conhecidas"). configMap eh indexado por
+      // ID trimmed que veio do request; sem trim, lookup falha silenciosamente
+      // e os agregados zeram.
+      const cfg = configMap.get(row.equipamento_id.trim());
+      if (!cfg) return;
 
-      ponto.equipamentos[equipamentosMap.get(row.equipamento_id)] = {
-        energia: Number(row.energia_total),
-        potencia: Number(row.potencia_media)
+      const reducao = cfg.sinal === 1 && fatorPerdas > 0 ? 1 - fatorPerdas / 100 : 1;
+      const enAjustada = Number(row.energia_total) * cfg.multiplicador * reducao * cfg.sinal;
+      const potAjustada = Number(row.potencia_media) * cfg.multiplicador * reducao * cfg.sinal;
+
+      const ponto = pontosMap.get(diaKey);
+      ponto.energia_kwh += enAjustada;
+      ponto.potencia_media_kw += potAjustada;
+      ponto.num_leituras += Number(row.num_leituras);
+      ponto.equipamentos[equipamentosMap.get(row.equipamento_id.trim()) ?? row.equipamento_id.trim()] = {
+        energia: enAjustada,
+        potencia: potAjustada,
       };
     });
 
-    const pontos = Array.from(pontosMap.values()).sort((a, b) =>
-      a.data.localeCompare(b.data)
-    );
-
+    const pontos = Array.from(pontosMap.values()).sort((a, b) => a.data.localeCompare(b.data));
     const energiaTotal = pontos.reduce((sum, p) => sum + p.energia_kwh, 0);
 
     return {
       mes: `${ano}-${String(mesNum).padStart(2, '0')}`,
       total_dias: pontos.length,
-      total_inversores: equipamentos.length,
+      total_inversores: equipamentosDb.length,
       energia_total_kwh: energiaTotal,
-      inversores: equipamentos.map(e => ({ id: e.id, nome: e.nome })),
+      inversores: equipamentosDb.map(e => ({ id: e.id.trim(), nome: e.nome })),
       dados: pontos,
       agregacao: 'dia',
-      registros_processados: dadosAgregados.length
+      registros_processados: dadosAgregados.length,
     };
   }
 
   /**
    * 🚀 OTIMIZADO - Gráfico do Ano (Múltiplos Equipamentos)
-   * Agregação no PostgreSQL (monthly)
+   * Agregação no PostgreSQL (mensal).
+   *
+   * Aceita configuração por equipamento (sinal +/- e multiplicador).
    */
-  async getGraficoAnoMultiplosInversores_V2(equipamentosIds: string[], ano?: string, user?: ScopedUser) {
-    equipamentosIds = await this.filterEqIdsByScope(equipamentosIds, user);
-    // Validação
-    if (equipamentosIds.length > 5) {
-      throw new NotFoundException('Máximo de 5 equipamentos permitidos por vez');
+  async getGraficoAnoMultiplosInversores_V2(
+    equipamentos: EquipamentoAgregacaoConfig[],
+    opts: OpcoesGraficoAno = {},
+    user?: ScopedUser,
+  ) {
+    const equipsFiltrados = await this.filtrarEquipamentosPorScope(equipamentos, user);
+    const anoNum = opts.ano ? parseInt(opts.ano) : new Date().getFullYear();
+    if (equipsFiltrados.length === 0) {
+      return {
+        ano: anoNum,
+        total_meses: 0,
+        total_inversores: 0,
+        energia_total_kwh: 0,
+        inversores: [],
+        dados: [],
+        agregacao: 'mes',
+        registros_processados: 0,
+      };
+    }
+    if (equipsFiltrados.length > LIMITE_EQUIPAMENTOS) {
+      throw new NotFoundException(`Máximo de ${LIMITE_EQUIPAMENTOS} equipamentos permitidos por vez`);
     }
 
-    const anoNum = ano ? parseInt(ano) : new Date().getFullYear();
+    const ids = equipsFiltrados.map(e => e.id);
+    const configMap = new Map(equipsFiltrados.map(e => [e.id, e]));
+    const fatorPerdas = opts.fatorPerdas ?? 0;
+
     const dataInicio = new Date(anoNum, 0, 1);
     const dataFim = new Date(anoNum + 1, 0, 1);
 
-    console.log(`⚡ [V2 ANO] Agregação no banco: ${equipamentosIds.length} equipamentos`);
+    this.logger.log(`⚡ [V2 ANO] ${equipsFiltrados.length} equipamentos, ${anoNum}`);
 
-    // ✅ AGREGAÇÃO NO BANCO (mensal)
     const dadosAgregados = await this.prisma.$queryRaw<Array<{
       mes: Date;
       equipamento_id: string;
@@ -1434,30 +1525,19 @@ export class EquipamentosDadosService {
         AVG(potencia_ativa_kw) as potencia_media,
         COUNT(*) as num_leituras
       FROM equipamentos_dados
-      WHERE equipamento_id = ANY(${equipamentosIds}::uuid[])
+      WHERE equipamento_id = ANY(${ids}::text[])
         AND timestamp_dados >= ${dataInicio}
         AND timestamp_dados < ${dataFim}
       GROUP BY DATE_TRUNC('month', timestamp_dados), equipamento_id
       ORDER BY mes ASC
     `;
 
-    console.log(`⚡ [V2 ANO] Registros agregados: ${dadosAgregados.length}`);
-
-    // Buscar nomes dos equipamentos
-    const equipamentos = await this.prisma.equipamentos.findMany({
-      where: { id: { in: equipamentosIds } },
-      select: { id: true, nome: true }
+    const equipamentosDb = await this.prisma.equipamentos.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, nome: true },
     });
-
-    const equipamentosMap = new Map(equipamentos.map(e => [e.id, e.nome]));
-
-    // Nomes dos meses
-    const mesesPt = [
-      'Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
-      'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'
-    ];
-
-    // Transformar para formato do gráfico
+    const equipamentosMap = new Map(equipamentosDb.map(e => [e.id.trim(), e.nome]));
+    const mesesPt = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
     const pontosMap = new Map<string, any>();
 
     dadosAgregados.forEach(row => {
@@ -1473,36 +1553,84 @@ export class EquipamentosDadosService {
           energia_kwh: 0,
           potencia_media_kw: 0,
           num_leituras: 0,
-          equipamentos: {}
+          equipamentos: {},
         });
       }
 
-      const ponto = pontosMap.get(mesKey);
-      ponto.energia_kwh += Number(row.energia_total);
-      ponto.potencia_media_kw += Number(row.potencia_media);
-      ponto.num_leituras += Number(row.num_leituras);
+      // Trim do equipamento_id porque vem do Postgres como char(26) padded com
+      // espacos (CLAUDE.md "Armadilhas Conhecidas"). configMap eh indexado por
+      // ID trimmed que veio do request; sem trim, lookup falha silenciosamente
+      // e os agregados zeram.
+      const cfg = configMap.get(row.equipamento_id.trim());
+      if (!cfg) return;
 
-      ponto.equipamentos[equipamentosMap.get(row.equipamento_id)] = {
-        energia: Number(row.energia_total),
-        potencia: Number(row.potencia_media)
+      const reducao = cfg.sinal === 1 && fatorPerdas > 0 ? 1 - fatorPerdas / 100 : 1;
+      const enAjustada = Number(row.energia_total) * cfg.multiplicador * reducao * cfg.sinal;
+      const potAjustada = Number(row.potencia_media) * cfg.multiplicador * reducao * cfg.sinal;
+
+      const ponto = pontosMap.get(mesKey);
+      ponto.energia_kwh += enAjustada;
+      ponto.potencia_media_kw += potAjustada;
+      ponto.num_leituras += Number(row.num_leituras);
+      ponto.equipamentos[equipamentosMap.get(row.equipamento_id.trim()) ?? row.equipamento_id.trim()] = {
+        energia: enAjustada,
+        potencia: potAjustada,
       };
     });
 
-    const pontos = Array.from(pontosMap.values()).sort((a, b) =>
-      a.mes_numero - b.mes_numero
-    );
-
+    const pontos = Array.from(pontosMap.values()).sort((a, b) => a.mes_numero - b.mes_numero);
     const energiaTotal = pontos.reduce((sum, p) => sum + p.energia_kwh, 0);
 
     return {
       ano: anoNum,
       total_meses: pontos.length,
-      total_inversores: equipamentos.length,
+      total_inversores: equipamentosDb.length,
       energia_total_kwh: energiaTotal,
-      inversores: equipamentos.map(e => ({ id: e.id, nome: e.nome })),
+      inversores: equipamentosDb.map(e => ({ id: e.id.trim(), nome: e.nome })),
       dados: pontos,
       agregacao: 'mes',
-      registros_processados: dadosAgregados.length
+      registros_processados: dadosAgregados.length,
     };
   }
+
+  /**
+   * Filtra equipamentos pelo scope do usuário, preservando sinal/multiplicador.
+   */
+  private async filtrarEquipamentosPorScope(
+    equipamentos: EquipamentoAgregacaoConfig[],
+    user?: ScopedUser,
+  ): Promise<EquipamentoAgregacaoConfig[]> {
+    if (!equipamentos || equipamentos.length === 0) return [];
+    const idsTrimmed = equipamentos.map(e => ({ ...e, id: e.id.trim() })).filter(e => e.id);
+    const ids = idsTrimmed.map(e => e.id);
+    const permitidos = await this.filterEqIdsByScope(ids, user);
+    const permitidosSet = new Set(permitidos);
+    return idsTrimmed.filter(e => permitidosSet.has(e.id));
+  }
+}
+
+const LIMITE_EQUIPAMENTOS = 50;
+const MAX_DIAS_CUSTOM = 31;
+
+export interface EquipamentoAgregacaoConfig {
+  id: string;
+  sinal: 1 | -1;
+  multiplicador: number;
+}
+
+export interface OpcoesGraficoDia {
+  data?: string;
+  inicio?: string;
+  fim?: string;
+  fatorPerdas?: number;
+}
+
+export interface OpcoesGraficoPeriodo {
+  mes?: string;
+  fatorPerdas?: number;
+}
+
+export interface OpcoesGraficoAno {
+  ano?: string;
+  fatorPerdas?: number;
 }

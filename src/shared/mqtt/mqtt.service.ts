@@ -798,9 +798,11 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
             te.id as tipo_id,
             te.codigo as tipo_codigo,
             te.nome as tipo_nome,
-            te.mqtt_schema as tipo_schema
+            te.mqtt_schema as tipo_schema,
+            ce.nome as categoria_nome
           FROM equipamentos e
           LEFT JOIN tipos_equipamentos te ON te.id = e.tipo_equipamento_id
+          LEFT JOIN categorias_equipamentos ce ON ce.id = te.categoria_id
           WHERE TRIM(e.id) = ${equipamentoIdTrimmed}
           LIMIT 1
         `;
@@ -818,7 +820,8 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
             id: result[0].tipo_id,
             codigo: result[0].tipo_codigo,
             nome: result[0].tipo_nome,
-            mqtt_schema: result[0].tipo_schema
+            mqtt_schema: result[0].tipo_schema,
+            categoria_nome: result[0].categoria_nome,
           } : null
         };
 
@@ -868,11 +871,20 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
         timestampDados = new Date();
       }
 
-      // ✅ Se é M-160, processar no novo formato (Resumo)
+      // ✅ Se é Gateway (categoria 'Gateway' — A-966 SSU e variantes),
+      // processar com extrator específico (path data.phf/phr, conversão KD).
+      const categoriaNome = equipamento.tipo_equipamento_rel?.categoria_nome;
       const codigo = equipamento.tipo_equipamento_rel?.codigo;
+      const isGateway = categoriaNome === 'Gateway';
       const isM160 = codigo === 'M-160' || codigo === 'M160' || codigo === 'METER_M160';
 
-      if (isM160) {
+      if (isGateway) {
+        try {
+          await this.salvarDadosGateway(equipamentoId, dados, timestampDados, qualidade);
+        } catch (error) {
+          console.error(`❌ [Gateway] Erro ao processar dados:`, error);
+        }
+      } else if (isM160) {
         try {
           // ✅ SUPORTE A DOIS FORMATOS:
           // 1. Formato novo: JSON com campo "Resumo" (dados agregados de 30s)
@@ -1159,6 +1171,153 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
    * Salva dados do M160 no novo formato (Resumo)
    * Novo formato: JSON chega agregado de 30 em 30 segundos
    */
+  /**
+   * Persiste leitura do Gateway A-966 SSU (categoria 'Gateway') em
+   * equipamentos_dados, extraindo phf/phr de `dados.data` (path aninhado,
+   * fallback pro path direto) e convertendo pulsos em kWh via KD.
+   *
+   * Convenção bidirecional usada pelo agregado de demanda:
+   *   energia_kwh   = (phr − phf) × KD  → positivo = geração líquida
+   *   potencia_kw   = energia_kwh × 4   → bucket nominal de 15 min
+   * Esse formato bate com o sinal +1 do BIDIRECIONAL no frontend
+   * (categoria-fluxo.ts) — o agregado V2 (potencia_ativa_kw / energia_kwh)
+   * funciona sem refactor adicional.
+   *
+   * Filtros aplicados (Z em vez de gravar 0 que polui agregados):
+   *   - sts !== 1       → boot/init; grava bruto, energia/potencia NULL
+   *   - cdo == null     → firmware antigo (payload {}); idem
+   *   - NSU === 1       → primeira leitura pós-boot, dump cumulativo
+   *                       do downtime; preserva bruto mas energia/potencia NULL
+   *   - phf alto + phr alto no mesmo bucket → glitch isolado (pulso vazado
+   *                       do contador phr pro phf); zera phf antes do delta
+   *
+   * Constantes duplicadas com gateway-dashboard.service.ts /
+   * useGatewayGraficos.ts / a966-modal.tsx — extrair pra util compartilhada
+   * num próximo refactor (ver "depois vamos revisar essa função").
+   */
+  private async salvarDadosGateway(
+    equipamentoId: string,
+    dados: any,
+    timestamp: Date,
+    qualidadeOriginal: string,
+  ) {
+    const KD_A966_SSU = 0.048;        // pulsos → kWh
+    const BUCKET_HORAS = 0.25;        // 15 min nominal
+    const GLITCH_PHF_THRESHOLD = 100; // pulsos; ≈ 4.8 kWh em 15min
+
+    const mqttMode = process.env.MQTT_MODE || 'production';
+    const payload = dados?.data && typeof dados.data === 'object' ? dados.data : dados;
+
+    const cdo = dados?.cdo;
+    const nsu = Number(dados?.NSU ?? dados?.nsu ?? NaN);
+    const sts = Number(payload?.sts ?? NaN);
+
+    // Filtros: situações em que NÃO confiamos no valor de energia da leitura.
+    // Persistimos a leitura crua (pra debug/auditoria) mas zeramos as colunas
+    // que entram no agregado.
+    const ehBootInit = sts !== 1;
+    const ehFirmwareAntigo = cdo == null;
+    const ehDumpPosBoot = nsu === 1;
+    const ignorarParaAgregado = ehBootInit || ehFirmwareAntigo || ehDumpPosBoot;
+
+    let phf = Number(payload?.phf ?? 0);
+    const phr = Number(payload?.phr ?? 0);
+
+    // Glitch detector: equipamento gerador puro tem phf=0 sempre. Quando
+    // chega phf > THRESHOLD junto com phr > THRESHOLD num mesmo bucket, é
+    // pulso vazado do contador phr pro phf (~1 ocorrência por 2 semanas
+    // observada em prod). Zera phf antes do delta. Bruto fica intacto no JSONB.
+    const glitchPhf =
+      !ignorarParaAgregado &&
+      phf > GLITCH_PHF_THRESHOLD &&
+      phr > GLITCH_PHF_THRESHOLD;
+    if (glitchPhf) {
+      phf = 0;
+    }
+
+    let potenciaMediaKw: number | null = null;
+    let energiaKwh: number | null = null;
+    if (!ignorarParaAgregado) {
+      const pulsosLiquidos = phr - phf;       // + = geração, − = consumo
+      energiaKwh = pulsosLiquidos * KD_A966_SSU;
+      potenciaMediaKw = energiaKwh / BUCKET_HORAS;
+    }
+
+    // Limpar campos que não vieram do MQTT antes de salvar.
+    const dadosProcessados: any = { ...dados };
+    delete dadosProcessados._validation_errors;
+    if (glitchPhf) {
+      dadosProcessados._aupus_glitch_phf = true;
+    }
+    if (ehDumpPosBoot) {
+      dadosProcessados._aupus_post_boot_dump = true;
+    }
+
+    if (mqttMode === 'development') {
+      console.log(`📨 [DEV] Gateway recebido (não salva):`, {
+        equipamento: equipamentoId,
+        sts,
+        nsu,
+        phf,
+        phr,
+        energia: energiaKwh,
+        potencia: potenciaMediaKw,
+        flags: { ehBootInit, ehFirmwareAntigo, ehDumpPosBoot, glitchPhf },
+      });
+      return;
+    }
+
+    try {
+      await this.prisma.equipamentos_dados.upsert({
+        where: {
+          uk_equipamento_timestamp: {
+            equipamento_id: equipamentoId,
+            timestamp_dados: timestamp,
+          },
+        },
+        update: {
+          dados: dadosProcessados as any,
+          fonte: 'MQTT',
+          timestamp_fim: timestamp,
+          num_leituras: 1,
+          qualidade: qualidadeOriginal,
+          potencia_ativa_kw: potenciaMediaKw,
+          energia_kwh: energiaKwh,
+        },
+        create: {
+          equipamento_id: equipamentoId,
+          dados: dadosProcessados as any,
+          fonte: 'MQTT',
+          timestamp_dados: timestamp,
+          timestamp_fim: timestamp,
+          num_leituras: 1,
+          qualidade: qualidadeOriginal,
+          potencia_ativa_kw: potenciaMediaKw,
+          energia_kwh: energiaKwh,
+        },
+      });
+    } catch (error) {
+      console.error(`❌ [Gateway] Falha ao salvar no PostgreSQL.`, error);
+      if (this.redisBuffer) {
+        await this.redisBuffer.salvarNoBuffer(equipamentoId, timestamp, dadosProcessados);
+      }
+      throw error;
+    }
+
+    if (ignorarParaAgregado) {
+      console.log(
+        `⚠️ [Gateway] ${equipamentoId.substring(0, 8)} | ` +
+        `bruto-only (${ehBootInit ? 'sts!=1 ' : ''}${ehFirmwareAntigo ? 'cdo=null ' : ''}${ehDumpPosBoot ? 'NSU=1' : ''})`,
+      );
+    } else {
+      console.log(
+        `✅ [Gateway] ${equipamentoId.substring(0, 8)} | ` +
+        `${(energiaKwh ?? 0).toFixed(3)}kWh | ${(potenciaMediaKw ?? 0).toFixed(2)}kW | ` +
+        `phf=${phf} phr=${phr}${glitchPhf ? ' (phf glitch zerado)' : ''}`,
+      );
+    }
+  }
+
   private async salvarDadosM160Resumo(
     equipamentoId: string,
     dados: any,

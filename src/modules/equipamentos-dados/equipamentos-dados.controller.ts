@@ -1,6 +1,12 @@
 import { Controller, Get, Param, Query, Logger, Post, Put, Body } from '@nestjs/common';
 import { CurrentUser, PermissionScopeService } from '@aupus/api-shared';
-import { EquipamentosDadosService } from './equipamentos-dados.service';
+import { EquipamentosDadosService, EquipamentoAgregacaoConfig } from './equipamentos-dados.service';
+
+interface GraficoMultiplosBody {
+  equipamentos?: Array<{ id: string; sinal?: 1 | -1; multiplicador?: number }>;
+  equipamentosIds?: string[];
+  fatorPerdas?: number;
+}
 import { CalculoCustosService } from './services/calculo-custos.service';
 import { ConfiguracaoCustoService } from './services/configuracao-custo.service';
 import { GatewayGraficosService } from './services/gateway-graficos.service';
@@ -171,97 +177,131 @@ export class EquipamentosDadosController {
   // ============================================================================
 
   /**
+   * Normaliza body de múltiplos equipamentos aceitando dois formatos:
+   *  - `equipamentos: [{id, sinal?, multiplicador?}]` (formato rico, recomendado)
+   *  - `equipamentosIds: string[]` (legado, assume sinal=+1, multiplicador=1)
+   */
+  private normalizarEquipamentos(body: GraficoMultiplosBody): EquipamentoAgregacaoConfig[] {
+    if (body.equipamentos && body.equipamentos.length > 0) {
+      return body.equipamentos.map(e => ({
+        id: e.id,
+        sinal: e.sinal === -1 ? -1 : 1,
+        multiplicador: typeof e.multiplicador === 'number' && e.multiplicador > 0 ? e.multiplicador : 1,
+      }));
+    }
+    if (body.equipamentosIds && body.equipamentosIds.length > 0) {
+      return body.equipamentosIds.map(id => ({ id, sinal: 1 as const, multiplicador: 1 }));
+    }
+    return [];
+  }
+
+  /**
    * POST /equipamentos-dados/multiplos-inversores/grafico-dia
-   * Alias que aponta para versão otimizada V2
-   * ✅ Usado pelo frontend (AupusNexOn)
+   * Agregação otimizada com sinal/multiplicador/perdas por equipamento.
+   * Aceita range customizado via query inicio/fim (ISO datetime, máx 31 dias).
    */
   @Post('multiplos-inversores/grafico-dia')
   async getGraficoDiaMultiplosInversoresAlias(
-    @Body('equipamentosIds') equipamentosIds: string[],
+    @Body() body: GraficoMultiplosBody,
     @Query('data') data?: string,
+    @Query('inicio') inicio?: string,
+    @Query('fim') fim?: string,
     @CurrentUser() user?: any,
   ) {
-    this.logger.log(`⚡ POST /multiplos-inversores/grafico-dia → V2 (${equipamentosIds.length} equipamentos)`);
-    return this.service.getGraficoDiaMultiplosInversores_V2(equipamentosIds, data, user);
+    const equipamentos = this.normalizarEquipamentos(body);
+    this.logger.log(`⚡ POST /multiplos-inversores/grafico-dia → V2 (${equipamentos.length} equipamentos)`);
+    return this.service.getGraficoDiaMultiplosInversores_V2(
+      equipamentos,
+      { data, inicio, fim, fatorPerdas: body.fatorPerdas },
+      user,
+    );
   }
 
   /**
    * POST /equipamentos-dados/multiplos-inversores/grafico-mes
-   * Alias que aponta para versão otimizada V2
-   * ✅ Usado pelo frontend (AupusNexOn)
    */
   @Post('multiplos-inversores/grafico-mes')
   async getGraficoMesMultiplosInversoresAlias(
-    @Body('equipamentosIds') equipamentosIds: string[],
+    @Body() body: GraficoMultiplosBody,
     @Query('mes') mes?: string,
     @CurrentUser() user?: any,
   ) {
-    this.logger.log(`⚡ POST /multiplos-inversores/grafico-mes → V2 (${equipamentosIds.length} equipamentos)`);
-    return this.service.getGraficoMesMultiplosInversores_V2(equipamentosIds, mes, user);
+    const equipamentos = this.normalizarEquipamentos(body);
+    this.logger.log(`⚡ POST /multiplos-inversores/grafico-mes → V2 (${equipamentos.length} equipamentos)`);
+    return this.service.getGraficoMesMultiplosInversores_V2(
+      equipamentos,
+      { mes, fatorPerdas: body.fatorPerdas },
+      user,
+    );
   }
 
   /**
    * POST /equipamentos-dados/multiplos-inversores/grafico-ano
-   * Alias que aponta para versão otimizada V2
-   * ✅ Usado pelo frontend (AupusNexOn)
    */
   @Post('multiplos-inversores/grafico-ano')
   async getGraficoAnoMultiplosInversoresAlias(
-    @Body('equipamentosIds') equipamentosIds: string[],
+    @Body() body: GraficoMultiplosBody,
     @Query('ano') ano?: string,
     @CurrentUser() user?: any,
   ) {
-    this.logger.log(`⚡ POST /multiplos-inversores/grafico-ano → V2 (${equipamentosIds.length} equipamentos)`);
-    return this.service.getGraficoAnoMultiplosInversores_V2(equipamentosIds, ano, user);
+    const equipamentos = this.normalizarEquipamentos(body);
+    this.logger.log(`⚡ POST /multiplos-inversores/grafico-ano → V2 (${equipamentos.length} equipamentos)`);
+    return this.service.getGraficoAnoMultiplosInversores_V2(
+      equipamentos,
+      { ano, fatorPerdas: body.fatorPerdas },
+      user,
+    );
   }
 
   // ============================================================================
   // ✅ ENDPOINTS OTIMIZADOS V2 - Agregação no Banco (Múltiplos Equipamentos)
   // ============================================================================
 
-  /**
-   * POST /equipamentos-dados/grafico-dia-multiplos-v2
-   * 🚀 OTIMIZADO: Agregação no PostgreSQL (5 min intervals)
-   * Performance: 100x mais rápido (5s → 50ms)
-   */
   @Post('grafico-dia-multiplos-v2')
   async getGraficoDiaMultiplosV2(
-    @Body('equipamentosIds') equipamentosIds: string[],
-    @Body('data') data?: string,
+    @Body() body: GraficoMultiplosBody,
+    @Query('data') data?: string,
+    @Query('inicio') inicio?: string,
+    @Query('fim') fim?: string,
     @CurrentUser() user?: any,
   ) {
-    this.logger.log(`⚡ POST /grafico-dia-multiplos-v2 (${equipamentosIds.length} equipamentos)`);
-    return this.service.getGraficoDiaMultiplosInversores_V2(equipamentosIds, data, user);
+    const equipamentos = this.normalizarEquipamentos(body);
+    this.logger.log(`⚡ POST /grafico-dia-multiplos-v2 (${equipamentos.length} equipamentos)`);
+    return this.service.getGraficoDiaMultiplosInversores_V2(
+      equipamentos,
+      { data, inicio, fim, fatorPerdas: body.fatorPerdas },
+      user,
+    );
   }
 
-  /**
-   * POST /equipamentos-dados/grafico-mes-multiplos-v2
-   * 🚀 OTIMIZADO: Agregação no PostgreSQL (daily)
-   * Performance: 100x mais rápido (30s → 300ms)
-   */
   @Post('grafico-mes-multiplos-v2')
   async getGraficoMesMultiplosV2(
-    @Body('equipamentosIds') equipamentosIds: string[],
-    @Body('mes') mes?: string,
+    @Body() body: GraficoMultiplosBody,
+    @Query('mes') mes?: string,
     @CurrentUser() user?: any,
   ) {
-    this.logger.log(`⚡ POST /grafico-mes-multiplos-v2 (${equipamentosIds.length} equipamentos)`);
-    return this.service.getGraficoMesMultiplosInversores_V2(equipamentosIds, mes, user);
+    const equipamentos = this.normalizarEquipamentos(body);
+    this.logger.log(`⚡ POST /grafico-mes-multiplos-v2 (${equipamentos.length} equipamentos)`);
+    return this.service.getGraficoMesMultiplosInversores_V2(
+      equipamentos,
+      { mes, fatorPerdas: body.fatorPerdas },
+      user,
+    );
   }
 
-  /**
-   * POST /equipamentos-dados/grafico-ano-multiplos-v2
-   * 🚀 OTIMIZADO: Agregação no PostgreSQL (monthly)
-   * Performance: 100x mais rápido (60s → 600ms)
-   */
   @Post('grafico-ano-multiplos-v2')
   async getGraficoAnoMultiplosV2(
-    @Body('equipamentosIds') equipamentosIds: string[],
-    @Body('ano') ano?: string,
+    @Body() body: GraficoMultiplosBody,
+    @Query('ano') ano?: string,
     @CurrentUser() user?: any,
   ) {
-    this.logger.log(`⚡ POST /grafico-ano-multiplos-v2 (${equipamentosIds.length} equipamentos)`);
-    return this.service.getGraficoAnoMultiplosInversores_V2(equipamentosIds, ano, user);
+    const equipamentos = this.normalizarEquipamentos(body);
+    this.logger.log(`⚡ POST /grafico-ano-multiplos-v2 (${equipamentos.length} equipamentos)`);
+    return this.service.getGraficoAnoMultiplosInversores_V2(
+      equipamentos,
+      { ano, fatorPerdas: body.fatorPerdas },
+      user,
+    );
   }
 
   // ============================================================================
