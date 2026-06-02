@@ -1391,8 +1391,12 @@ export class EquipamentosDadosService {
     const now = new Date();
     const ano = opts.mes ? parseInt(opts.mes.split('-')[0]) : now.getFullYear();
     const mesNum = opts.mes ? parseInt(opts.mes.split('-')[1]) : now.getMonth() + 1;
-    const dataInicio = new Date(ano, mesNum - 1, 1);
-    const dataFim = new Date(ano, mesNum, 1);
+    // Range em BRT (UTC-3) — sem isso o servidor (Node TZ variavel) interpreta
+    // new Date(ano, mes-1, 1) como local do host e desloca o intervalo, o que
+    // empurra leituras de antes da meia-noite BRT pro mes anterior.
+    const dataInicio = new Date(`${ano}-${String(mesNum).padStart(2, '0')}-01T00:00:00-03:00`);
+    const proxMes = mesNum === 12 ? { ano: ano + 1, mes: 1 } : { ano, mes: mesNum + 1 };
+    const dataFim = new Date(`${proxMes.ano}-${String(proxMes.mes).padStart(2, '0')}-01T00:00:00-03:00`);
 
     this.logger.log(`⚡ [V2 MÊS] ${equipsFiltrados.length} equipamentos, ${ano}-${mesNum}`);
 
@@ -1404,7 +1408,7 @@ export class EquipamentosDadosService {
       num_leituras: number;
     }>>`
       SELECT
-        DATE_TRUNC('day', timestamp_dados)::date as dia,
+        DATE_TRUNC('day', timestamp_dados AT TIME ZONE 'America/Sao_Paulo')::date as dia,
         equipamento_id,
         SUM(energia_kwh) as energia_total,
         AVG(potencia_ativa_kw) as potencia_media,
@@ -1413,7 +1417,7 @@ export class EquipamentosDadosService {
       WHERE equipamento_id = ANY(${ids}::text[])
         AND timestamp_dados >= ${dataInicio}
         AND timestamp_dados < ${dataFim}
-      GROUP BY DATE_TRUNC('day', timestamp_dados), equipamento_id
+      GROUP BY DATE_TRUNC('day', timestamp_dados AT TIME ZONE 'America/Sao_Paulo'), equipamento_id
       ORDER BY dia ASC
     `;
 
@@ -1425,11 +1429,16 @@ export class EquipamentosDadosService {
     const pontosMap = new Map<string, any>();
 
     dadosAgregados.forEach(row => {
+      // row.dia vem como Date(yyyy-mm-dd UTC midnight) do pg driver. getDate()
+      // converte pro TZ local do Node — se Node=BRT, 2026-06-01Z vira 31/05
+      // local e quebra o numero do dia. Extraindo do diaKey (UTC, ja casa com
+      // o AT TIME ZONE 'America/Sao_Paulo' do SQL acima).
       const diaKey = row.dia.toISOString().split('T')[0];
+      const diaDoMes = parseInt(diaKey.split('-')[2], 10);
       if (!pontosMap.has(diaKey)) {
         pontosMap.set(diaKey, {
           data: diaKey,
-          dia: row.dia.getDate(),
+          dia: diaDoMes,
           energia_kwh: 0,
           potencia_media_kw: 0,
           num_leituras: 0,
@@ -1506,8 +1515,10 @@ export class EquipamentosDadosService {
     const configMap = new Map(equipsFiltrados.map(e => [e.id, e]));
     const fatorPerdas = opts.fatorPerdas ?? 0;
 
-    const dataInicio = new Date(anoNum, 0, 1);
-    const dataFim = new Date(anoNum + 1, 0, 1);
+    // Range em BRT — mesmo motivo do V2 MÊS (evita deslocamento do mes
+    // por interpretacao de TZ local do host).
+    const dataInicio = new Date(`${anoNum}-01-01T00:00:00-03:00`);
+    const dataFim = new Date(`${anoNum + 1}-01-01T00:00:00-03:00`);
 
     this.logger.log(`⚡ [V2 ANO] ${equipsFiltrados.length} equipamentos, ${anoNum}`);
 
@@ -1519,7 +1530,7 @@ export class EquipamentosDadosService {
       num_leituras: number;
     }>>`
       SELECT
-        DATE_TRUNC('month', timestamp_dados)::date as mes,
+        DATE_TRUNC('month', timestamp_dados AT TIME ZONE 'America/Sao_Paulo')::date as mes,
         equipamento_id,
         SUM(energia_kwh) as energia_total,
         AVG(potencia_ativa_kw) as potencia_media,
@@ -1528,7 +1539,7 @@ export class EquipamentosDadosService {
       WHERE equipamento_id = ANY(${ids}::text[])
         AND timestamp_dados >= ${dataInicio}
         AND timestamp_dados < ${dataFim}
-      GROUP BY DATE_TRUNC('month', timestamp_dados), equipamento_id
+      GROUP BY DATE_TRUNC('month', timestamp_dados AT TIME ZONE 'America/Sao_Paulo'), equipamento_id
       ORDER BY mes ASC
     `;
 
@@ -1541,9 +1552,13 @@ export class EquipamentosDadosService {
     const pontosMap = new Map<string, any>();
 
     dadosAgregados.forEach(row => {
-      const mesData = new Date(row.mes);
-      const mesKey = `${mesData.getFullYear()}-${String(mesData.getMonth() + 1).padStart(2, '0')}`;
-      const mesNumero = mesData.getMonth() + 1;
+      // Extrair ano/mes do toISOString() em UTC (bate com AT TIME ZONE
+      // 'America/Sao_Paulo' do SQL). NUNCA usar getMonth/getFullYear do Date
+      // raw — eles convertem pra TZ local do Node e desalinham vs. o SQL.
+      const isoDay = row.mes.toISOString().split('T')[0]; // YYYY-MM-DD
+      const [, mesStr] = isoDay.split('-');
+      const mesKey = isoDay.slice(0, 7); // YYYY-MM
+      const mesNumero = parseInt(mesStr, 10);
 
       if (!pontosMap.has(mesKey)) {
         pontosMap.set(mesKey, {
