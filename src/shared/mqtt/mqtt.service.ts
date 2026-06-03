@@ -1208,7 +1208,12 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     const mqttMode = process.env.MQTT_MODE || 'production';
     const payload = dados?.data && typeof dados.data === 'object' ? dados.data : dados;
 
-    const cdo = dados?.cdo;
+    // cdo distingue firmware novo (presente) de antigo (payload {} → null). Em
+    // alguns firmwares o meta-field vem dentro de `data` em vez do envelope, então
+    // lê defensivo (inner → envelope), espelhando o COALESCE(data->>x, ->>x) que os
+    // leitores do gateway já usam pra phf/phr. Superset do comportamento anterior:
+    // quando cdo está no envelope, `payload?.cdo` é undefined e cai no fallback.
+    const cdo = payload?.cdo ?? dados?.cdo;
     const nsu = Number(dados?.NSU ?? dados?.nsu ?? NaN);
     const sts = Number(payload?.sts ?? NaN);
 
