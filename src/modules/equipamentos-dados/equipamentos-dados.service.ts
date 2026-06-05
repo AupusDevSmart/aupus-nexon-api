@@ -382,10 +382,11 @@ export class EquipamentosDadosService {
     console.log(`📊 [GRÁFICO MÊS]   Até: ${dataFim.toISOString()}`);
     console.log(`📊 [GRÁFICO MÊS] Tipo do equipamento: ${equipamento.tipo_equipamento_rel?.codigo}`);
 
-    // ✅ Energia diaria com 3 fontes (mesmo COALESCE, mas M-160 muda):
-    //   1. Para M-160: SUM(delta-phf positivo) — phf[i] - phf[i-1] por dia.
-    //      Ver docs/tickets/powermeter-delta-phf.md (substitui consumo_phf<=5).
-    //   2. Para inversor PV: energy.period_energy_kwh (cru, ja em kWh).
+    // ✅ Energia diaria por device, na fonte mais fiel:
+    //   0. Inversor PV: delta do CONTADOR energy.total_yield no dia (MAX-MIN).
+    //      Bate exato a "Geração Diária"; evita o /60 do period_energy_kwh.
+    //   1. M-160: SUM(delta-phf positivo) — ver docs/tickets/powermeter-delta-phf.md.
+    //   2. Fallback inversor sem contador: energy.period_energy_kwh.
     //   3. Fallback generico: coluna energia_kwh.
     const dados = await this.prisma.$queryRaw<Array<any>>`
         WITH leituras AS (
@@ -414,13 +415,20 @@ export class EquipamentosDadosService {
         )
         SELECT
           DATE(timestamp_dados) as data,
-          SUM(
-            COALESCE(
-              CASE WHEN delta_phf IS NOT NULL AND delta_phf > 0 THEN delta_phf END,
-              (dados->'energy'->>'period_energy_kwh')::numeric,
-              (dados->>'energia_kwh')::numeric
+          CASE
+            WHEN COUNT(dados->'energy'->>'total_yield') >= 2
+             AND (MAX((dados->'energy'->>'total_yield')::numeric)
+                  - MIN((dados->'energy'->>'total_yield')::numeric)) >= 0
+            THEN MAX((dados->'energy'->>'total_yield')::numeric)
+                 - MIN((dados->'energy'->>'total_yield')::numeric)
+            ELSE SUM(
+              COALESCE(
+                CASE WHEN delta_phf IS NOT NULL AND delta_phf > 0 THEN delta_phf END,
+                (dados->'energy'->>'period_energy_kwh')::numeric,
+                (dados->>'energia_kwh')::numeric
+              )
             )
-          ) as energia_kwh,
+          END as energia_kwh,
           COUNT(*) as num_registros,
           AVG(
             COALESCE(
@@ -431,6 +439,7 @@ export class EquipamentosDadosService {
         FROM leituras
         WHERE
           dados->>'phf' IS NOT NULL
+          OR dados->'energy'->>'total_yield' IS NOT NULL
           OR dados->'energy'->>'period_energy_kwh' IS NOT NULL
           OR dados->>'energia_kwh' IS NOT NULL
         GROUP BY DATE(timestamp_dados)
@@ -1101,10 +1110,11 @@ export class EquipamentosDadosService {
     console.log(`📊 [GRÁFICO ANO]   Até: ${dataFim.toISOString()}`);
     console.log(`📊 [GRÁFICO ANO] Tipo do equipamento: ${equipamento.tipo_equipamento_rel?.codigo}`);
 
-    // ✅ Energia mensal com 3 fontes (mesma logica do grafico de mes):
+    // ✅ Energia mensal por device, na fonte mais fiel (mesma logica do mes):
+    //   0. Inversor PV: delta do CONTADOR energy.total_yield no mes (MAX-MIN).
     //   1. M-160: SUM(delta-phf positivo) — ver docs/tickets/powermeter-delta-phf.md
-    //   2. Inversor PV: energy.period_energy_kwh
-    //   3. Fallback: coluna energia_kwh
+    //   2. Fallback inversor sem contador: energy.period_energy_kwh
+    //   3. Fallback generico: coluna energia_kwh
     const dados = await this.prisma.$queryRaw<Array<any>>`
       WITH leituras AS (
         SELECT
@@ -1121,17 +1131,25 @@ export class EquipamentosDadosService {
         DATE_TRUNC('month', timestamp_dados) as mes,
         TO_CHAR(timestamp_dados, 'YYYY-MM') as mes_formatado,
         TO_CHAR(timestamp_dados, 'TMMonth') as mes_nome,
-        SUM(
-          COALESCE(
-            -- Se a leitura tem phf (medidor tipo M-160), confia no delta-phf
-            -- (ja >= 0 graças ao GREATEST). Inclui zero — medidor parado nao
-            -- deve cair pra fallback de coluna energia_kwh com valor legado.
-            CASE WHEN dados->>'phf' IS NOT NULL THEN delta_phf END,
-            -- Senao: inversor PV (energy.period_energy_kwh) ou generico (coluna).
-            (dados->'energy'->>'period_energy_kwh')::numeric,
-            (dados->>'energia_kwh')::numeric
+        CASE
+          -- Inversor PV: delta do contador total_yield no mes (fonte mais fiel).
+          WHEN COUNT(dados->'energy'->>'total_yield') >= 2
+           AND (MAX((dados->'energy'->>'total_yield')::numeric)
+                - MIN((dados->'energy'->>'total_yield')::numeric)) >= 0
+          THEN MAX((dados->'energy'->>'total_yield')::numeric)
+               - MIN((dados->'energy'->>'total_yield')::numeric)
+          ELSE SUM(
+            COALESCE(
+              -- Se a leitura tem phf (medidor tipo M-160), confia no delta-phf
+              -- (ja >= 0 graças ao GREATEST). Inclui zero — medidor parado nao
+              -- deve cair pra fallback de coluna energia_kwh com valor legado.
+              CASE WHEN dados->>'phf' IS NOT NULL THEN delta_phf END,
+              -- Senao: inversor PV (energy.period_energy_kwh) ou generico (coluna).
+              (dados->'energy'->>'period_energy_kwh')::numeric,
+              (dados->>'energia_kwh')::numeric
+            )
           )
-        ) as energia_kwh,
+        END as energia_kwh,
         COUNT(*) as num_registros,
         AVG(
           COALESCE(
@@ -1142,6 +1160,7 @@ export class EquipamentosDadosService {
       FROM leituras
       WHERE
         dados->>'phf' IS NOT NULL
+        OR dados->'energy'->>'total_yield' IS NOT NULL
         OR dados->'energy'->>'period_energy_kwh' IS NOT NULL
         OR dados->>'energia_kwh' IS NOT NULL
       GROUP BY DATE_TRUNC('month', timestamp_dados), TO_CHAR(timestamp_dados, 'YYYY-MM'), TO_CHAR(timestamp_dados, 'TMMonth')
@@ -1205,7 +1224,7 @@ export class EquipamentosDadosService {
    * Aceita configuração por equipamento (sinal +/- para geração/consumo e multiplicador),
    * permitindo cálculo de demanda líquida e agrupamentos heterogêneos.
    */
-  async getGraficoDiaMultiplosInversores_V2(
+  async getGraficoDiaAgregado(
     equipamentos: EquipamentoAgregacaoConfig[],
     opts: OpcoesGraficoDia = {},
     user?: ScopedUser,
@@ -1267,7 +1286,6 @@ export class EquipamentosDadosService {
       intervalo: Date;
       equipamento_id: string;
       potencia_media: number;
-      energia_total: number;
       num_leituras: number;
     }>>`
       WITH base AS (
@@ -1275,8 +1293,7 @@ export class EquipamentosDadosService {
           DATE_TRUNC('minute', timestamp_dados) -
             (EXTRACT(minute FROM timestamp_dados)::int % ${bucketMin}) * INTERVAL '1 minute' AS intervalo,
           equipamento_id,
-          potencia_ativa_kw,
-          energia_kwh
+          potencia_ativa_kw
         FROM equipamentos_dados
         WHERE equipamento_id = ANY(${ids}::text[])
           AND timestamp_dados >= ${dataInicio}
@@ -1286,7 +1303,6 @@ export class EquipamentosDadosService {
         intervalo,
         equipamento_id,
         AVG(potencia_ativa_kw) AS potencia_media,
-        SUM(energia_kwh) AS energia_total,
         COUNT(*) AS num_leituras
       FROM base
       GROUP BY intervalo, equipamento_id
@@ -1298,47 +1314,121 @@ export class EquipamentosDadosService {
       select: { id: true, nome: true },
     });
     const equipamentosMap = new Map(equipamentosDb.map(e => [e.id.trim(), e.nome]));
-    const pontosMap = new Map<string, any>();
 
-    dadosAgregados.forEach(row => {
-      const intervaloKey = row.intervalo.toISOString();
-      if (!pontosMap.has(intervaloKey)) {
-        pontosMap.set(intervaloKey, {
-          timestamp: row.intervalo,
-          hora: row.intervalo.toISOString(),
-          potencia_kw: 0,
-          energia_kwh: 0,
-          num_leituras: 0,
-          equipamentos: {},
-        });
-      }
+    // CURVA (potência): forward-fill por device dentro de um cap de validade antes
+    // de somar, pra eliminar o serrilhado (que nascia de buckets onde um device não
+    // reportou e a soma despencava). Bridge de gaps curtos sem fabricar geração num
+    // outage longo — aí a série do device simplesmente termina.
+    // A ENERGIA total NÃO sai daqui: vem do contador acumulado de cada device
+    // (ver totaisDevice abaixo), fonte mais fiel.
+    const bucketMs = bucketMin * 60_000;
+    const bucketHoras = bucketMin / 60; // só pra energia por-ponto (tooltip)
+    const FILL_CAP_MS = 30 * 60_000; // bridge de até 30 min de gap
 
-      // Trim do equipamento_id porque vem do Postgres como char(26) padded com
-      // espacos (CLAUDE.md "Armadilhas Conhecidas"). configMap eh indexado por
-      // ID trimmed que veio do request; sem trim, lookup falha silenciosamente
-      // e os agregados zeram.
-      const cfg = configMap.get(row.equipamento_id.trim());
-      if (!cfg) return;
+    // Trim do equipamento_id porque vem do Postgres como char(26) padded com
+    // espacos (CLAUDE.md "Armadilhas Conhecidas"). configMap eh indexado por ID
+    // trimmed que veio do request; sem trim, lookup falha e os agregados zeram.
+    const porDevice = new Map<string, Map<number, { pot: number; num: number }>>();
+    for (const row of dadosAgregados) {
+      const id = row.equipamento_id.trim();
+      if (!configMap.has(id)) continue;
+      let serie = porDevice.get(id);
+      if (!serie) { serie = new Map(); porDevice.set(id, serie); }
+      serie.set(row.intervalo.getTime(), {
+        pot: Number(row.potencia_media),
+        num: Number(row.num_leituras),
+      });
+    }
 
-      const potBruta = Number(row.potencia_media) * cfg.multiplicador;
-      const enBruta = Number(row.energia_total) * cfg.multiplicador;
-      // Perdas só em geração (sinal = 1)
+    const pontosMap = new Map<number, any>();
+
+    for (const [id, serie] of porDevice) {
+      const cfg = configMap.get(id)!;
+      const nome = equipamentosMap.get(id) ?? id;
+      // Perdas só em geração (sinal = 1).
       const reducao = cfg.sinal === 1 && fatorPerdas > 0 ? 1 - fatorPerdas / 100 : 1;
-      const potAjustada = potBruta * reducao * cfg.sinal;
-      const enAjustada = enBruta * reducao * cfg.sinal;
+      const fator = cfg.multiplicador * reducao * cfg.sinal;
 
-      const ponto = pontosMap.get(intervaloKey);
-      ponto.potencia_kw += potAjustada;
-      ponto.energia_kwh += enAjustada;
-      ponto.num_leituras += Number(row.num_leituras);
-      ponto.equipamentos[equipamentosMap.get(row.equipamento_id.trim()) ?? row.equipamento_id.trim()] = {
-        potencia: potAjustada,
-        energia: enAjustada,
-      };
-    });
+      // Span ativo do device: do primeiro ao último bucket com leitura.
+      const tempos = Array.from(serie.keys()).sort((a, b) => a - b);
+      const primeiro = tempos[0];
+      const ultimo = tempos[tempos.length - 1];
+
+      let ultimaPot: number | null = null;
+      let ultimaT = -Infinity;
+      for (let t = primeiro; t <= ultimo; t += bucketMs) {
+        const atual = serie.get(t);
+        let potBruta: number | null;
+        let num = 0;
+        if (atual) {
+          potBruta = atual.pot;
+          num = atual.num;
+          ultimaPot = atual.pot;
+          ultimaT = t;
+        } else if (ultimaPot !== null && t - ultimaT <= FILL_CAP_MS) {
+          potBruta = ultimaPot; // forward-fill dentro do cap
+        } else {
+          potBruta = null; // gap longo: sem dado, não fabrica geração
+        }
+        if (potBruta === null) continue;
+
+        const potAjustada = potBruta * fator;
+        const enAjustada = potAjustada * bucketHoras;
+
+        let ponto = pontosMap.get(t);
+        if (!ponto) {
+          ponto = {
+            timestamp: new Date(t),
+            hora: new Date(t).toISOString(),
+            potencia_kw: 0,
+            energia_kwh: 0,
+            num_leituras: 0,
+            equipamentos: {},
+          };
+          pontosMap.set(t, ponto);
+        }
+        ponto.potencia_kw += potAjustada;
+        ponto.energia_kwh += enAjustada;
+        ponto.num_leituras += num;
+        ponto.equipamentos[nome] = { potencia: potAjustada, energia: enAjustada };
+      }
+    }
 
     const pontos = Array.from(pontosMap.values()).sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
-    const energiaTotal = pontos.reduce((sum, p) => sum + p.energia_kwh, 0);
+
+    // ENERGIA total por device a partir da fonte mais fiel: o CONTADOR acumulado
+    // do inversor (energy.total_yield no JSON) quando existir — bate exato a
+    // "Geração Diária" do equipamento. Senão, SUM(energia_kwh), que já é correto
+    // pra gateway (pulsos, atravessa gaps) e M160 (phf). Isso evita o /60 do
+    // inversor sem regredir devices com contador de pulsos.
+    const totaisDevice = await this.prisma.$queryRaw<Array<{
+      equipamento_id: string;
+      energia_total: number | null;
+    }>>`
+      SELECT
+        equipamento_id,
+        CASE
+          WHEN COUNT((dados->'energy'->>'total_yield')) >= 2
+           AND (MAX((dados->'energy'->>'total_yield')::numeric)
+                - MIN((dados->'energy'->>'total_yield')::numeric)) >= 0
+          THEN MAX((dados->'energy'->>'total_yield')::numeric)
+               - MIN((dados->'energy'->>'total_yield')::numeric)
+          ELSE SUM(energia_kwh)
+        END AS energia_total
+      FROM equipamentos_dados
+      WHERE equipamento_id = ANY(${ids}::text[])
+        AND timestamp_dados >= ${dataInicio}
+        AND timestamp_dados < ${dataFim}
+      GROUP BY equipamento_id
+    `;
+
+    let energiaTotal = 0;
+    for (const row of totaisDevice) {
+      const cfg = configMap.get(row.equipamento_id.trim());
+      if (!cfg) continue;
+      const reducao = cfg.sinal === 1 && fatorPerdas > 0 ? 1 - fatorPerdas / 100 : 1;
+      energiaTotal += (Number(row.energia_total) || 0) * cfg.multiplicador * reducao * cfg.sinal;
+    }
 
     return {
       data: dataInicio.toISOString().split('T')[0],
@@ -1361,7 +1451,7 @@ export class EquipamentosDadosService {
    * Aceita configuração por equipamento (sinal +/- e multiplicador) para suportar
    * cálculo de demanda líquida em agrupamentos heterogêneos.
    */
-  async getGraficoMesMultiplosInversores_V2(
+  async getGraficoMesAgregado(
     equipamentos: EquipamentoAgregacaoConfig[],
     opts: OpcoesGraficoPeriodo = {},
     user?: ScopedUser,
@@ -1408,11 +1498,18 @@ export class EquipamentosDadosService {
       num_leituras: number;
     }>>`
       SELECT
-        DATE_TRUNC('day', timestamp_dados AT TIME ZONE 'America/Sao_Paulo')::date as dia,
+        DATE_TRUNC('day', timestamp_dados AT TIME ZONE 'America/Sao_Paulo')::date AS dia,
         equipamento_id,
-        SUM(energia_kwh) as energia_total,
-        AVG(potencia_ativa_kw) as potencia_media,
-        COUNT(*) as num_leituras
+        CASE
+          WHEN COUNT((dados->'energy'->>'total_yield')) >= 2
+           AND (MAX((dados->'energy'->>'total_yield')::numeric)
+                - MIN((dados->'energy'->>'total_yield')::numeric)) >= 0
+          THEN MAX((dados->'energy'->>'total_yield')::numeric)
+               - MIN((dados->'energy'->>'total_yield')::numeric)
+          ELSE SUM(energia_kwh)
+        END AS energia_total,
+        AVG(potencia_ativa_kw) AS potencia_media,
+        COUNT(*) AS num_leituras
       FROM equipamentos_dados
       WHERE equipamento_id = ANY(${ids}::text[])
         AND timestamp_dados >= ${dataInicio}
@@ -1488,7 +1585,7 @@ export class EquipamentosDadosService {
    *
    * Aceita configuração por equipamento (sinal +/- e multiplicador).
    */
-  async getGraficoAnoMultiplosInversores_V2(
+  async getGraficoAnoAgregado(
     equipamentos: EquipamentoAgregacaoConfig[],
     opts: OpcoesGraficoAno = {},
     user?: ScopedUser,
@@ -1530,11 +1627,18 @@ export class EquipamentosDadosService {
       num_leituras: number;
     }>>`
       SELECT
-        DATE_TRUNC('month', timestamp_dados AT TIME ZONE 'America/Sao_Paulo')::date as mes,
+        DATE_TRUNC('month', timestamp_dados AT TIME ZONE 'America/Sao_Paulo')::date AS mes,
         equipamento_id,
-        SUM(energia_kwh) as energia_total,
-        AVG(potencia_ativa_kw) as potencia_media,
-        COUNT(*) as num_leituras
+        CASE
+          WHEN COUNT((dados->'energy'->>'total_yield')) >= 2
+           AND (MAX((dados->'energy'->>'total_yield')::numeric)
+                - MIN((dados->'energy'->>'total_yield')::numeric)) >= 0
+          THEN MAX((dados->'energy'->>'total_yield')::numeric)
+               - MIN((dados->'energy'->>'total_yield')::numeric)
+          ELSE SUM(energia_kwh)
+        END AS energia_total,
+        AVG(potencia_ativa_kw) AS potencia_media,
+        COUNT(*) AS num_leituras
       FROM equipamentos_dados
       WHERE equipamento_id = ANY(${ids}::text[])
         AND timestamp_dados >= ${dataInicio}

@@ -210,7 +210,7 @@ export class EquipamentosDadosController {
   ) {
     const equipamentos = this.normalizarEquipamentos(body);
     this.logger.log(`⚡ POST /multiplos-inversores/grafico-dia → V2 (${equipamentos.length} equipamentos)`);
-    return this.service.getGraficoDiaMultiplosInversores_V2(
+    return this.service.getGraficoDiaAgregado(
       equipamentos,
       { data, inicio, fim, fatorPerdas: body.fatorPerdas },
       user,
@@ -228,7 +228,7 @@ export class EquipamentosDadosController {
   ) {
     const equipamentos = this.normalizarEquipamentos(body);
     this.logger.log(`⚡ POST /multiplos-inversores/grafico-mes → V2 (${equipamentos.length} equipamentos)`);
-    return this.service.getGraficoMesMultiplosInversores_V2(
+    return this.service.getGraficoMesAgregado(
       equipamentos,
       { mes, fatorPerdas: body.fatorPerdas },
       user,
@@ -246,7 +246,7 @@ export class EquipamentosDadosController {
   ) {
     const equipamentos = this.normalizarEquipamentos(body);
     this.logger.log(`⚡ POST /multiplos-inversores/grafico-ano → V2 (${equipamentos.length} equipamentos)`);
-    return this.service.getGraficoAnoMultiplosInversores_V2(
+    return this.service.getGraficoAnoAgregado(
       equipamentos,
       { ano, fatorPerdas: body.fatorPerdas },
       user,
@@ -267,7 +267,7 @@ export class EquipamentosDadosController {
   ) {
     const equipamentos = this.normalizarEquipamentos(body);
     this.logger.log(`⚡ POST /grafico-dia-multiplos-v2 (${equipamentos.length} equipamentos)`);
-    return this.service.getGraficoDiaMultiplosInversores_V2(
+    return this.service.getGraficoDiaAgregado(
       equipamentos,
       { data, inicio, fim, fatorPerdas: body.fatorPerdas },
       user,
@@ -282,7 +282,7 @@ export class EquipamentosDadosController {
   ) {
     const equipamentos = this.normalizarEquipamentos(body);
     this.logger.log(`⚡ POST /grafico-mes-multiplos-v2 (${equipamentos.length} equipamentos)`);
-    return this.service.getGraficoMesMultiplosInversores_V2(
+    return this.service.getGraficoMesAgregado(
       equipamentos,
       { mes, fatorPerdas: body.fatorPerdas },
       user,
@@ -297,7 +297,7 @@ export class EquipamentosDadosController {
   ) {
     const equipamentos = this.normalizarEquipamentos(body);
     this.logger.log(`⚡ POST /grafico-ano-multiplos-v2 (${equipamentos.length} equipamentos)`);
-    return this.service.getGraficoAnoMultiplosInversores_V2(
+    return this.service.getGraficoAnoAgregado(
       equipamentos,
       { ano, fatorPerdas: body.fatorPerdas },
       user,
