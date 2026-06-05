@@ -871,6 +871,20 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
         timestampDados = new Date();
       }
 
+      // 🛑 Frame de inversor com overflow UINT do Modbus (leitura corrompida):
+      // total_yield=2^32, daily_yield=2^16/10, info.output_type=65535, etc.
+      // Recorrente (~1.4/dia nos inversores). Descarta o frame inteiro — nao
+      // bufferiza, nao emite, nao grava. O filtro read-time continua como rede de
+      // seguranca pro historico ja gravado.
+      const glitchUint = this.detectarOverflowUint(dados);
+      if (glitchUint.glitch) {
+        console.warn(
+          `🛑 [GLITCH UINT] Frame descartado de ${equipamento?.nome || equipamentoId.trim()} ` +
+          `@ ${timestampDados.toISOString()} — sinais: ${glitchUint.motivos.join(', ')}`,
+        );
+        return;
+      }
+
       // ✅ Se é Gateway (categoria 'Gateway' — A-966 SSU e variantes),
       // processar com extrator específico (path data.phf/phr, conversão KD).
       const categoriaNome = equipamento.tipo_equipamento_rel?.categoria_nome;
@@ -1540,6 +1554,35 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
   /**
    * Adiciona dados ao buffer de agregação
    */
+  /**
+   * Detecta frame de inversor com overflow UINT do Modbus (leitura corrompida).
+   * Assinaturas exatas de wrap (2^32, 2^16/10, 0xffff) + limites de sanidade que
+   * capturam variantes (UINT24, valores levemente off). Baseado na analise dos 41
+   * frames glitch da UFV Aupus II (mai-jun/2026): so uma fatia do registro Modbus
+   * corrompe (energy/power/info/status estouram; dc.* sobrevive), mas o frame
+   * inteiro e descartado por seguranca. Limites (>=5e8 kWh, >=1e8 W) sao ordens de
+   * grandeza acima de qualquer device real (lifetime real ~5e5 kWh).
+   */
+  private detectarOverflowUint(payload: any): { glitch: boolean; motivos: string[] } {
+    const motivos: string[] = [];
+    const e = payload?.energy ?? {};
+    const i = payload?.info ?? {};
+    const s = payload?.status ?? {};
+    const p = payload?.power ?? {};
+
+    if (e.total_yield === 4294967000) motivos.push('total_yield=2^32');
+    if (e.daily_yield === 6553.5) motivos.push('daily_yield=2^16/10');
+    if (i.output_type === 65535) motivos.push('output_type=2^16');
+    if (s.work_state === 65535) motivos.push('work_state=2^16');
+    if (i.nominal_power === 6553.5) motivos.push('nominal_power=2^16/10');
+    if (i.device_type === 'ffff') motivos.push('device_type=0xffff');
+
+    if (typeof e.total_yield === 'number' && e.total_yield >= 5e8) motivos.push('total_yield>=5e8');
+    if (typeof p.active_total === 'number' && p.active_total >= 1e8) motivos.push('active_total>=1e8');
+
+    return { glitch: motivos.length > 0, motivos };
+  }
+
   private addToBuffer(
     equipamentoId: string,
     timestamp: Date,
