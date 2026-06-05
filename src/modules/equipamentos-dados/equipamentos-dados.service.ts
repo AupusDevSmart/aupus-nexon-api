@@ -236,6 +236,12 @@ export class EquipamentosDadosService {
         where: {
           equipamento_id: equipamentoId,
           timestamp_dados: { gte: dataConsulta, lt: dataFimRaw },
+          // Descarta frame com overflow UINT (potencia absurda) — ver
+          // CAP_POTENCIA_GLITCH_KW.
+          OR: [
+            { potencia_ativa_kw: null },
+            { potencia_ativa_kw: { lt: CAP_POTENCIA_GLITCH_KW } },
+          ],
         },
         orderBy: { timestamp_dados: 'asc' },
         take: 2000,
@@ -326,6 +332,7 @@ export class EquipamentosDadosService {
       WHERE equipamento_id = ${equipamentoId}
         AND timestamp_dados >= ${dataConsulta}
         AND timestamp_dados < ${dataFim}
+        AND (potencia_ativa_kw IS NULL OR potencia_ativa_kw < ${CAP_POTENCIA_GLITCH_KW})
       GROUP BY intervalo
       ORDER BY intervalo ASC
     `;
