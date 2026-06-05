@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService, PermissionScopeService, ScopedUser } from '@aupus/api-shared';
 import { Prisma } from '@aupus/api-shared';
 import { CalculoCustosService } from '../equipamentos-dados/services/calculo-custos.service';
+import { detectarOverflowUint, ehPotenciaGlitch } from '../../shared/util/inverter-overflow';
 
 export interface DashboardData {
   timestamp: Date;
@@ -483,6 +484,18 @@ export class CoaService {
             } catch (e) {
               // Ignorar erro de parsing
             }
+          }
+
+          // 🛑 Frame com overflow UINT do Modbus (mesmo detector da ingestao):
+          // potencia absurda (>= 1 GW) inflava o card de usinas. Nao soma o glitch
+          // (status segue normal pelo timestamp abaixo). Cobre o historico ja
+          // gravado antes do fix de ingestao.
+          if (detectarOverflowUint(leitura.dados as any).glitch || ehPotenciaGlitch(potencia)) {
+            this.logger.warn(
+              `🛑 [GLITCH UINT] ignorado no /coa: ${unidade.nome} @ ` +
+              `${new Date(leitura.timestamp_dados).toISOString()} (potencia=${potencia} kW)`,
+            );
+            potencia = 0;
           }
 
           potenciaTotal += potencia;
