@@ -412,6 +412,7 @@ export class EquipamentosDadosService {
           WHERE equipamento_id = ${equipamentoId}
             AND timestamp_dados >= ${dataInicio}
             AND timestamp_dados < ${dataFim}
+            AND (potencia_ativa_kw IS NULL OR potencia_ativa_kw < ${CAP_POTENCIA_GLITCH_KW})
         )
         SELECT
           DATE(timestamp_dados) as data,
@@ -1124,6 +1125,7 @@ export class EquipamentosDadosService {
         WHERE equipamento_id = ${equipamentoId}
           AND timestamp_dados >= ${dataInicio}
           AND timestamp_dados < ${dataFim}
+          AND (potencia_ativa_kw IS NULL OR potencia_ativa_kw < ${CAP_POTENCIA_GLITCH_KW})
       )
       SELECT mes, mes_formatado, mes_nome,
              SUM(dia_kwh) as energia_kwh,
@@ -1307,6 +1309,7 @@ export class EquipamentosDadosService {
         WHERE equipamento_id = ANY(${ids}::text[])
           AND timestamp_dados >= ${dataInicio}
           AND timestamp_dados < ${dataFim}
+          AND (potencia_ativa_kw IS NULL OR potencia_ativa_kw < ${CAP_POTENCIA_GLITCH_KW})
       )
       SELECT
         intervalo,
@@ -1450,6 +1453,7 @@ export class EquipamentosDadosService {
         WHERE equipamento_id = ANY(${ids}::text[])
           AND timestamp_dados >= ${dataInicio}
           AND timestamp_dados < ${dataFim}
+          AND (potencia_ativa_kw IS NULL OR potencia_ativa_kw < ${CAP_POTENCIA_GLITCH_KW})
         GROUP BY equipamento_id, dia
       ) t
       GROUP BY equipamento_id
@@ -1544,6 +1548,7 @@ export class EquipamentosDadosService {
       WHERE equipamento_id = ANY(${ids}::text[])
         AND timestamp_dados >= ${dataInicio}
         AND timestamp_dados < ${dataFim}
+        AND (potencia_ativa_kw IS NULL OR potencia_ativa_kw < ${CAP_POTENCIA_GLITCH_KW})
       GROUP BY DATE_TRUNC('day', timestamp_dados AT TIME ZONE 'America/Sao_Paulo'), equipamento_id
       ORDER BY dia ASC
     `;
@@ -1676,6 +1681,7 @@ export class EquipamentosDadosService {
         WHERE equipamento_id = ANY(${ids}::text[])
           AND timestamp_dados >= ${dataInicio}
           AND timestamp_dados < ${dataFim}
+          AND (potencia_ativa_kw IS NULL OR potencia_ativa_kw < ${CAP_POTENCIA_GLITCH_KW})
         GROUP BY mes, dia, equipamento_id
       ) t
       GROUP BY mes, equipamento_id
@@ -1765,6 +1771,11 @@ export class EquipamentosDadosService {
 
 const LIMITE_EQUIPAMENTOS = 50;
 const MAX_DIAS_CUSTOM = 31;
+// Frame com potencia >= 1 GW e overflow UINT do Modbus (ex: total_yield=2^32,
+// potencia=isso/1000=4.29 GW, daily_yield=2^16/10=6553.5). Nenhum device real
+// chega perto de 1 GW, entao descartar a leitura inteira por esse sinal limpa
+// os 3 campos de uma vez — sem teto em daily_yield (que teria falso-positivo).
+const CAP_POTENCIA_GLITCH_KW = 1_000_000;
 
 export interface EquipamentoAgregacaoConfig {
   id: string;
