@@ -383,8 +383,8 @@ export class EquipamentosDadosService {
     console.log(`📊 [GRÁFICO MÊS] Tipo do equipamento: ${equipamento.tipo_equipamento_rel?.codigo}`);
 
     // ✅ Energia diaria por device, na fonte mais fiel:
-    //   0. Inversor PV: delta do CONTADOR energy.total_yield no dia (MAX-MIN).
-    //      Bate exato a "Geração Diária"; evita o /60 do period_energy_kwh.
+    //   0. Inversor PV: MAX(energy.daily_yield) no dia — contador diario, robusto
+    //      a glitch e = "Geração Diária"; evita o /60 do period_energy_kwh.
     //   1. M-160: SUM(delta-phf positivo) — ver docs/tickets/powermeter-delta-phf.md.
     //   2. Fallback inversor sem contador: energy.period_energy_kwh.
     //   3. Fallback generico: coluna energia_kwh.
@@ -416,11 +416,8 @@ export class EquipamentosDadosService {
         SELECT
           DATE(timestamp_dados) as data,
           CASE
-            WHEN COUNT(dados->'energy'->>'total_yield') >= 2
-             AND (MAX((dados->'energy'->>'total_yield')::numeric)
-                  - MIN((dados->'energy'->>'total_yield')::numeric)) >= 0
-            THEN MAX((dados->'energy'->>'total_yield')::numeric)
-                 - MIN((dados->'energy'->>'total_yield')::numeric)
+            WHEN COUNT(dados->'energy'->>'daily_yield') >= 1
+            THEN MAX((dados->'energy'->>'daily_yield')::numeric)
             ELSE SUM(
               COALESCE(
                 CASE WHEN delta_phf IS NOT NULL AND delta_phf > 0 THEN delta_phf END,
@@ -1110,8 +1107,9 @@ export class EquipamentosDadosService {
     console.log(`📊 [GRÁFICO ANO]   Até: ${dataFim.toISOString()}`);
     console.log(`📊 [GRÁFICO ANO] Tipo do equipamento: ${equipamento.tipo_equipamento_rel?.codigo}`);
 
-    // ✅ Energia mensal por device, na fonte mais fiel (mesma logica do mes):
-    //   0. Inversor PV: delta do CONTADOR energy.total_yield no mes (MAX-MIN).
+    // ✅ Energia mensal por device = soma dos dias (mesma logica do mes):
+    //   0. Inversor PV: por dia, MAX(energy.daily_yield) — contador diario robusto
+    //      a glitch; somado no mes. (total_yield delta explodia com leitura zerada.)
     //   1. M-160: SUM(delta-phf positivo) — ver docs/tickets/powermeter-delta-phf.md
     //   2. Fallback inversor sem contador: energy.period_energy_kwh
     //   3. Fallback generico: coluna energia_kwh
@@ -1127,43 +1125,48 @@ export class EquipamentosDadosService {
           AND timestamp_dados >= ${dataInicio}
           AND timestamp_dados < ${dataFim}
       )
-      SELECT
-        DATE_TRUNC('month', timestamp_dados) as mes,
-        TO_CHAR(timestamp_dados, 'YYYY-MM') as mes_formatado,
-        TO_CHAR(timestamp_dados, 'TMMonth') as mes_nome,
-        CASE
-          -- Inversor PV: delta do contador total_yield no mes (fonte mais fiel).
-          WHEN COUNT(dados->'energy'->>'total_yield') >= 2
-           AND (MAX((dados->'energy'->>'total_yield')::numeric)
-                - MIN((dados->'energy'->>'total_yield')::numeric)) >= 0
-          THEN MAX((dados->'energy'->>'total_yield')::numeric)
-               - MIN((dados->'energy'->>'total_yield')::numeric)
-          ELSE SUM(
-            COALESCE(
-              -- Se a leitura tem phf (medidor tipo M-160), confia no delta-phf
-              -- (ja >= 0 graças ao GREATEST). Inclui zero — medidor parado nao
-              -- deve cair pra fallback de coluna energia_kwh com valor legado.
-              CASE WHEN dados->>'phf' IS NOT NULL THEN delta_phf END,
-              -- Senao: inversor PV (energy.period_energy_kwh) ou generico (coluna).
-              (dados->'energy'->>'period_energy_kwh')::numeric,
-              (dados->>'energia_kwh')::numeric
+      SELECT mes, mes_formatado, mes_nome,
+             SUM(dia_kwh) as energia_kwh,
+             SUM(n) as num_registros,
+             AVG(dia_pot) as potencia_media_kw
+      FROM (
+        SELECT
+          DATE_TRUNC('month', timestamp_dados) as mes,
+          TO_CHAR(timestamp_dados, 'YYYY-MM') as mes_formatado,
+          TO_CHAR(timestamp_dados, 'TMMonth') as mes_nome,
+          DATE_TRUNC('day', timestamp_dados) as dia,
+          CASE
+            -- Inversor PV: contador diario daily_yield, robusto a glitch (o delta
+            -- de total_yield explodia quando uma leitura vinha zerada). MAX por
+            -- dia = total do dia.
+            WHEN COUNT(dados->'energy'->>'daily_yield') >= 1
+            THEN MAX((dados->'energy'->>'daily_yield')::numeric)
+            ELSE SUM(
+              COALESCE(
+                -- M-160: delta-phf (>= 0 graças ao GREATEST). Inclui zero.
+                CASE WHEN dados->>'phf' IS NOT NULL THEN delta_phf END,
+                -- Senao: inversor sem contador (period_energy_kwh) ou generico.
+                (dados->'energy'->>'period_energy_kwh')::numeric,
+                (dados->>'energia_kwh')::numeric
+              )
             )
-          )
-        END as energia_kwh,
-        COUNT(*) as num_registros,
-        AVG(
-          COALESCE(
-            (dados->'power'->>'active_total')::numeric / 1000.0,
-            (dados->>'power_avg')::numeric
-          )
-        ) as potencia_media_kw
-      FROM leituras
-      WHERE
-        dados->>'phf' IS NOT NULL
-        OR dados->'energy'->>'total_yield' IS NOT NULL
-        OR dados->'energy'->>'period_energy_kwh' IS NOT NULL
-        OR dados->>'energia_kwh' IS NOT NULL
-      GROUP BY DATE_TRUNC('month', timestamp_dados), TO_CHAR(timestamp_dados, 'YYYY-MM'), TO_CHAR(timestamp_dados, 'TMMonth')
+          END as dia_kwh,
+          COUNT(*) as n,
+          AVG(
+            COALESCE(
+              (dados->'power'->>'active_total')::numeric / 1000.0,
+              (dados->>'power_avg')::numeric
+            )
+          ) as dia_pot
+        FROM leituras
+        WHERE
+          dados->>'phf' IS NOT NULL
+          OR dados->'energy'->>'daily_yield' IS NOT NULL
+          OR dados->'energy'->>'period_energy_kwh' IS NOT NULL
+          OR dados->>'energia_kwh' IS NOT NULL
+        GROUP BY mes, mes_formatado, mes_nome, dia
+      ) t
+      GROUP BY mes, mes_formatado, mes_nome
       ORDER BY mes ASC
     `;
 
@@ -1266,9 +1269,15 @@ export class EquipamentosDadosService {
       dataFim = new Date(dataInicio);
       dataFim.setDate(dataFim.getDate() + 1);
     } else {
+      // 'dia' sem parametro = HOJE em BRT (meia-noite local SP -> agora). Alinha a
+      // energia com o que o grafico mostra e com o reset diario do daily_yield;
+      // antes era ultimas 24h, que misturava parte de ontem e dobrava a energia.
       dataFim = new Date();
-      dataInicio = new Date(dataFim);
-      dataInicio.setHours(dataInicio.getHours() - 24);
+      const hojeSP = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'America/Sao_Paulo',
+        year: 'numeric', month: '2-digit', day: '2-digit',
+      }).format(dataFim);
+      dataInicio = new Date(`${hojeSP}T00:00:00-03:00`);
     }
 
     // Bucket: 5min para janelas até 24h, 30min para janelas maiores
@@ -1340,6 +1349,27 @@ export class EquipamentosDadosService {
       });
     }
 
+    // Guarda contra glitch de potencia: descarta buckets absurdamente acima do
+    // normal do proprio device (ex: frame ruim reportando MW num inversor de
+    // ~100 kW). Teto auto-calibrado = max(piso, FATOR x mediana das leituras
+    // positivas do device) — nao precisa de threshold fixo. Sem isso o
+    // forward-fill espalhava o spike por ate 30 min = "demanda bizarramente alta".
+    // A energia (daily_yield) ja e limitada e nao depende disto.
+    const FATOR_GLITCH = 12;
+    const PISO_TETO_KW = 50;
+    for (const serie of porDevice.values()) {
+      const positivos = Array.from(serie.values())
+        .map(v => v.pot)
+        .filter(p => p > 0)
+        .sort((a, b) => a - b);
+      if (positivos.length === 0) continue;
+      const mediana = positivos[Math.floor(positivos.length / 2)];
+      const teto = Math.max(PISO_TETO_KW, FATOR_GLITCH * mediana);
+      const aRemover: number[] = [];
+      for (const [t, v] of serie) if (v.pot > teto) aRemover.push(t);
+      for (const t of aRemover) serie.delete(t);
+    }
+
     const pontosMap = new Map<number, any>();
 
     for (const [id, serie] of porDevice) {
@@ -1396,29 +1426,32 @@ export class EquipamentosDadosService {
 
     const pontos = Array.from(pontosMap.values()).sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
 
-    // ENERGIA total por device a partir da fonte mais fiel: o CONTADOR acumulado
-    // do inversor (energy.total_yield no JSON) quando existir — bate exato a
-    // "Geração Diária" do equipamento. Senão, SUM(energia_kwh), que já é correto
-    // pra gateway (pulsos, atravessa gaps) e M160 (phf). Isso evita o /60 do
-    // inversor sem regredir devices com contador de pulsos.
+    // ENERGIA total por device, robusta a glitch: por DIA-BRT usa MAX(daily_yield)
+    // — o contador diario do inversor (= "Geração Diária"), limitado e imune a
+    // leitura espuria pra baixo. (Um total_yield zerado de reboot fazia o delta
+    // MAX-MIN explodir pra energia de vida toda -> demanda bizarra.) Devices sem
+    // daily_yield (gateway por pulsos, M160 por phf) caem em SUM(energia_kwh), ja
+    // correto. Soma os dias do periodo (1 dia no 'dia'; varios no custom).
     const totaisDevice = await this.prisma.$queryRaw<Array<{
       equipamento_id: string;
       energia_total: number | null;
     }>>`
-      SELECT
-        equipamento_id,
-        CASE
-          WHEN COUNT((dados->'energy'->>'total_yield')) >= 2
-           AND (MAX((dados->'energy'->>'total_yield')::numeric)
-                - MIN((dados->'energy'->>'total_yield')::numeric)) >= 0
-          THEN MAX((dados->'energy'->>'total_yield')::numeric)
-               - MIN((dados->'energy'->>'total_yield')::numeric)
-          ELSE SUM(energia_kwh)
-        END AS energia_total
-      FROM equipamentos_dados
-      WHERE equipamento_id = ANY(${ids}::text[])
-        AND timestamp_dados >= ${dataInicio}
-        AND timestamp_dados < ${dataFim}
+      SELECT equipamento_id, SUM(dia_kwh) AS energia_total
+      FROM (
+        SELECT
+          equipamento_id,
+          DATE_TRUNC('day', timestamp_dados AT TIME ZONE 'America/Sao_Paulo') AS dia,
+          CASE
+            WHEN COUNT(dados->'energy'->>'daily_yield') >= 1
+            THEN MAX((dados->'energy'->>'daily_yield')::numeric)
+            ELSE SUM(energia_kwh)
+          END AS dia_kwh
+        FROM equipamentos_dados
+        WHERE equipamento_id = ANY(${ids}::text[])
+          AND timestamp_dados >= ${dataInicio}
+          AND timestamp_dados < ${dataFim}
+        GROUP BY equipamento_id, dia
+      ) t
       GROUP BY equipamento_id
     `;
 
@@ -1501,11 +1534,8 @@ export class EquipamentosDadosService {
         DATE_TRUNC('day', timestamp_dados AT TIME ZONE 'America/Sao_Paulo')::date AS dia,
         equipamento_id,
         CASE
-          WHEN COUNT((dados->'energy'->>'total_yield')) >= 2
-           AND (MAX((dados->'energy'->>'total_yield')::numeric)
-                - MIN((dados->'energy'->>'total_yield')::numeric)) >= 0
-          THEN MAX((dados->'energy'->>'total_yield')::numeric)
-               - MIN((dados->'energy'->>'total_yield')::numeric)
+          WHEN COUNT(dados->'energy'->>'daily_yield') >= 1
+          THEN MAX((dados->'energy'->>'daily_yield')::numeric)
           ELSE SUM(energia_kwh)
         END AS energia_total,
         AVG(potencia_ativa_kw) AS potencia_media,
@@ -1626,24 +1656,29 @@ export class EquipamentosDadosService {
       potencia_media: number;
       num_leituras: number;
     }>>`
-      SELECT
-        DATE_TRUNC('month', timestamp_dados AT TIME ZONE 'America/Sao_Paulo')::date AS mes,
-        equipamento_id,
-        CASE
-          WHEN COUNT((dados->'energy'->>'total_yield')) >= 2
-           AND (MAX((dados->'energy'->>'total_yield')::numeric)
-                - MIN((dados->'energy'->>'total_yield')::numeric)) >= 0
-          THEN MAX((dados->'energy'->>'total_yield')::numeric)
-               - MIN((dados->'energy'->>'total_yield')::numeric)
-          ELSE SUM(energia_kwh)
-        END AS energia_total,
-        AVG(potencia_ativa_kw) AS potencia_media,
-        COUNT(*) AS num_leituras
-      FROM equipamentos_dados
-      WHERE equipamento_id = ANY(${ids}::text[])
-        AND timestamp_dados >= ${dataInicio}
-        AND timestamp_dados < ${dataFim}
-      GROUP BY DATE_TRUNC('month', timestamp_dados AT TIME ZONE 'America/Sao_Paulo'), equipamento_id
+      SELECT mes, equipamento_id,
+             SUM(dia_kwh) AS energia_total,
+             AVG(dia_pot) AS potencia_media,
+             SUM(n) AS num_leituras
+      FROM (
+        SELECT
+          DATE_TRUNC('month', timestamp_dados AT TIME ZONE 'America/Sao_Paulo')::date AS mes,
+          DATE_TRUNC('day', timestamp_dados AT TIME ZONE 'America/Sao_Paulo') AS dia,
+          equipamento_id,
+          CASE
+            WHEN COUNT(dados->'energy'->>'daily_yield') >= 1
+            THEN MAX((dados->'energy'->>'daily_yield')::numeric)
+            ELSE SUM(energia_kwh)
+          END AS dia_kwh,
+          AVG(potencia_ativa_kw) AS dia_pot,
+          COUNT(*) AS n
+        FROM equipamentos_dados
+        WHERE equipamento_id = ANY(${ids}::text[])
+          AND timestamp_dados >= ${dataInicio}
+          AND timestamp_dados < ${dataFim}
+        GROUP BY mes, dia, equipamento_id
+      ) t
+      GROUP BY mes, equipamento_id
       ORDER BY mes ASC
     `;
 
