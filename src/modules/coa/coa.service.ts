@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService, PermissionScopeService, ScopedUser } from '@aupus/api-shared';
 import { Prisma } from '@aupus/api-shared';
 import { CalculoCustosService } from '../equipamentos-dados/services/calculo-custos.service';
-import { detectarOverflowUint, ehPotenciaGlitch } from '../../shared/util/inverter-overflow';
+import { detectarOverflowUint, ehPotenciaGlitch, CAP_POTENCIA_GLITCH_KW } from '../../shared/util/inverter-overflow';
 
 export interface DashboardData {
   timestamp: Date;
@@ -304,6 +304,9 @@ export class CoaService {
         INNER JOIN equipamentos e ON e.id = ed.equipamento_id
         WHERE ed.timestamp_dados >= CURRENT_DATE::timestamp
           AND e.deleted_at IS NULL
+          -- Descarta frame com overflow UINT (potencia >= 1 GW) — o glitch traz
+          -- daily_yield=6553.5 junto, entao excluir aqui limpa a energia tambem.
+          AND (ed.potencia_ativa_kw IS NULL OR ed.potencia_ativa_kw < ${CAP_POTENCIA_GLITCH_KW})
       ),
       EnergiaM160Deltas AS (
         -- ✅ M160: delta-phf cumulativo do medidor por leitura.
@@ -345,14 +348,16 @@ export class CoaService {
         GROUP BY unidade_id
       ),
       EnergiaInversores AS (
-        -- Inversores: pegar energy.daily_yield da última leitura (em Wh, converter para kWh)
-        -- Campo: dados->energy->daily_yield (Wh) OU dados->daily_yield (kWh)
+        -- Inversores: pegar energy.daily_yield da última leitura (JA EM kWh).
+        -- daily_yield e o contador diario em kWh (resolucao 0.1; o glitch UINT16
+        -- era 6553.5 = 65535/10) — bate exato a "Geração Diária" do modal e o
+        -- MAX(daily_yield) dos agregados. (Antes dividia por 1000 supondo Wh, o
+        -- que fazia a energia do inversor ficar 1000x pra baixo no mapa/dashboard.)
         SELECT
           unidade_id,
           COALESCE(
-            -- Tentar energy.daily_yield (em Wh - estrutura MQTT)
-            CAST((dados->>'energy')::jsonb->>'daily_yield' AS NUMERIC) / 1000.0,
-            -- Fallback: daily_yield direto (já em kWh)
+            CAST((dados->>'energy')::jsonb->>'daily_yield' AS NUMERIC),
+            -- Fallback: daily_yield direto na raiz (formato alternativo)
             CAST(dados->>'daily_yield' AS NUMERIC),
             0
           ) as energia_dia_kwh
