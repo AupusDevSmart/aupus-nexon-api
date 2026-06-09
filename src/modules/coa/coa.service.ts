@@ -294,7 +294,10 @@ export class CoaService {
       WITH DadosDia AS (
         SELECT
           e.unidade_id,
-          e.tipo_equipamento,
+          -- Tipo via FK (tipos_equipamentos.nome), NAO a coluna denormalizada
+          -- e.tipo_equipamento — que esta NULL em ~67% dos equipamentos e fazia a
+          -- unidade cair fora das CTEs de energia (sintoma: ENERGIA HOJE 0.0 kWh).
+          te.nome AS tipo_equipamento,
           ed.equipamento_id,
           ed.dados,
           ed.energia_kwh,
@@ -302,6 +305,7 @@ export class CoaService {
           ROW_NUMBER() OVER (PARTITION BY ed.equipamento_id ORDER BY ed.timestamp_dados DESC) as rn_ultima
         FROM equipamentos_dados ed
         INNER JOIN equipamentos e ON e.id = ed.equipamento_id
+        INNER JOIN tipos_equipamentos te ON te.id = e.tipo_equipamento_id
         WHERE ed.timestamp_dados >= CURRENT_DATE::timestamp
           AND e.deleted_at IS NULL
           -- Descarta frame com overflow UINT (potencia >= 1 GW) — o glitch traz
