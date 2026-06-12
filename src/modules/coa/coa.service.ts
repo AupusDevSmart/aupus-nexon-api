@@ -3,6 +3,7 @@ import { PrismaService, PermissionScopeService, ScopedUser } from '@aupus/api-sh
 import { Prisma } from '@aupus/api-shared';
 import { CalculoCustosService } from '../equipamentos-dados/services/calculo-custos.service';
 import { detectarOverflowUint, ehPotenciaGlitch, CAP_POTENCIA_GLITCH_KW } from '../../shared/util/inverter-overflow';
+import { CATEGORIA_SINAL_PAIRS } from '../../shared/util/categoria-fluxo.backend';
 
 export interface DashboardData {
   timestamp: Date;
@@ -281,134 +282,181 @@ export class CoaService {
       SELECT * FROM UltimasLeituras
     `;
 
-    // 3.5. ✅ CORRIGIDO: Buscar energia gerada/consumida do dia por unidade
-    // Usa a coluna energia_kwh (soma todas as leituras do dia)
-    // - Para M160: cada leitura tem energia_kwh calculada (Pt * tempo)
-    // - Para inversores: usa energy.daily_yield da última leitura
-    // Boundary: CURRENT_DATE::timestamp (hoje 00:00 UTC, sem dependencia da TZ da sessao Postgres).
-    // Alinha com o controller do modal de custos (Date.UTC(ano, mes-1, dia, 0)) — ambos comparam
-    // contra timestamp_dados (timestamp without time zone, gravado em UTC). A expressao anterior
-    // CURRENT_DATE AT TIME ZONE 'America/Sao_Paulo' rendia 21:00 do dia anterior em sessao UTC,
-    // incluindo 3h a mais de leituras e divergindo do total exibido no modal de medidor.
-    const energiaAgregadaDia = await this.prisma.$queryRaw<any[]>`
-      WITH DadosDia AS (
-        SELECT
-          e.unidade_id,
-          -- Tipo via FK (tipos_equipamentos.nome), NAO a coluna denormalizada
-          -- e.tipo_equipamento — que esta NULL em ~67% dos equipamentos e fazia a
-          -- unidade cair fora das CTEs de energia (sintoma: ENERGIA HOJE 0.0 kWh).
-          te.nome AS tipo_equipamento,
-          ed.equipamento_id,
-          ed.dados,
-          ed.energia_kwh,
-          ed.timestamp_dados,
-          ROW_NUMBER() OVER (PARTITION BY ed.equipamento_id ORDER BY ed.timestamp_dados DESC) as rn_ultima
-        FROM equipamentos_dados ed
-        INNER JOIN equipamentos e ON e.id = ed.equipamento_id
-        INNER JOIN tipos_equipamentos te ON te.id = e.tipo_equipamento_id
-        WHERE ed.timestamp_dados >= CURRENT_DATE::timestamp
-          AND e.deleted_at IS NULL
-          -- Descarta frame com overflow UINT (potencia >= 1 GW) — o glitch traz
-          -- daily_yield=6553.5 junto, entao excluir aqui limpa a energia tambem.
-          AND (ed.potencia_ativa_kw IS NULL OR ed.potencia_ativa_kw < ${CAP_POTENCIA_GLITCH_KW})
+    // 3.5. Energia do dia por unidade — SEGUE a configuracao do grafico de demanda.
+    // Em vez de agregar TODOS os equipamentos, soma apenas os equipamentos
+    // selecionados na configuracao_demanda da unidade, com o sinal por categoria
+    // (geracao +1, consumo -1) e o fator de perdas — batendo com a energia "no
+    // periodo (dia)" do grafico. Usa o MESMO metodo do grafico (totaisDevice em
+    // equipamentos-dados.service.ts): por device, por dia-BRT, MAX(daily_yield) ou
+    // SUM(energia_kwh). Boundary em BRT (America/Sao_Paulo), igual ao grafico.
+    // Unidades SEM configuracao caem no fallback legado (somar tudo) mais abaixo.
+    const unidadeIds = unidades.map(u => u.id);
+
+    // Janela "hoje" em BRT (mesmo padrao do grafico de demanda): meia-noite SP -> agora.
+    const agora = new Date();
+    const hojeSP = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Sao_Paulo',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+    }).format(agora);
+    const dataInicioBRT = new Date(`${hojeSP}T00:00:00-03:00`);
+    const dataFimBRT = agora;
+
+    // Tabela VALUES (categoria -> sinal) a partir do mirror do CATEGORIA_FLUXO do
+    // front (categoria-fluxo.backend.ts). AMBIGUO/NEUTRO/categoria desconhecida ficam
+    // de fora (o INNER JOIN cat_sinal nao casa) — paridade com o grafico de demanda.
+    const catSinalValues = Prisma.join(
+      CATEGORIA_SINAL_PAIRS.map(([nome, sinal]) => Prisma.sql`(${nome}::text, ${sinal}::int)`),
+      ', ',
+    );
+
+    const energiaConfigDia = unidadeIds.length === 0 ? [] : await this.prisma.$queryRaw<any[]>(Prisma.sql`
+      WITH cat_sinal(categoria_nome, sinal) AS (
+        VALUES ${catSinalValues}
       ),
-      EnergiaM160Deltas AS (
-        -- ✅ M160: delta-phf cumulativo do medidor por leitura.
-        -- Ver docs/tickets/powermeter-delta-phf.md.
-        --
-        -- Algoritmo: phf[i] - MAX(phf[anteriores]) por equipamento.
-        -- - Glitch isolado de phf (firmware envia snapshot velho, ex: 10557
-        --   → 175 → 10557) é descartado porque quando phf "volta", MAX já
-        --   contém 10557 e o delta dá zero.
-        -- - LAG() puro teria contado +10382 falsos quando phf voltasse ao
-        --   normal — bug descoberto em 22/05 com CHINT.
-        -- - Trade-off: reset real de medidor (raro) tambem eh descartado.
-        --
-        -- NOTA: a window function (MAX OVER) precisa ficar em CTE separada
-        -- da agregação (SUM) — Postgres não aceita SUM(... MAX() OVER ...).
-        SELECT
-          unidade_id,
-          GREATEST(
-            COALESCE(
-              CAST(dados->>'phf' AS NUMERIC) - MAX(CAST(dados->>'phf' AS NUMERIC))
-                OVER (
-                  PARTITION BY equipamento_id
-                  ORDER BY timestamp_dados ASC
-                  ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
-                ),
-              0
-            ),
-            0
-          ) AS delta_kwh
-        FROM DadosDia
-        WHERE (tipo_equipamento ILIKE '%M-160%' OR tipo_equipamento ILIKE '%M160%')
-          AND dados->>'phf' IS NOT NULL
+      sel AS (
+        -- expande equipamentos_ids (Json: array de IDs ja trimados) por unidade
+        SELECT cd.unidade_id,
+               trim(elem.value) AS equipamento_id,
+               cd.aplicar_perdas,
+               cd.fator_perdas
+        FROM configuracao_demanda cd
+        CROSS JOIN LATERAL json_array_elements_text(cd.equipamentos_ids::json) AS elem(value)
+        WHERE cd.unidade_id = ANY(${unidadeIds}::text[])
+          AND json_typeof(cd.equipamentos_ids::json) = 'array'
       ),
-      EnergiaM160 AS (
-        SELECT
-          unidade_id,
-          SUM(delta_kwh) AS energia_dia_kwh
-        FROM EnergiaM160Deltas
-        GROUP BY unidade_id
+      dev AS (
+        -- categoria + sinal; INNER JOIN cat_sinal exclui NEUTRO/AMBIGUO/categoria nula.
+        -- equipamentos.id e char(26) padded; sel.equipamento_id veio trimado do JSON.
+        SELECT s.unidade_id, e.id AS equipamento_id, cs.sinal, s.aplicar_perdas, s.fator_perdas
+        FROM sel s
+        JOIN equipamentos e ON trim(e.id) = s.equipamento_id AND e.deleted_at IS NULL
+        JOIN tipos_equipamentos te ON te.id = e.tipo_equipamento_id
+        JOIN categorias_equipamentos ce ON ce.id = te.categoria_id
+        JOIN cat_sinal cs ON cs.categoria_nome = ce.nome
       ),
-      EnergiaInversores AS (
-        -- Inversores: pegar energy.daily_yield da última leitura (JA EM kWh).
-        -- daily_yield e o contador diario em kWh (resolucao 0.1; o glitch UINT16
-        -- era 6553.5 = 65535/10) — bate exato a "Geração Diária" do modal e o
-        -- MAX(daily_yield) dos agregados. (Antes dividia por 1000 supondo Wh, o
-        -- que fazia a energia do inversor ficar 1000x pra baixo no mapa/dashboard.)
-        SELECT
-          unidade_id,
-          COALESCE(
-            CAST((dados->>'energy')::jsonb->>'daily_yield' AS NUMERIC),
-            -- Fallback: daily_yield direto na raiz (formato alternativo)
-            CAST(dados->>'daily_yield' AS NUMERIC),
-            0
-          ) as energia_dia_kwh
-        FROM DadosDia
-        WHERE rn_ultima = 1
-          AND tipo_equipamento ILIKE '%INVERSOR%'
-          AND (
-            dados->>'energy' IS NOT NULL OR
-            dados->>'daily_yield' IS NOT NULL
-          )
+      energia_dia AS (
+        -- MESMO metodo do totaisDevice: por device, por dia-BRT
+        SELECT equipamento_id,
+               DATE_TRUNC('day', timestamp_dados AT TIME ZONE 'America/Sao_Paulo') AS dia,
+               CASE WHEN COUNT(dados->'energy'->>'daily_yield') >= 1
+                    THEN MAX((dados->'energy'->>'daily_yield')::numeric)
+                    ELSE SUM(energia_kwh) END AS dia_kwh
+        FROM equipamentos_dados
+        WHERE equipamento_id IN (SELECT equipamento_id FROM dev)
+          AND timestamp_dados >= ${dataInicioBRT}
+          AND timestamp_dados <  ${dataFimBRT}
+          AND (potencia_ativa_kw IS NULL OR potencia_ativa_kw < ${CAP_POTENCIA_GLITCH_KW})
+        GROUP BY equipamento_id, dia
       ),
-      EnergiaOutros AS (
-        -- Outros equipamentos: somar coluna energia_kwh
-        SELECT
-          unidade_id,
-          SUM(COALESCE(energia_kwh, 0)) as energia_dia_kwh
-        FROM DadosDia
-        WHERE tipo_equipamento NOT ILIKE '%INVERSOR%'
-          AND tipo_equipamento NOT ILIKE '%M-160%'
-          AND tipo_equipamento NOT ILIKE '%M160%'
-        GROUP BY unidade_id
-      ),
-      EnergiaUnificada AS (
-        SELECT * FROM EnergiaM160
-        UNION ALL
-        SELECT * FROM EnergiaInversores
-        UNION ALL
-        SELECT * FROM EnergiaOutros
+      energia_device AS (
+        SELECT equipamento_id, SUM(dia_kwh) AS energia_total
+        FROM energia_dia GROUP BY equipamento_id
       )
-      SELECT
-        unidade_id,
-        SUM(energia_dia_kwh) as energia_dia_kwh
-      FROM EnergiaUnificada
-      GROUP BY unidade_id
-    `;
+      SELECT d.unidade_id,
+             SUM(
+               COALESCE(ed.energia_total, 0) * d.sinal
+               * CASE WHEN d.sinal = 1 AND d.aplicar_perdas AND d.fator_perdas > 0
+                      THEN 1 - d.fator_perdas / 100.0 ELSE 1 END
+             ) AS energia_dia_kwh
+      FROM dev d
+      LEFT JOIN energia_device ed ON ed.equipamento_id = d.equipamento_id
+      GROUP BY d.unidade_id
+    `);
 
-    // Criar mapa de energia diária por unidade
+    // Mapa de energia diaria por unidade (config-driven)
     const energiaDiaPorUnidade = new Map<string, number>();
-    for (const row of energiaAgregadaDia) {
-      const energiaValor = Number(row.energia_dia_kwh) || 0;
-      energiaDiaPorUnidade.set(row.unidade_id, energiaValor);
-      this.logger.log(`[COA] Energia unidade ${row.unidade_id}: ${energiaValor} kWh`);
+    for (const row of energiaConfigDia) {
+      energiaDiaPorUnidade.set(row.unidade_id, Number(row.energia_dia_kwh) || 0);
     }
-    this.logger.log(`[COA] Energia agregada calculada para ${energiaDiaPorUnidade.size} unidades`);
 
-    // DEBUG: Mostrar resultado bruto da query
-    this.logger.debug(`[COA DEBUG] energiaAgregadaDia raw:`, JSON.stringify(energiaAgregadaDia, null, 2));
+    // Fallback legado: unidades SEM configuracao_demanda (ou sem equipamento que
+    // soma) nao aparecem acima. Pra elas, mantem o comportamento antigo (agregar
+    // TODOS os equipamentos). Roda a query legada SO pro subconjunto faltante.
+    // Boundary aqui e CURRENT_DATE (UTC), como era — coerente com o card de custo.
+    const faltantes = unidadeIds.filter(id => !energiaDiaPorUnidade.has(id));
+    if (faltantes.length > 0) {
+      const energiaLegado = await this.prisma.$queryRaw<any[]>`
+        WITH DadosDia AS (
+          SELECT
+            e.unidade_id,
+            te.nome AS tipo_equipamento,
+            ed.equipamento_id,
+            ed.dados,
+            ed.energia_kwh,
+            ed.timestamp_dados,
+            ROW_NUMBER() OVER (PARTITION BY ed.equipamento_id ORDER BY ed.timestamp_dados DESC) as rn_ultima
+          FROM equipamentos_dados ed
+          INNER JOIN equipamentos e ON e.id = ed.equipamento_id
+          INNER JOIN tipos_equipamentos te ON te.id = e.tipo_equipamento_id
+          WHERE ed.timestamp_dados >= CURRENT_DATE::timestamp
+            AND e.deleted_at IS NULL
+            AND e.unidade_id = ANY(${faltantes}::text[])
+            AND (ed.potencia_ativa_kw IS NULL OR ed.potencia_ativa_kw < ${CAP_POTENCIA_GLITCH_KW})
+        ),
+        EnergiaM160Deltas AS (
+          -- M160: delta-phf cumulativo (phf[i] - MAX(phf anteriores)); descarta glitch
+          -- isolado de phf. Window function em CTE separada do SUM.
+          SELECT
+            unidade_id,
+            GREATEST(
+              COALESCE(
+                CAST(dados->>'phf' AS NUMERIC) - MAX(CAST(dados->>'phf' AS NUMERIC))
+                  OVER (
+                    PARTITION BY equipamento_id
+                    ORDER BY timestamp_dados ASC
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                  ),
+                0
+              ),
+              0
+            ) AS delta_kwh
+          FROM DadosDia
+          WHERE (tipo_equipamento ILIKE '%M-160%' OR tipo_equipamento ILIKE '%M160%')
+            AND dados->>'phf' IS NOT NULL
+        ),
+        EnergiaM160 AS (
+          SELECT unidade_id, SUM(delta_kwh) AS energia_dia_kwh
+          FROM EnergiaM160Deltas GROUP BY unidade_id
+        ),
+        EnergiaInversores AS (
+          -- Inversores: energy.daily_yield da ultima leitura (JA EM kWh).
+          SELECT
+            unidade_id,
+            COALESCE(
+              CAST((dados->>'energy')::jsonb->>'daily_yield' AS NUMERIC),
+              CAST(dados->>'daily_yield' AS NUMERIC),
+              0
+            ) as energia_dia_kwh
+          FROM DadosDia
+          WHERE rn_ultima = 1
+            AND tipo_equipamento ILIKE '%INVERSOR%'
+            AND (dados->>'energy' IS NOT NULL OR dados->>'daily_yield' IS NOT NULL)
+        ),
+        EnergiaOutros AS (
+          SELECT unidade_id, SUM(COALESCE(energia_kwh, 0)) as energia_dia_kwh
+          FROM DadosDia
+          WHERE tipo_equipamento NOT ILIKE '%INVERSOR%'
+            AND tipo_equipamento NOT ILIKE '%M-160%'
+            AND tipo_equipamento NOT ILIKE '%M160%'
+          GROUP BY unidade_id
+        ),
+        EnergiaUnificada AS (
+          SELECT * FROM EnergiaM160
+          UNION ALL SELECT * FROM EnergiaInversores
+          UNION ALL SELECT * FROM EnergiaOutros
+        )
+        SELECT unidade_id, SUM(energia_dia_kwh) as energia_dia_kwh
+        FROM EnergiaUnificada
+        GROUP BY unidade_id
+      `;
+      for (const row of energiaLegado) {
+        energiaDiaPorUnidade.set(row.unidade_id, Number(row.energia_dia_kwh) || 0);
+      }
+    }
+    this.logger.log(`[COA] Energia hoje: ${energiaConfigDia.length} unidade(s) via config de demanda, ${faltantes.length} via fallback legado (somar tudo)`);
+
+    // DEBUG: Mostrar resultado bruto da query config-driven
+    this.logger.debug(`[COA DEBUG] energiaConfigDia raw:`, JSON.stringify(energiaConfigDia, null, 2));
 
     // 4. Criar mapa de leituras por unidade
     const leiturasPorUnidade = new Map<string, any[]>();
