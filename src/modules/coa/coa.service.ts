@@ -290,7 +290,11 @@ export class CoaService {
     // equipamentos-dados.service.ts): por device, por dia-BRT, MAX(daily_yield) ou
     // SUM(energia_kwh). Boundary em BRT (America/Sao_Paulo), igual ao grafico.
     // Unidades SEM configuracao caem no fallback legado (somar tudo) mais abaixo.
-    const unidadeIds = unidades.map(u => u.id);
+    // .trim() obrigatorio: unidades.id e char(26) padded com espaco no fim. No
+    // ANY(${unidadeIds}::text[]) o Postgres trima a coluna bpchar ao castar p/ text,
+    // entao um array padded NAO casa (query voltava []). Mantemos o map canonico
+    // TRIMADO ponta a ponta (set/has/get) pra o faltantes e o consumo baterem.
+    const unidadeIds = unidades.map(u => u.id.trim());
 
     // Janela "hoje" em BRT (mesmo padrao do grafico de demanda): meia-noite SP -> agora.
     const agora = new Date();
@@ -366,7 +370,7 @@ export class CoaService {
     // Mapa de energia diaria por unidade (config-driven)
     const energiaDiaPorUnidade = new Map<string, number>();
     for (const row of energiaConfigDia) {
-      energiaDiaPorUnidade.set(row.unidade_id, Number(row.energia_dia_kwh) || 0);
+      energiaDiaPorUnidade.set(String(row.unidade_id).trim(), Number(row.energia_dia_kwh) || 0);
     }
 
     // Fallback legado: unidades SEM configuracao_demanda (ou sem equipamento que
@@ -450,7 +454,7 @@ export class CoaService {
         GROUP BY unidade_id
       `;
       for (const row of energiaLegado) {
-        energiaDiaPorUnidade.set(row.unidade_id, Number(row.energia_dia_kwh) || 0);
+        energiaDiaPorUnidade.set(String(row.unidade_id).trim(), Number(row.energia_dia_kwh) || 0);
       }
     }
     this.logger.log(`[COA] Energia hoje: ${energiaConfigDia.length} unidade(s) via config de demanda, ${faltantes.length} via fallback legado (somar tudo)`);
@@ -508,7 +512,7 @@ export class CoaService {
 
         // ✅ CORRIGIDO: Usar energia agregada do dia (soma de todas as leituras desde meia-noite)
         // Em vez de somar apenas as últimas leituras
-        const energiaTotal = energiaDiaPorUnidade.get(unidade.id) || 0;
+        const energiaTotal = energiaDiaPorUnidade.get(unidade.id.trim()) || 0;
 
         // DEBUG: Log energia por unidade
         if (energiaTotal > 0) {
