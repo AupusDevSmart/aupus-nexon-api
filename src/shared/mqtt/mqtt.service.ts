@@ -94,6 +94,10 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
   // Comandos publicados aguardando ack do TON. Chave: cmd_id (UUID).
   private pendingCommands: Map<string, PendingCommand> = new Map();
 
+  // Listeners temporarios para `<topic_base>/ota/status`, usados pelo OtaService
+  // para limpar o retained do `<topic_base>/ota/cmd` assim que o TON confirma.
+  private otaStatusListeners: Map<string, (data: any) => void> = new Map();
+
   // Buffer para agregação de 1 minuto
   private buffers: Map<string, BufferData> = new Map();
   private bufferInterval = 60000; // 1 minuto em ms
@@ -373,6 +377,23 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     if (!ackEquipamentos.includes(equipId)) {
       ackEquipamentos.push(equipId);
     }
+
+    // 4) Subscribe ao tópico de entradas digitais (BI): <base>/inputs
+    // TON publica {d1..d6} on-change. Pra satellite LoRa, o gateway republica
+    // em <base>/satellite/<MAC>/inputs — mesmo padrao <topico>/inputs.
+    const inputsTopic = `${topic}/inputs`;
+    if (!this.subscriptions.has(inputsTopic)) {
+      this.subscriptions.set(inputsTopic, []);
+      this.client?.subscribe(inputsTopic, (err) => {
+        if (err) {
+          console.warn(`⚠️ [MQTT] Falha ao subscrever ${inputsTopic}: ${err.message}`);
+        }
+      });
+    }
+    const inputsEquipamentos = this.subscriptions.get(inputsTopic)!;
+    if (!inputsEquipamentos.includes(equipId)) {
+      inputsEquipamentos.push(equipId);
+    }
   }
 
   /**
@@ -421,6 +442,18 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
         return;
       }
 
+      // OTA status: roteado por listener temporario (registrado por OtaService).
+      // Nao deve cair em telemetria mesmo se topic estiver no `subscriptions` map.
+      if (topic.endsWith('/ota/status')) {
+        const handler = this.otaStatusListeners.get(topic);
+        if (handler) {
+          try { handler(dados); } catch (e) {
+            console.error(`❌ Erro no ota status handler de ${topic}:`, e);
+          }
+        }
+        return;
+      }
+
       const equipamentoIds = this.subscriptions.get(topic);
       if (!equipamentoIds || equipamentoIds.length === 0) {
         return;
@@ -434,12 +467,75 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
         return;
       }
 
+      // Entradas digitais (BI): TON publica {d1..d6} on-change.
+      if (topic.endsWith('/inputs')) {
+        for (const equipamentoId of equipamentoIds) {
+          await this.processInputs(equipamentoId, dados);
+        }
+        return;
+      }
+
       // Fluxo legado: telemetria
       for (const equipamentoId of equipamentoIds) {
         await this.processarDadosEquipamento(equipamentoId, dados, topic);
       }
     } catch (error) {
       console.error(`❌ Erro ao processar mensagem do tópico ${topic}:`, error);
+    }
+  }
+
+  /**
+   * Processa entradas digitais (BI) publicadas pelo TON em `<topic_base>/inputs`.
+   * Payload: { d1, d2, d3, d4, d5, d6 } com valores 0/1.
+   *
+   * Para satellites LoRa, o gateway republica em `<base>/satellite/<MAC>/inputs`,
+   * que é exatamente `<topico_do_equipamento>/inputs` — mesmo handler.
+   *
+   * Guarda o estado atual em equipamento_io_estado (upsert) e emite evento WS
+   * `equipamento_inputs`. O mapeamento dN → ponto semântico fica em ton_bi (resolvido
+   * na leitura, não aqui).
+   */
+  private async processInputs(
+    equipamentoId: string,
+    dados: Record<string, any>,
+  ): Promise<void> {
+    try {
+      // Normaliza para {d1..d6} -> 0/1; ignora chaves desconhecidas.
+      const estado: Record<string, number> = {};
+      for (let i = 1; i <= 6; i++) {
+        const k = `d${i}`;
+        if (dados[k] !== undefined && dados[k] !== null) {
+          estado[k] = dados[k] ? 1 : 0;
+        }
+      }
+      if (Object.keys(estado).length === 0) {
+        return;
+      }
+
+      const json = JSON.stringify(estado);
+      await this.prisma.$executeRaw`
+        INSERT INTO equipamento_io_estado (equipamento_id, inputs, updated_at)
+        VALUES (${equipamentoId}, ${json}::jsonb, now())
+        ON CONFLICT (equipamento_id)
+        DO UPDATE SET inputs = ${json}::jsonb, updated_at = now()
+      `;
+
+      if (this.logLevel === 'verbose') {
+        console.log(`🔘 [MQTT] inputs ${equipamentoId}: ${json}`);
+      }
+
+      // Emite WS pra atualização ao vivo no supervisório.
+      const equip = await this.prisma.equipamentos.findUnique({
+        where: { id: equipamentoId },
+        select: { diagrama_id: true },
+      });
+      this.emit('equipamento_inputs', {
+        equipamentoId,
+        diagramaId: equip?.diagrama_id ?? null,
+        estado,
+      });
+    } catch (error) {
+      console.error(`❌ [MQTT] Erro ao processar inputs de ${equipamentoId}:`, error);
     }
   }
 
@@ -504,10 +600,33 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
             }
           }
         } else if (equipamento.mac_address.toUpperCase() !== macRaw) {
-          console.warn(
-            `⚠️ [MQTT] Equipamento ${equipamento.nome} (${equipamentoId}) está vinculado ao MAC ` +
-              `${equipamento.mac_address} mas reportou ${macRaw}. Verificar substituição física.`,
-          );
+          // MAC mudou = troca de hardware. Substitui o vinculo pelo MAC novo
+          // (o velho sai, o novo entra) para o banco e o target_mac do OTA
+          // sempre refletirem a placa atual. Antes so' avisava e mantinha o
+          // velho — deixava o cadastro defasado apos uma troca legitima.
+          // Loga como evento de substituicao (trilha de auditoria); se isso
+          // disparar repetidamente, indica DUAS TONs no mesmo topico (erro de
+          // config), nao uma troca.
+          try {
+            await this.prisma.equipamentos.update({
+              where: { id: equipamentoId },
+              data: { mac_address: macRaw },
+            });
+            console.warn(
+              `🔄 [MQTT] Substituição de hardware: ${equipamento.nome} (${equipamentoId}) ` +
+                `MAC ${equipamento.mac_address} → ${macRaw} (atualizado automaticamente).`,
+            );
+          } catch (e: any) {
+            if (e?.code === 'P2002') {
+              // MAC novo ja' pertence a outro equipamento — nao sobrescreve.
+              console.warn(
+                `⚠️ [MQTT] MAC ${macRaw} ja' vinculado a outro equipamento; ` +
+                  `${equipamento.nome} (${equipamentoId}) segue com ${equipamento.mac_address}.`,
+              );
+            } else {
+              throw e;
+            }
+          }
         }
       }
 
@@ -856,12 +975,18 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       }
 
       // Salvar dados no banco
-      // Converter timestamp de segundos para milissegundos se necessário
+      // Converter timestamp de segundos para milissegundos se necessário.
+      // Se o TON envia string sentinel ("sem_ntp" quando NTP nao sincronizou),
+      // parseInt retorna NaN -> usa now do server como fallback.
       let timestampDados: Date;
       if (dados.timestamp) {
         // Se o timestamp é menor que 10 bilhões, provavelmente está em segundos
         const timestamp = typeof dados.timestamp === 'number' ? dados.timestamp : parseInt(dados.timestamp);
-        if (timestamp < 10000000000) {
+        // "sem_ntp" -> NaN. "0" (TON sem NTP) -> epoch 0 = 1970. Ambos invalidos:
+        // qualquer ts <= 1577836800 (2020-01-01 em segundos) vira now do server.
+        if (isNaN(timestamp) || timestamp < 1577836800) {
+          timestampDados = new Date();
+        } else if (timestamp < 10000000000) {
           // Timestamp em segundos - converter para milissegundos
           timestampDados = new Date(timestamp * 1000);
         } else {
@@ -1138,6 +1263,36 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
   }
 
   /**
+   * Registra listener temporario para `<topic_base>/ota/status`.
+   * Subscreve no broker se ainda nao estava subscrito. Sobrescreve handler
+   * anterior do mesmo topico (so um OTA por equipamento por vez).
+   * Usado pelo OtaService para limpar o retained do cmd assim que TON confirma.
+   */
+  public addOtaStatusListener(topic: string, handler: (data: any) => void): void {
+    const alreadyRegistered = this.otaStatusListeners.has(topic);
+    this.otaStatusListeners.set(topic, handler);
+    if (alreadyRegistered) return;
+    this.client?.subscribe(topic, (err) => {
+      if (err) {
+        console.warn(`⚠️ [MQTT] Falha subscrevendo ota/status ${topic}: ${err.message}`);
+      }
+    });
+  }
+
+  /**
+   * Remove listener de ota/status e desinscreve do broker.
+   */
+  public removeOtaStatusListener(topic: string): void {
+    if (!this.otaStatusListeners.has(topic)) return;
+    this.otaStatusListeners.delete(topic);
+    this.client?.unsubscribe(topic, (err) => {
+      if (err) {
+        console.warn(`⚠️ [MQTT] Falha desinscrevendo ota/status ${topic}: ${err.message}`);
+      }
+    });
+  }
+
+  /**
    * Retorna o número de tópicos subscritos (para health check)
    */
   public getSubscribedTopicsCount(): number {
@@ -1386,11 +1541,31 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
                 timestampDados = new Date(ts);
               }
             } else {
-              // Tentar Date parse direto
-              timestampDados = new Date(tsString);
+              // Tentar Date parse direto. Se falhar (ex: TON envia "sem_ntp"
+              // quando NTP nao sincronizou), manter o timestamp default em
+              // vez de gerar Invalid Date — Prisma rejeita Invalid Date no
+              // upsert. Cai no `timestamp` recebido como parametro (now do server).
+              const parsed = new Date(tsString);
+              if (!isNaN(parsed.getTime())) {
+                timestampDados = parsed;
+              }
             }
           }
         }
+      }
+
+      // Guard final: timestamp invalido OU implausivel (TON sem NTP manda "0" ou
+      // "sem_ntp"). "sem_ntp" -> parseInt = NaN -> Invalid Date. "0" -> new Date(0)
+      // = 1970-01-01 (valido mas absurdo). Sem este guard, ts "0" salvava tudo em
+      // 1970 e o upsert por (equipamento_id, timestamp_dados) colapsava TODAS as
+      // leituras numa unica linha — sumindo do grafico/custos. Qualquer data antes
+      // de 2020 vira hora do servidor.
+      const MIN_VALID_TS_MS = Date.UTC(2020, 0, 1);
+      if (isNaN(timestampDados.getTime()) || timestampDados.getTime() < MIN_VALID_TS_MS) {
+        timestampDados =
+          (!isNaN(timestamp.getTime()) && timestamp.getTime() >= MIN_VALID_TS_MS)
+            ? timestamp
+            : new Date();
       }
 
       // Calcular energia e potência do período

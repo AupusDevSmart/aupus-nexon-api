@@ -30,6 +30,11 @@ export class DiagramaGateway
     this.mqttService.on('equipamento_dados', (event) => {
       this.enviarAtualizacaoEquipamento(event);
     });
+
+    // Entradas digitais (BI) — estado on-change dos inputs do TON
+    this.mqttService.on('equipamento_inputs', (event) => {
+      this.enviarInputsEquipamento(event);
+    });
   }
 
   handleConnection(client: Socket) {
@@ -160,5 +165,24 @@ export class DiagramaGateway
       timestamp: dados.timestamp_dados,
       qualidade: dados.qualidade,
     });
+  }
+
+  /**
+   * Envia estado das entradas digitais (BI) para clientes conectados.
+   * event: { equipamentoId, diagramaId, estado: {d1..d6} }
+   */
+  private enviarInputsEquipamento(event: any) {
+    const { equipamentoId, diagramaId, estado } = event;
+
+    const payload = {
+      type: 'equipamento_inputs',
+      equipamentoId,
+      estado,
+    };
+
+    if (diagramaId) {
+      this.server.to(`diagrama:${diagramaId}`).emit('equipamento_inputs', payload);
+    }
+    this.server.to(`equipamento:${equipamentoId}`).emit('equipamento_inputs', payload);
   }
 }
