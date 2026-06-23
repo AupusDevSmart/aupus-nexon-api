@@ -1,4 +1,4 @@
-import { IsString, IsOptional, IsBoolean, IsObject, MinLength, MaxLength, ValidateNested } from 'class-validator';
+import { IsString, IsOptional, IsBoolean, IsObject, IsArray, MinLength, MaxLength, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
@@ -76,6 +76,40 @@ class ConfiguracoesDto {
   @IsOptional()
   @IsObject()
   labelPositions?: Record<string, { x: number; y: number }>;
+
+  // ===== Config do Sinóptico (overview) =====
+  // Guardadas aqui (configuracoes do diagrama) por sobreviverem aos saves de
+  // layout, que so tocam posicoes/conexoes. Objetos ficam como leaf (sem
+  // ValidateNested) para o whitelist nao exigir sub-DTOs.
+
+  @ApiPropertyOptional({
+    description: 'IDs dos medidores (PM) que alimentam os KPIs e o painel de grandezas (R2/R3)',
+    example: ['eqp_pm_01', 'eqp_pm_02'],
+  })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  grandezasPmIds?: string[];
+
+  @ApiPropertyOptional({
+    description: 'Preferências do gráfico configurável: variável e período (R6)',
+    example: { variavel: 'demanda', periodo: '24h' },
+  })
+  @IsOptional()
+  @IsObject()
+  grafico?: Record<string, any>;
+
+  @ApiPropertyOptional({
+    description:
+      'Mapa de pontos das caixas de dados por equipamento do diagrama (R8). ' +
+      'Chave = equipamento_id; valor = { kW?, V?, A?, Hz? } com { equipamentoFonteId, campoJson }',
+    example: {
+      eqp_inv_01: { kW: { equipamentoFonteId: 'eqp_pm_01', campoJson: 'power.active_total' } },
+    },
+  })
+  @IsOptional()
+  @IsObject()
+  diagramaPontos?: Record<string, any>;
 }
 
 export class CreateDiagramaDto {

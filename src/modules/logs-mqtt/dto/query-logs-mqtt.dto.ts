@@ -25,6 +25,10 @@ export class QueryLogsMqttDto {
 
   @IsOptional()
   @IsString()
+  unidadeId?: string;
+
+  @IsOptional()
+  @IsString()
   regraId?: string;
 
   @IsOptional()

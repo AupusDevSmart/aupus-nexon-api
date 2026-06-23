@@ -15,7 +15,7 @@ describe('categoria-fluxo.backend', () => {
     });
 
     it('consumo -> -1', () => {
-      expect(sinalAgregado('Power Meter (PM)')).toBe(-1);
+      expect(sinalAgregado('Power Meter')).toBe(-1);
       expect(sinalAgregado('Motor Elétrico')).toBe(-1);
       expect(sinalAgregado('Pivô')).toBe(-1);
     });
@@ -51,7 +51,7 @@ describe('categoria-fluxo.backend', () => {
           'Inversor PV',
           'Módulos PV',
           'Gateway',
-          'Power Meter (PM)',
+          'Power Meter',
           'Pivô',
         ]),
       );

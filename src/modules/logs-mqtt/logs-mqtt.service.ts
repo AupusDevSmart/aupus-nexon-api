@@ -15,6 +15,7 @@ export class LogsMqttService {
       limit,
       search,
       equipamentoId,
+      unidadeId,
       regraId,
       severidade,
       dataInicial,
@@ -28,6 +29,10 @@ export class LogsMqttService {
 
     if (equipamentoId && equipamentoId !== 'all') {
       where.equipamento_id = equipamentoId.trim();
+    }
+    if (unidadeId && unidadeId !== 'all') {
+      // Filtra pelos logs de equipamentos pertencentes a unidade
+      where.equipamento = { unidade_id: unidadeId.trim() };
     }
     if (regraId) {
       where.regra_id = regraId.trim();
