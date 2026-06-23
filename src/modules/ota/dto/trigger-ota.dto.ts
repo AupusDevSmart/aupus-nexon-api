@@ -42,6 +42,20 @@ export class TriggerOtaDto {
   @IsString()
   @Matches(/^[a-f0-9]{32}$/i, { message: 'md5 deve ser 32 hex chars' })
   md5?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'MAC do TON alvo (AA:BB:CC:DD:EE:FF). Se presente, firmwares com a verificacao ' +
+      'instalada (ota_safety >= v2) so aplicam se o MAC bater. Defesa contra OTA acidental ' +
+      'em TON errado quando varios TONs compartilham o mesmo topico no broker.',
+    example: '98:A3:16:EB:2E:3C',
+  })
+  @IsOptional()
+  @IsString()
+  @Matches(/^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$/, {
+    message: 'target_mac deve ser MAC EUI-48 (AA:BB:CC:DD:EE:FF)',
+  })
+  target_mac?: string;
 }
 
 /**
@@ -72,6 +86,15 @@ export class CompilePublishOtaDto {
   @MaxLength(32)
   @Matches(/^[a-zA-Z0-9_.+-]+$/)
   version!: string;
+
+  @ApiPropertyOptional({
+    description: 'MAC do TON alvo (opcional). Propagado pro payload OTA.',
+    example: '98:A3:16:EB:2E:3C',
+  })
+  @IsOptional()
+  @IsString()
+  @Matches(/^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$/)
+  target_mac?: string;
 }
 
 export class OtaStatusResponseDto {

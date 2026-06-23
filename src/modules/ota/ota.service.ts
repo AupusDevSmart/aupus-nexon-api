@@ -62,10 +62,12 @@ export class OtaService {
 
     const topicBase = equipamento.topico_mqtt.replace(/\/+$/, '');
     const topic = `${topicBase}/ota/cmd`;
+    const otaStatusTopic = `${topicBase}/ota/status`;
     const payload = {
       url: dto.url,
       version: dto.version,
       ...(dto.md5 ? { md5: dto.md5 } : {}),
+      ...(dto.target_mac ? { target_mac: dto.target_mac } : {}),
     };
 
     if (!this.mqtt.isConnected()) {
@@ -73,10 +75,51 @@ export class OtaService {
     }
 
     try {
+      // Publica com retain=true para que TON receba o cmd assim que conectar
+      // (mesmo se estava offline no momento do publish). MQTT broker guarda
+      // a ultima mensagem retida por topico — ao reconectar, cliente recebe.
       await this.mqtt.publish(topic, JSON.stringify(payload), {
         qos: 1,
-        retain: false,
+        retain: true,
       });
+
+      // Auto-clear do retained: caminho normal e' via `ota/status` (TON
+      // confirma success/rebooting). Fallback de 60s evita retained ficar
+      // preso se TON nunca confirmar (ex: download falhou e nao chegou a publicar).
+      //
+      // Sem isso, ao reboot o TON re-aplica o cmd retido em loop.
+      let cleared = false;
+      let fallbackTimer: NodeJS.Timeout | null = null;
+
+      const clearRetained = async (reason: string): Promise<void> => {
+        if (cleared) return;
+        cleared = true;
+        if (fallbackTimer) clearTimeout(fallbackTimer);
+        this.mqtt.removeOtaStatusListener(otaStatusTopic);
+        try {
+          await this.mqtt.publish(topic, '', { qos: 1, retain: true });
+          this.logger.log(`OTA retained limpo em ${topic} (motivo: ${reason})`);
+        } catch (err) {
+          this.logger.warn(
+            `Falha limpando OTA retained em ${topic}: ${(err as Error).message}`,
+          );
+        }
+      };
+
+      this.mqtt.addOtaStatusListener(otaStatusTopic, (data: any) => {
+        const state = data?.state;
+        if (state === 'success' || state === 'rebooting' || state === 'failed') {
+          void clearRetained(`state=${state}`);
+        }
+      });
+
+      // 180s: download (~35s) + reboot (~35s) + folga. Antes era 60s, mas
+      // disparava durante downloads grandes — TON respondia "already_in_progress"
+      // ao cmd vazio publicado pelo clear. Caminho normal continua via state=success
+      // (chega bem antes do timeout).
+      fallbackTimer = setTimeout(() => {
+        void clearRetained('timeout 180s');
+      }, 180000);
     } catch (err) {
       this.logger.error(
         `Falha publicando OTA em ${topic}: ${(err as Error).message}`,
@@ -86,7 +129,8 @@ export class OtaService {
 
     this.logger.log(
       `OTA disparado para ${equipamento.nome} (${equipamentoId}) ` +
-        `-> ${topic} version=${dto.version}`,
+        `-> ${topic} version=${dto.version} (retained=true, ` +
+        `auto-clear via ota/status ou fallback 60s)`,
     );
 
     return {
@@ -129,6 +173,7 @@ export class OtaService {
       url,
       version: artifact.version,
       md5: artifact.md5,
+      ...(dto.target_mac ? { target_mac: dto.target_mac } : {}),
     });
 
     return { ...result, size: artifact.size, md5: artifact.md5 };
