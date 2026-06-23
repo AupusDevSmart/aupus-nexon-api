@@ -28,6 +28,7 @@ import { EquipamentosCmdModule } from './modules/equipamentos-cmd/equipamentos-c
 import { EquipamentoPontosModule } from './modules/equipamento-pontos/equipamento-pontos.module';
 import { TonBoModule } from './modules/ton-bo/ton-bo.module';
 import { SinopticoModule } from './modules/sinoptico/sinoptico.module';
+import { TonBiModule } from './modules/ton-bi/ton-bi.module';
 
 // Modulos compartilhados (de @aupus/api-shared)
 import {
@@ -92,6 +93,7 @@ import { IotCatalogModule } from './modules/iot-catalog/iot-catalog.module';
     EquipamentoPontosModule,
     TonBoModule,
     SinopticoModule,
+    TonBiModule,
   ],
   controllers: [AppController],
   providers: [
