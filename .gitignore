@@ -16,3 +16,8 @@ logs/
 # firmware-compiler tem PM2 proprio e usa npm — pnpm-lock.yaml em subdir eh artefato
 # de pnpm install rodado no lugar errado. Apareceu 2x em deploy (PR2 + PR3).
 firmware-compiler/pnpm-lock.yaml
+
+# Firmware binaries (mantenha apenas os .bin necessarios tracked)
+firmware-compiler/prebuilt/*.bin
+firmware-compiler/prebuilt/*.bak*
+*.bak*
