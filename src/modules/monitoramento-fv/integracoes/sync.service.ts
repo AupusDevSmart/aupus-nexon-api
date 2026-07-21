@@ -42,7 +42,7 @@ export class MonitoramentoSyncService {
 
   // Cron diário: 21h05 SP (5 min após o do bdo-aupus-api, pra não coincidir). A geração
   // do dia já terminou às 21h → today_energy é o valor final. Grava em geracao_diaria_plantas.
-  @Cron('0 5 21 * * *', { timeZone: 'America/Sao_Paulo' })
+  @Cron('0 0 21 * * *', { timeZone: 'America/Sao_Paulo' }) // 21:00 — precede o envio (21:05)
   async cronDiario(): Promise<void> {
     this.logger.log('[monitoramento-fv] cron diário 21h05 SP — iniciando sync');
     try {
