@@ -114,8 +114,9 @@ export class NotificacaoDispatcherService {
     if (!rows.length) return null;
 
     const dataBR = data.split('-').reverse().join('/');
-    const primeiro = (nome ?? '').trim().split(/\s+/)[0];
-    const ola = primeiro ? `${this.saudacao()}, ${primeiro}!` : `${this.saudacao()}!`;
+    // Sem nome na saudacao: o cadastro nem sempre traz o nome do dono (as vezes e' o
+    // contato), e errar o nome de cliente e' pior do que nao usar nenhum.
+    const ola = `${this.saudacao()}!`;
     const plural = rows.length > 1;
 
     const linhas = rows.map((r) => {
