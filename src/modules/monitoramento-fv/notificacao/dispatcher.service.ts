@@ -122,7 +122,7 @@ export class NotificacaoDispatcherService {
     const linhas = rows.map((r) => {
       const real = Number(r.kwh_realizado) || 0;
       // Meta NAO vai na mensagem: ela e' referencia interna, conferida pelo NexON.
-      return `☀️ *${r.nome}*\n   Geracao: *${this.fmtKwh(real)} kWh*`;
+      return `☀️ *${r.nome}*\n   Geração: *${this.fmtKwh(real)} kWh*`;
     });
 
     const total = rows.reduce((s, r) => s + (Number(r.kwh_realizado) || 0), 0);
@@ -130,9 +130,9 @@ export class NotificacaoDispatcherService {
 
     return (
       `${ola}\n\n` +
-      `Segue a geracao ${plural ? 'das suas usinas' : 'da sua usina'} em ${dataBR}:\n\n` +
+      `Segue a geração ${plural ? 'das suas usinas' : 'da sua usina'} em ${dataBR}:\n\n` +
       `${linhas.join('\n\n')}${rodapeTotal}\n\n` +
-      `Qualquer duvida, estamos a' disposicao.\n_Aupus Energia_`
+      `_Aupus Energia_`
     );
   }
 
