@@ -20,6 +20,7 @@ import {
 import { JwtAuthGuard, CurrentUser } from '@aupus/api-shared';
 
 import { IoTService } from './iot.service';
+import { MqttService } from '../../shared/mqtt/mqtt.service';
 import { CreateIotProjetoDto } from './dto/create-iot-projeto.dto';
 import { UpdateIotProjetoDto } from './dto/update-iot-projeto.dto';
 import { ListIotProjetosQueryDto } from './dto/list-iot-projetos.dto';
@@ -48,7 +49,25 @@ import type { IotProjetoRow } from './interfaces/iot-diagrama.interface';
 @UseGuards(JwtAuthGuard)
 @Controller('iot')
 export class IoTController {
-  constructor(private readonly iotService: IoTService) {}
+  constructor(
+    private readonly iotService: IoTService,
+    private readonly mqtt: MqttService,
+  ) {}
+
+  /**
+   * Lista os boards de bancada vivos no namespace TESTE/ (modo simulação) —
+   * MACs vistos publicando em TESTE/.../satellite/<MAC>/... nos últimos ~90s.
+   * O painel de teste usa pro remap: você escolhe qual board físico de bancada
+   * faz o papel da TON de produção, sem digitar MAC e sem tocar no cadastro.
+   */
+  @Get('sim/bench-satellites')
+  @ApiOperation({ summary: 'Lista boards de bancada vivos no TESTE/ (simulação)' })
+  @ApiResponse({ status: 200, description: 'Array de { mac, base, ageMs }' })
+  async benchSatellites(): Promise<{
+    data: Array<{ mac: string; base: string; ageMs: number; label: string | null }>;
+  }> {
+    return { data: this.mqtt.getBenchSatellites() };
+  }
 
   @Get('projetos')
   @ApiOperation({ summary: 'Lista projetos IoT de uma unidade' })
@@ -94,6 +113,41 @@ export class IoTController {
     @CurrentUser() user?: any,
   ): Promise<{ data: IotProjetoRow }> {
     const data = await this.iotService.updateProjeto(id, dto, user);
+    return { data };
+  }
+
+  @Get('power-meter-by-disjuntor/:disjuntorId')
+  @ApiOperation({ summary: 'Resolve o Power Meter (IoT) associado a um disjuntor do unifilar' })
+  @ApiResponse({ status: 200, description: '{ equipamento_id, nome } do PM associado, ou null' })
+  async powerMeterByDisjuntor(
+    @Param('disjuntorId') disjuntorId: string,
+  ): Promise<{ data: { equipamento_id: string; nome: string | null } | null }> {
+    const data = await this.iotService.powerMeterByDisjuntor(disjuntorId);
+    return { data };
+  }
+
+  @Get('disjuntor-status-fonte/:disjuntorId')
+  @ApiOperation({
+    summary:
+      'Resolve o relé que fornece o status aberto/fechado de um disjuntor (via io_config.bi)',
+  })
+  @ApiResponse({
+    status: 200,
+    description:
+      '{ rele_equipamento_id, rele_nome, campo_aberto, campo_fechado } — de quem assinar a telemetria e quais campos ler. null se o DJ nao tem relé associado.',
+  })
+  async disjuntorStatusFonte(
+    @Param('disjuntorId') disjuntorId: string,
+    @CurrentUser() user?: any,
+  ): Promise<{
+    data: {
+      rele_equipamento_id: string;
+      rele_nome: string | null;
+      campo_aberto: string | null;
+      campo_fechado: string | null;
+    } | null;
+  }> {
+    const data = await this.iotService.statusFonteDoDisjuntor(disjuntorId, user);
     return { data };
   }
 

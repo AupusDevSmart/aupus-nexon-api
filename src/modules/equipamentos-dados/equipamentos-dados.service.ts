@@ -1380,6 +1380,17 @@ export class EquipamentosDadosService {
       for (const t of aRemover) serie.delete(t);
     }
 
+    // Último bucket GLOBAL entre todos os devices. O forward-fill de cada device é
+    // estendido até aqui (respeitando o FILL_CAP de 30 min) pra que um inversor que
+    // ainda NÃO reportou no bucket ATUAL não suma da soma — senão a ponta direita do
+    // gráfico despenca sempre que 1 device está alguns minutos atrasado ("não soma
+    // tudo ao atualizar a página" / serrilhado na borda). O span de cada device ia
+    // só até o ÚLTIMO bucket DELE, então quem estava atrasado caía fora do bucket atual.
+    let globalUltimo = -Infinity;
+    for (const serie of porDevice.values()) {
+      for (const t of serie.keys()) if (t > globalUltimo) globalUltimo = t;
+    }
+
     const pontosMap = new Map<number, any>();
 
     for (const [id, serie] of porDevice) {
@@ -1389,14 +1400,15 @@ export class EquipamentosDadosService {
       const reducao = cfg.sinal === 1 && fatorPerdas > 0 ? 1 - fatorPerdas / 100 : 1;
       const fator = cfg.multiplicador * reducao * cfg.sinal;
 
-      // Span ativo do device: do primeiro ao último bucket com leitura.
+      // Span ativo do device: do primeiro bucket com leitura até o último bucket
+      // GLOBAL. O FILL_CAP (30 min) dentro do loop impede fabricar geração num
+      // device realmente offline; um atraso de poucos minutos é ponteado.
       const tempos = Array.from(serie.keys()).sort((a, b) => a - b);
       const primeiro = tempos[0];
-      const ultimo = tempos[tempos.length - 1];
 
       let ultimaPot: number | null = null;
       let ultimaT = -Infinity;
-      for (let t = primeiro; t <= ultimo; t += bucketMs) {
+      for (let t = primeiro; t <= globalUltimo; t += bucketMs) {
         const atual = serie.get(t);
         let potBruta: number | null;
         let num = 0;

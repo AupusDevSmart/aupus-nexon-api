@@ -1,4 +1,5 @@
 import {
+  Body,
   Controller,
   HttpCode,
   HttpStatus,
@@ -17,6 +18,7 @@ import { JwtAuthGuard, Permissions, CurrentUser } from '@aupus/api-shared';
 
 import { EquipamentosCmdService } from './equipamentos-cmd.service';
 import { AcionarPontoResultDto } from './dto/acionar-ponto-result.dto';
+import { AcionarPontoDto } from './dto/acionar-ponto.dto';
 
 /**
  * Aciona um ponto de comando de um equipamento, executando o pulso na TON
@@ -59,8 +61,15 @@ export class EquipamentosAcionarPontoController {
   async acionar(
     @Param('id') id: string,
     @Param('pontoId') pontoId: string,
+    @Body() dto: AcionarPontoDto = {},
     @CurrentUser() user?: any,
   ): Promise<AcionarPontoResultDto> {
-    return this.cmdService.acionarPonto(id, pontoId, user);
+    return this.cmdService.acionarPonto(
+      id,
+      pontoId,
+      user,
+      dto?.sim === true,
+      dto?.sim === true ? dto?.testMac : undefined,
+    );
   }
 }
