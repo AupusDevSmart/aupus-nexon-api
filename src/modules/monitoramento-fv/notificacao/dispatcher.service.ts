@@ -165,8 +165,11 @@ export class NotificacaoDispatcherService {
     const dataBR = data.split('-').reverse().join('/');
     const linhas = rows.map((r) => {
       const real = Number(r.kwh_realizado) || 0;
-      // Meta NAO vai na mensagem: e' referencia interna, conferida pelo NexON.
-      return `☀️ *${r.nome}*: ${this.fmtKwh(real)} kWh`;
+      // Grupo (publico interno/tecnico) MOSTRA a meta. O individual (dono da usina) NAO.
+      const prev = Number(r.kwh_previsto) || 0;
+      const pct = prev > 0 ? Math.round((real / prev) * 100) : null;
+      const pctTxt = pct != null ? ` (${pct}% da meta)` : '';
+      return `☀️ *${r.nome}*: ${this.fmtKwh(real)} kWh${pctTxt}`;
     });
     const total = rows.reduce((s, r) => s + (Number(r.kwh_realizado) || 0), 0);
     return `📊 *Boletim de Geração* — ${dataBR}\n\n${linhas.join('\n')}\n\n*Total:* ${this.fmtKwh(total)} kWh`;
