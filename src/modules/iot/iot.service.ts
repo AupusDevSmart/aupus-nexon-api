@@ -2,6 +2,7 @@ import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/commo
 import { randomBytes } from 'node:crypto';
 import { PrismaService, PermissionScopeService, ScopedUser } from '@aupus/api-shared';
 import { Prisma } from '@aupus/api-shared';
+import { tonCapsForTipo } from '../../shared/util/ton-caps';
 import type {
   IotDiagrama,
   IotDiagramaComponent,
@@ -82,6 +83,87 @@ export class IoTService {
     return this.toProjetoRow(row);
   }
 
+  /**
+   * Resolve o Power Meter (só-IoT) associado a um DISJUNTOR do unifilar. O link fica em
+   * `iot_componentes.props.disjuntor_equipamento_id` (gravado pelo modal de props do PM).
+   * Retorna o `equipamento_id` + nome do PM pra o unifilar abrir o PowerMeterModal ao
+   * clicar no disjuntor associado. null se o disjuntor não tem PM associado.
+   */
+  async powerMeterByDisjuntor(
+    disjuntorEquipId: string,
+  ): Promise<{ equipamento_id: string; nome: string | null } | null> {
+    const id = (disjuntorEquipId ?? '').trim();
+    if (!id) return null;
+    const rows = await this.prisma.$queryRaw<
+      Array<{ equipamento_id: string; nome: string | null }>
+    >`
+      SELECT c.props->>'equipamento_id' AS equipamento_id,
+             c.props->>'name'           AS nome
+      FROM iot_componentes c
+      WHERE c.props->>'disjuntor_equipamento_id' = ${id}
+        AND COALESCE(c.props->>'equipamento_id', '') <> ''
+      LIMIT 1
+    `;
+    return rows[0] ?? null;
+  }
+
+  /**
+   * Fonte do status ABERTO/FECHADO de um disjuntor do unifilar.
+   *
+   * Quem lê os contatos auxiliares (52a/52b) do DJ é o RELÉ: ele publica os
+   * sinais do catálogo (`dj_aberto`/`dj_fechado`) na SUA propria telemetria. O
+   * vínculo relé→disjuntor vive no `io_config.bi` do componente do relé
+   * (`{ <sinal>: { equipamento_id: <disjuntor>, ponto_id } }`), que hoje só
+   * existe como JSON. Este lookup inverte esse mapa: dado o disjuntor, diz de
+   * QUEM o front deve assinar a telemetria ao vivo e QUAIS campos ler.
+   *
+   * ⚠️ RBAC: o disjuntor pertence a uma unidade — escopado por dono.
+   */
+  async statusFonteDoDisjuntor(
+    disjuntorEquipId: string,
+    user?: ScopedUser,
+  ): Promise<{
+    rele_equipamento_id: string;
+    rele_nome: string | null;
+    campo_aberto: string | null;
+    campo_fechado: string | null;
+  } | null> {
+    const id = (disjuntorEquipId ?? '').trim();
+    if (!id) return null;
+
+    if (user) {
+      const u = await this.prisma.$queryRaw<Array<{ unidade_id: string | null }>>`
+        SELECT TRIM(unidade_id) AS unidade_id FROM equipamentos WHERE TRIM(id) = ${id} LIMIT 1
+      `;
+      const unidadeId = u[0]?.unidade_id?.trim();
+      if (unidadeId) {
+        await this.scopeService.assertEntityInScope('unidade', unidadeId, user);
+      }
+    }
+
+    // ids sao char(26): TRIM dos dois lados (o io_config antigo gravava com padding).
+    const rows = await this.prisma.$queryRaw<
+      Array<{ rele_equipamento_id: string; rele_nome: string | null; campo: string }>
+    >`
+      SELECT COALESCE(NULLIF(TRIM(c.equipamento_id), ''), c.props->>'equipamento_id') AS rele_equipamento_id,
+             c.props->>'name' AS rele_nome,
+             kv.key           AS campo
+      FROM iot_componentes c,
+           jsonb_each(COALESCE(c.props->'io_config'->'bi', '{}'::jsonb)) AS kv
+      WHERE TRIM(COALESCE(kv.value->>'equipamento_id', '')) = ${id}
+        AND COALESCE(NULLIF(TRIM(c.equipamento_id), ''), c.props->>'equipamento_id', '') <> ''
+    `;
+    if (rows.length === 0) return null;
+
+    const campos = rows.map((r) => r.campo);
+    return {
+      rele_equipamento_id: rows[0].rele_equipamento_id,
+      rele_nome: rows[0].rele_nome,
+      campo_aberto: campos.find((c) => /aberto/i.test(c)) ?? null,
+      campo_fechado: campos.find((c) => /fechado/i.test(c)) ?? null,
+    };
+  }
+
   async createProjeto(unidadeId: string, nome: string, user?: ScopedUser): Promise<IotProjetoRow> {
     if (user) await this.scopeService.assertEntityInScope('unidade', unidadeId.trim(), user);
     const created = await this.prisma.iot_projetos.create({
@@ -119,6 +201,12 @@ export class IoTService {
       const updateData: Prisma.iot_projetosUpdateInput = {};
       if (data.nome !== undefined) updateData.nome = data.nome;
       if (data.diagrama !== undefined) {
+        // TON e' dominio IoT: auto-cria/vincula o equipamento de cada TON (idempotente)
+        // e carimba equipamento_id no JSON ANTES de salvar (unifilar/OTA/syncRelational usam).
+        await this.ensureTonEquipamentos(tx, trimmedId, data.diagrama);
+        // Devices Modbus (rele/medidor/inversor) tambem viram equipamento sozinhos —
+        // depois da TON, pois o topico deles deriva do topico dela.
+        await this.ensureDeviceEquipamentos(tx, trimmedId, data.diagrama);
         updateData.diagrama = data.diagrama as unknown as Prisma.InputJsonValue;
         updateData.view_pan_x = data.diagrama.pan?.x ?? 0;
         updateData.view_pan_y = data.diagrama.pan?.y ?? 0;
@@ -163,6 +251,229 @@ export class IoTService {
       where: { id: trimmedId },
       data: { deleted_at: new Date() },
     });
+  }
+
+  /**
+   * Auto-cria (ou re-vincula) o equipamento de cada TON do diagrama que ainda nao
+   * tem equipamento_id valido, e CARIMBA o id em comp.props.equipamento_id (muta o
+   * diagrama, salvo logo em seguida). TON e' dominio IoT — o equipamento e' criado
+   * aqui automaticamente, nao pela tela de cadastro.
+   *
+   * Idempotente (roda a cada save): (1) se o comp ja tem equipamento_id valido, pula;
+   * (2) senao, se existe um equipamento com o mesmo topico_mqtt, REUSA; (3) senao cria.
+   */
+  private async ensureTonEquipamentos(
+    tx: Prisma.TransactionClient,
+    projetoId: string,
+    diagrama: IotDiagrama,
+  ): Promise<void> {
+    if (!Array.isArray(diagrama.components)) return;
+    const tons = diagrama.components.filter((c) =>
+      String((c as { type?: string }).type ?? '').toLowerCase().startsWith('ton'),
+    );
+    if (tons.length === 0) return;
+
+    const proj = await tx.iot_projetos.findFirst({
+      where: { id: projetoId },
+      select: { unidade_id: true },
+    });
+    const unidadeId = proj?.unidade_id?.trim() || null;
+    const tipoTon = await tx.tipos_equipamentos.findFirst({
+      where: { nome: 'TON' },
+      select: { id: true },
+    });
+    const tipoTonId = tipoTon?.id?.trim() || null;
+
+    for (const comp of tons) {
+      // (1) ja vinculado e valido? pula.
+      const rawEquip = this.rawEquipamentoId(comp);
+      if (rawEquip) {
+        const ok = await tx.equipamentos.findFirst({
+          where: { id: rawEquip, deleted_at: null },
+          select: { id: true },
+        });
+        if (ok) continue;
+      }
+
+      const props =
+        ((comp as { props?: Record<string, unknown> }).props ?? {}) as Record<
+          string,
+          unknown
+        >;
+      const topico = String(props.mqtt_topic_base ?? '').trim();
+      if (!topico) continue; // sem topico nao da p/ criar (comando/OTA dependem dele)
+
+      const tipo = String((comp as { type?: string }).type ?? '').toLowerCase();
+      // Capacidade por DADO, nunca igualdade exata de tipo (briefing TON-V2
+      // §4.2: 'ton3v2'/'ton4v2' precisam entrar — lista solta quebra em silêncio).
+      const automacao = tonCapsForTipo(tipo)?.comando ?? false;
+
+      let equipId: string;
+      // (2) reusa equipamento existente com este topico_mqtt (idempotencia forte).
+      const existente = await tx.equipamentos.findFirst({
+        where: { topico_mqtt: topico, deleted_at: null },
+        select: { id: true },
+      });
+      if (existente) {
+        equipId = existente.id.trim();
+      } else {
+        // (3) cria. NOT NULL: nome, classificacao, criticidade, mqtt_habilitado, automacao.
+        const nome =
+          String(props.name ?? props.ota_hostname ?? tipo.toUpperCase()).trim() || 'TON';
+        const novo = await tx.equipamentos.create({
+          data: {
+            id: this.generateId(),
+            nome,
+            classificacao: 'UC',
+            criticidade: '3',
+            tipo_equipamento: tipo.toUpperCase(),
+            mqtt_habilitado: true,
+            automacao,
+            topico_mqtt: topico,
+            ...(unidadeId ? { unidade_id: unidadeId } : {}),
+            ...(tipoTonId ? { tipo_equipamento_id: tipoTonId } : {}),
+          },
+          select: { id: true },
+        });
+        equipId = novo.id.trim();
+      }
+
+      // carimba no JSON (o updateProjeto salva `data.diagrama` logo depois).
+      (comp as { props?: Record<string, unknown> }).props = {
+        ...props,
+        equipamento_id: equipId,
+      };
+    }
+  }
+
+  /**
+   * Auto-cria (ou re-vincula) o equipamento de cada DEVICE Modbus do diagrama
+   * (rele, medidor, inversor...) que ainda nao tem equipamento_id valido.
+   *
+   * POR QUE: um componente sem equipamento e' "so desenho" — a telemetria dele
+   * nao tem onde pousar no banco e a tela nao tem de quem assinar (foi
+   * exatamente o buraco que escondeu o status do disjuntor). Antes isso dependia
+   * de um passo MANUAL (dialogo "associar") que dava pra pular em silencio. A TON
+   * ja fazia automatico (ensureTonEquipamentos); aqui vale o mesmo pros devices.
+   *
+   * O topico e' derivado da TON que le o device (BFS nas conexoes do diagrama),
+   * no MESMO formato que o firmware publica e que os devices existentes usam:
+   *   `<ton.mqtt_topic_base>/<name>_<modbus_address>/data`
+   *
+   * Idempotente (roda a cada save): (1) equipamento_id valido -> pula;
+   * (2) existe equipamento com o mesmo topico -> REUSA; (3) senao cria.
+   */
+  private async ensureDeviceEquipamentos(
+    tx: Prisma.TransactionClient,
+    projetoId: string,
+    diagrama: IotDiagrama,
+  ): Promise<void> {
+    if (!Array.isArray(diagrama.components)) return;
+
+    const isTon = (t: unknown) =>
+      String(t ?? '')
+        .toLowerCase()
+        .startsWith('ton');
+    const comps = diagrama.components as Array<Record<string, any>>;
+
+    // Device Modbus = tem endereco Modbus e modelo do catalogo (nao e' TON).
+    const devices = comps.filter((c) => {
+      if (isTon(c?.type)) return false;
+      const p = (c?.props ?? {}) as Record<string, unknown>;
+      return (
+        String(p.modbus_address ?? '').trim() !== '' &&
+        String(p.catalog_id ?? '').trim() !== ''
+      );
+    });
+    if (devices.length === 0) return;
+
+    // Adjacencia pra achar, por topologia, a TON que le cada device.
+    const adj = new Map<string, string[]>();
+    for (const cx of (diagrama.connections ?? []) as Array<any>) {
+      const a = cx?.from?.componentId;
+      const b = cx?.to?.componentId;
+      if (!a || !b) continue;
+      if (!adj.has(a)) adj.set(a, []);
+      if (!adj.has(b)) adj.set(b, []);
+      adj.get(a)!.push(b);
+      adj.get(b)!.push(a);
+    }
+    const byId = new Map<string, Record<string, any>>(comps.map((c) => [String(c?.id), c]));
+    const tonTopicDe = (startId: string): string | null => {
+      const visto = new Set<string>([startId]);
+      const fila: string[] = [startId];
+      while (fila.length) {
+        const id = fila.shift() as string;
+        const c = byId.get(id);
+        if (c && id !== startId && isTon(c.type)) {
+          const t = String(c.props?.mqtt_topic_base ?? '').trim();
+          if (t) return t;
+        }
+        for (const viz of adj.get(id) ?? []) {
+          if (!visto.has(viz)) {
+            visto.add(viz);
+            fila.push(viz);
+          }
+        }
+      }
+      return null;
+    };
+
+    const proj = await tx.iot_projetos.findFirst({
+      where: { id: projetoId },
+      select: { unidade_id: true },
+    });
+    const unidadeId = proj?.unidade_id?.trim() || null;
+
+    for (const comp of devices) {
+      const rawEquip = this.rawEquipamentoId(comp as unknown as IotDiagramaComponent);
+      if (rawEquip) {
+        const ok = await tx.equipamentos.findFirst({
+          where: { id: rawEquip, deleted_at: null },
+          select: { id: true },
+        });
+        if (ok) continue;
+      }
+
+      const props = (comp.props ?? {}) as Record<string, unknown>;
+      const base = tonTopicDe(String(comp.id));
+      if (!base) continue; // device solto (sem TON conectada) — sem topico derivavel
+
+      const nome =
+        String(props.name ?? props.catalog_id ?? comp.type ?? 'Device').trim() || 'Device';
+      const addr = String(props.modbus_address ?? '').trim();
+      const topico = `${base}/${nome}_${addr}/data`;
+
+      let equipId: string;
+      const existente = await tx.equipamentos.findFirst({
+        where: { topico_mqtt: topico, deleted_at: null },
+        select: { id: true },
+      });
+      if (existente) {
+        equipId = existente.id.trim();
+      } else {
+        const novo = await tx.equipamentos.create({
+          data: {
+            id: this.generateId(),
+            nome,
+            classificacao: 'UC',
+            criticidade: '3',
+            tipo_equipamento: String(comp.type ?? '').toUpperCase(),
+            mqtt_habilitado: true,
+            automacao: false,
+            topico_mqtt: topico,
+            ...(unidadeId ? { unidade_id: unidadeId } : {}),
+          },
+          select: { id: true },
+        });
+        equipId = novo.id.trim();
+        console.log(
+          `🔧 [IoT] equipamento auto-criado p/ device "${nome}" (${topico}) — antes era so desenho`,
+        );
+      }
+
+      comp.props = { ...props, equipamento_id: equipId };
+    }
   }
 
   /**

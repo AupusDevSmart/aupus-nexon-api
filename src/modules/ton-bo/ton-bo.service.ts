@@ -7,6 +7,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { PrismaService, PermissionScopeService, ScopedUser } from '@aupus/api-shared';
+import { tonBoMax } from '../../shared/util/ton-caps';
 import { Prisma } from '@aupus/api-shared';
 
 import {
@@ -41,13 +42,13 @@ export class TonBoService {
   ) {}
 
   /**
-   * Retorna sempre 6 entradas (BO01..BO06) pra alimentar grid do frontend.
+   * Retorna as entradas do modelo (v1=6, ton3v2/ton4v2=8) pra alimentar o grid.
    * BOs nao persistidos vem com id=null e valores default — frontend faz
    * POST quando user salvar a primeira config.
    */
   async list(tonId: string, user?: ScopedUser): Promise<TonBoResponseDto[]> {
     const tId = tonId.trim();
-    await this.assertTonExists(tId);
+    const ton = await this.assertTonExists(tId);
     if (user) await this.scopeService.assertEntityInScope('equipamento', tId, user);
 
     const rows = await this.prisma.ton_bo.findMany({
@@ -64,7 +65,8 @@ export class TonBoService {
 
     const byNumero = new Map(rows.map((r) => [r.bo_numero, r]));
     const out: TonBoResponseDto[] = [];
-    for (let n = 1; n <= 6; n++) {
+    const boCount = tonBoMax(ton.tipo_equipamento);
+    for (let n = 1; n <= boCount; n++) {
       const row = byNumero.get(n);
       if (row) {
         out.push(this.toResponse(row));
@@ -81,8 +83,17 @@ export class TonBoService {
     user?: ScopedUser,
   ): Promise<TonBoResponseDto> {
     const tId = tonId.trim();
-    await this.assertTonExists(tId);
+    const ton = await this.assertTonExists(tId);
     if (user) await this.scopeService.assertEntityInScope('equipamento', tId, user);
+
+    const boMax = tonBoMax(ton.tipo_equipamento);
+    if (dto.bo_numero > boMax) {
+      throw new BadRequestException(
+        boMax === 0
+          ? `Modelo ${ton.tipo_equipamento ?? 'TON'} nao tem reles (BO)`
+          : `BO ${dto.bo_numero} invalido: modelo ${ton.tipo_equipamento ?? 'TON'} tem ${boMax} reles`,
+      );
+    }
 
     if (dto.equipamento_ponto_id) {
       await this.assertPontoComando(dto.equipamento_ponto_id.trim());
@@ -179,7 +190,7 @@ export class TonBoService {
   private async assertTonExists(tonId: string) {
     const ton = await this.prisma.equipamentos.findFirst({
       where: { id: tonId, deleted_at: null },
-      select: { id: true },
+      select: { id: true, tipo_equipamento: true },
     });
     if (!ton) {
       throw new NotFoundException(`TON ${tonId} nao encontrada`);

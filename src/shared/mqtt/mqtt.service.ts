@@ -2,7 +2,7 @@ import { Injectable, OnModuleInit, OnModuleDestroy, Inject, forwardRef, Optional
 import { OnEvent } from '@nestjs/event-emitter';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import * as mqtt from 'mqtt';
-import { randomUUID } from 'crypto';
+import { randomUUID, randomBytes } from 'crypto';
 import {
   PrismaService,
   EQUIPAMENTO_MQTT_CHANGED,
@@ -195,6 +195,13 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
         console.log('✅ [MQTT] Conectado com sucesso!');
       }
       this.carregarTopicosEquipamentos();
+      // Discovery de bancada (modo simulação): escuta TESTE/# só pra registrar
+      // quais boards de bancada estão vivos (MAC em .../satellite/<MAC>/...), pro
+      // painel de teste oferecer o remap sem o usuário digitar MAC. Não ingere
+      // dados — TESTE/ não está no subscriptions map, então cai fora em handleMessage.
+      this.client?.subscribe('TESTE/#', { qos: 0 }, (err) => {
+        if (err) console.warn(`⚠️ [MQTT] Falha ao subscrever TESTE/# (discovery): ${err.message}`);
+      });
     });
 
     this.client.on('message', (topic, payload) => {
@@ -394,6 +401,130 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     if (!inputsEquipamentos.includes(equipId)) {
       inputsEquipamentos.push(equipId);
     }
+
+    // 5) Subscribe ao tópico de eventos (SOE) de relé: <base>/evt
+    // TON drena o buffer de eventos do relé e publica cada um JÁ CARIMBADO NA FONTE
+    // (ms do próprio relé). Ver docs/IOT-SOE-EVENTOS-RELE.md.
+    const evtTopic = `${topic}/evt`;
+    if (!this.subscriptions.has(evtTopic)) {
+      this.subscriptions.set(evtTopic, []);
+      this.client?.subscribe(evtTopic, (err) => {
+        if (err) {
+          console.warn(`⚠️ [MQTT] Falha ao subscrever ${evtTopic}: ${err.message}`);
+        }
+      });
+    }
+    const evtEquipamentos = this.subscriptions.get(evtTopic)!;
+    if (!evtEquipamentos.includes(equipId)) {
+      evtEquipamentos.push(equipId);
+    }
+  }
+
+  /**
+   * SOE — ingere um evento de relé publicado pela TON em `<base>/evt`.
+   *
+   * O payload é CRU (type/fun/inf/ho/mi/ms/dpi/rt/fault/meas). Aqui:
+   *  1. completa a DATA (o relé só manda hora:min:ms) usando a hora de leitura da TON;
+   *  2. traduz fun/inf -> evento semântico (tabela `rele_evento_codigos`, DADO curável);
+   *  3. grava append-only em `rele_eventos`.
+   *
+   * Modelo CANÔNICO: quando DNP3 entrar, muda só `origem_protocolo` e o tradutor —
+   * a tabela, a API e a tela continuam iguais. Ver docs/IOT-SOE-EVENTOS-RELE.md.
+   */
+  private async processReleEvento(equipamentoId: string, d: any): Promise<void> {
+    try {
+      if (!d || d.type === undefined) return;
+      const proto = String(d.proto ?? 'modbus_7sr');
+      const fun = d.fun != null ? Number(d.fun) : null;
+      const inf = d.inf != null ? Number(d.inf) : null;
+      const tsFonte = this.tsFonteDoEvento(d);
+
+      // Tradução fun/inf -> evento semântico. O mapa é POR MODELO: provado que o do
+      // 7SR10 difere do 7SR5111 (explicava só 5% dos eventos). Precedência:
+      //  1º regra do MODELO (catalog_id do evento) — fonte autoritativa (report Reydisp);
+      //  2º regra genérica (catalog_id NULL) = base padrão IEC-103, só p/ FUN `padrao`
+      //     (FUN privado herdando a norma rotula errado).
+      // Sem match -> evento=null: NÃO se perde, vai pra fila de curadoria da tela.
+      const catId = String(d.cat ?? '').trim() || null;
+      let evento: string | null = null;
+      if (inf != null) {
+        const rows = await this.prisma.$queryRaw<Array<{ evento: string; ignorar: boolean }>>`
+          SELECT c.evento, c.ignorar
+          FROM rele_evento_codigos c
+          WHERE c.protocolo = ${proto} AND c.inf = ${inf}
+            AND (c.catalog_id = ${catId} OR c.catalog_id IS NULL)
+            AND (
+              c.fun = ${fun ?? -1}
+              OR (c.fun = -1 AND EXISTS (
+                    SELECT 1 FROM rele_evento_funs f
+                    WHERE f.protocolo = ${proto} AND f.fun = ${fun ?? -1} AND f.padrao = true))
+            )
+          ORDER BY (c.catalog_id IS NULL) ASC, (c.fun = -1) ASC
+          LIMIT 1
+        `;
+        // Telemetria cíclica (medidor de energia/wear/contador) NÃO é evento SOE — descarta.
+        // A TON precisa drenar do buffer do relé (por isso ela lê e publica), mas aqui não
+        // gravamos, senão a tabela de eventos vira lixeira de medição.
+        if (rows[0]?.ignorar) return;
+        evento = rows[0]?.evento ?? null;
+      }
+
+      const estado = d.dpi === 2 ? 'on' : d.dpi === 1 ? 'off' : null;
+      const id = randomBytes(13).toString('hex');
+      await this.prisma.$executeRaw`
+        INSERT INTO rele_eventos
+          (id, equipamento_id, device, catalog_id, origem_protocolo, ts_fonte, ts_recebido, hora_confiavel,
+           tipo_registro, fun, inf, evento, estado, tempo_relativo_ms, falta_num, valor, raw, created_at)
+        VALUES (${id}, ${equipamentoId.trim()}, ${String(d.dev ?? '?')}, ${catId}, ${proto},
+                ${tsFonte}::timestamp, now(), ${d.hora_ok !== false},
+                ${Number(d.type)}, ${fun}, ${inf}, ${evento}, ${estado},
+                ${d.rt != null ? Number(d.rt) : null}, ${d.fault != null ? Number(d.fault) : null},
+                ${d.meas != null ? Number(d.meas) : null},
+                ${JSON.stringify(d)}::jsonb, now())
+      `;
+      console.log(
+        `[SOE] ${d.dev} ${evento ?? `FUN=${fun}/INF=${inf}`} ${estado ?? ''} @ ${tsFonte ?? '?'}` +
+          (d.hora_ok === false ? ' (HORA NAO CONFIAVEL)' : ''),
+      );
+    } catch (e) {
+      console.error(`❌ [SOE] falha ao ingerir evento de ${equipamentoId}:`, e);
+    }
+  }
+
+  /**
+   * Completa a data do evento. O relé manda só hora:min:ms (sem data) — a data vem
+   * de quando a TON leu (`ts_rx`, epoch). Trata a VIRADA DE MEIA-NOITE: como a TON
+   * drena a fila em segundos, um evento "no futuro" > 1h só pode ser do dia anterior.
+   * Retorna timestamp naive no fuso de SP (padrão do resto do sistema).
+   */
+  private tsFonteDoEvento(d: any): string | null {
+    if (d?.ho == null || d?.mi == null || d?.ms == null) return null;
+    const ho = Number(d.ho), mi = Number(d.mi);
+    const msTot = Number(d.ms);              // ms DENTRO do minuto (0..59999)
+    if (!Number.isFinite(ho) || !Number.isFinite(mi) || !Number.isFinite(msTot)) return null;
+    const seg = Math.floor(msTot / 1000) % 60;
+    const milli = msTot % 1000;
+
+    const rx = new Date((Number(d.ts_rx) > 0 ? Number(d.ts_rx) : Date.now() / 1000) * 1000);
+    const parts = Object.fromEntries(
+      new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'America/Sao_Paulo',
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', hour12: false,
+      }).formatToParts(rx).map((p) => [p.type, p.value]),
+    ) as Record<string, string>;
+
+    let y = Number(parts.year), mo = Number(parts.month), da = Number(parts.day);
+    const rxHora = parts.hour === '24' ? 0 : Number(parts.hour);
+    const rxMin = rxHora * 60 + Number(parts.minute);
+    const evMin = ho * 60 + mi;
+    if (evMin - rxMin > 60) {
+      const prev = new Date(Date.UTC(y, mo - 1, da));
+      prev.setUTCDate(prev.getUTCDate() - 1);
+      y = prev.getUTCFullYear(); mo = prev.getUTCMonth() + 1; da = prev.getUTCDate();
+    }
+    const p2 = (n: number) => String(n).padStart(2, '0');
+    return `${y}-${p2(mo)}-${p2(da)} ${p2(ho)}:${p2(mi)}:${p2(seg)}.${String(milli).padStart(3, '0')}`;
   }
 
   /**
@@ -435,6 +566,12 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
 
       const dados = JSON.parse(payload.toString());
 
+      // Discovery de bancada (modo simulação): registra MACs vivos publicando em
+      // TESTE/.../satellite/<MAC>/... e captura o "sim":"<nome da TON>" do heartbeat
+      // (auto-casa board↔TON no painel). Independente do subscriptions map; o ack do
+      // TESTE/ ainda roteia abaixo.
+      if (topic.startsWith('TESTE/')) this.trackBenchSatellite(topic, dados);
+
       // Acks de comando são roteados por cmd_id em pendingCommands,
       // não dependem de equipamentoIds — processar antes do lookup de subscription.
       if (topic.endsWith('/cmd/ack')) {
@@ -456,6 +593,14 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
 
       const equipamentoIds = this.subscriptions.get(topic);
       if (!equipamentoIds || equipamentoIds.length === 0) {
+        return;
+      }
+
+      // SOE: evento de relé (já carimbado na fonte). Append-only.
+      if (topic.endsWith('/evt')) {
+        for (const equipamentoId of equipamentoIds) {
+          await this.processReleEvento(equipamentoId, dados);
+        }
         return;
       }
 
@@ -485,6 +630,58 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
   }
 
   /**
+   * Boards de bancada vivos (modo simulação): MAC -> {base, lastSeen, label}.
+   * Populado por trackBenchSatellite. `label` é o nome da TON pra qual o firmware 🧪
+   * foi gerado (campo "sim" do heartbeat) — permite o painel auto-casar board↔TON.
+   */
+  private readonly _benchSats = new Map<
+    string,
+    { mac: string; base: string; lastSeen: number; label: string | null }
+  >();
+
+  /**
+   * Extrai e registra o MAC de um tópico TESTE/<base>/satellite/<MAC>/... .
+   * Se o payload (heartbeat) traz "sim":"<nome>", grava como label (qual TON o
+   * board representa). Em mensagens sem label, preserva o label anterior.
+   */
+  private trackBenchSatellite(topic: string, dados?: any) {
+    const m = topic.match(
+      /^TESTE\/(.+)\/satellite\/([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})(?:\/|$)/,
+    );
+    if (!m) return;
+    const mac = m[2].toUpperCase();
+    const prev = this._benchSats.get(mac);
+    const label =
+      typeof dados?.sim === 'string' && dados.sim.trim()
+        ? dados.sim.trim()
+        : prev?.label ?? null;
+    this._benchSats.set(mac, { mac, base: m[1], lastSeen: Date.now(), label });
+  }
+
+  /**
+   * Lista os boards de bancada vistos no TESTE/ dentro de maxAgeMs (default 90s),
+   * mais recentes primeiro. `label` = nome da TON que o board representa (auto-casa
+   * no painel, sem o usuário lidar com MAC). Escopo TESTE/ — nunca lista board real.
+   */
+  public getBenchSatellites(
+    maxAgeMs = 90_000,
+  ): Array<{ mac: string; base: string; ageMs: number; label: string | null }> {
+    const now = Date.now();
+    const out: Array<{
+      mac: string;
+      base: string;
+      ageMs: number;
+      label: string | null;
+    }> = [];
+    for (const v of this._benchSats.values()) {
+      const ageMs = now - v.lastSeen;
+      if (ageMs <= maxAgeMs)
+        out.push({ mac: v.mac, base: v.base, ageMs, label: v.label });
+    }
+    return out.sort((a, b) => a.ageMs - b.ageMs);
+  }
+
+  /**
    * Processa entradas digitais (BI) publicadas pelo TON em `<topic_base>/inputs`.
    * Payload: { d1, d2, d3, d4, d5, d6 } com valores 0/1.
    *
@@ -500,13 +697,14 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     dados: Record<string, any>,
   ): Promise<void> {
     try {
-      // Normaliza para {d1..d6} -> 0/1; ignora chaves desconhecidas.
+      // Normaliza para {d1..dN, s1} -> 0/1; ignora chaves desconhecidas.
+      // v1 publica d1..d6; TON-V2 publica d1..d8 + s1 (SU+ IO48). Aceita
+      // qualquer dN presente no payload pra nao descartar entradas de modelos
+      // novos em silencio (armadilha 4.1 do IOT-TON-V2-BRIEFING.md).
       const estado: Record<string, number> = {};
-      for (let i = 1; i <= 6; i++) {
-        const k = `d${i}`;
-        if (dados[k] !== undefined && dados[k] !== null) {
-          estado[k] = dados[k] ? 1 : 0;
-        }
+      for (const [k, v] of Object.entries(dados)) {
+        if (v === undefined || v === null) continue;
+        if (/^d\d{1,2}$/.test(k) || k === 's1') estado[k] = v ? 1 : 0;
       }
       if (Object.keys(estado).length === 0) {
         return;
@@ -811,6 +1009,18 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     const timeoutMs = opts.timeoutMs ?? 5000;
     const maxAttempts = opts.maxAttempts ?? 3;
 
+    // Garante inscrição no ack do tópico PASSADO. A inscrição por-equipamento só
+    // cobre o ack do tópico REAL; em SIMULAÇÃO (topicoBase = TESTE/<base>) o ack
+    // chega em TESTE/<base>/cmd/ack, e sem esta inscrição ele nunca seria recebido
+    // (o comando dava timeout mesmo a TON respondendo). Idempotente no caso real.
+    const ackTopic = `${topic}/ack`;
+    if (!this.subscriptions.has(ackTopic)) {
+      this.subscriptions.set(ackTopic, []);
+      this.client?.subscribe(ackTopic, (err) => {
+        if (err) console.warn(`⚠️ [MQTT] Falha ao subscrever ${ackTopic}: ${err.message}`);
+      });
+    }
+
     return new Promise<CmdAckResult>((resolve, reject) => {
       const pending: PendingCommand = {
         cmd_id,
@@ -974,28 +1184,35 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
         }
       }
 
-      // Salvar dados no banco
-      // Converter timestamp de segundos para milissegundos se necessário.
-      // Se o TON envia string sentinel ("sem_ntp" quando NTP nao sincronizou),
-      // parseInt retorna NaN -> usa now do server como fallback.
-      let timestampDados: Date;
-      if (dados.timestamp) {
-        // Se o timestamp é menor que 10 bilhões, provavelmente está em segundos
-        const timestamp = typeof dados.timestamp === 'number' ? dados.timestamp : parseInt(dados.timestamp);
-        // "sem_ntp" -> NaN. "0" (TON sem NTP) -> epoch 0 = 1970. Ambos invalidos:
-        // qualquer ts <= 1577836800 (2020-01-01 em segundos) vira now do server.
-        if (isNaN(timestamp) || timestamp < 1577836800) {
-          timestampDados = new Date();
-        } else if (timestamp < 10000000000) {
-          // Timestamp em segundos - converter para milissegundos
-          timestampDados = new Date(timestamp * 1000);
-        } else {
-          // Timestamp já em milissegundos
-          timestampDados = new Date(timestamp);
-        }
-      } else {
-        timestampDados = new Date();
-      }
+      // Salvar dados no banco. Resolve a HORA DO DADO em ordem de preferencia:
+      //   1) dados.ts        -> epoch (s/ms) carimbado pelo buffer SD (store-and-forward)
+      //      do TON = hora de CAPTURA. Correta inclusive pra dado RETROATIVO/bufferado
+      //      (drenado depois de uma queda/OTA), que nao deve usar a hora de chegada.
+      //   2) dados.timestamp -> epoch (num/string) OU datetime "DD/MM/YYYY HH:MM:SS"
+      //      (horario local da TON, -03:00).
+      //   3) fallback        -> hora de chegada no servidor.
+      // Sentinelas de TON sem NTP ("sem_ntp"/"0"/1970) sao invalidos -> proxima fonte.
+      const MIN_VALID_TS_S = 1577836800; // 2020-01-01 (segundos)
+      const tsFromEpoch = (v: any): Date | null => {
+        const n = typeof v === 'number' ? v : (typeof v === 'string' ? Number(v) : NaN);
+        if (!Number.isFinite(n)) return null;
+        if (n >= MIN_VALID_TS_S && n < 10000000000) return new Date(n * 1000); // segundos
+        if (n >= MIN_VALID_TS_S * 1000) return new Date(n);                    // milissegundos
+        return null;
+      };
+      const tsFromDatetimeStr = (v: any): Date | null => {
+        if (typeof v !== 'string') return null;
+        // Formato do firmware: "DD/MM/YYYY HH:MM:SS" no fuso da TON (-03:00).
+        const m = v.match(/^(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2}):(\d{2})$/);
+        if (!m) return null;
+        const d = new Date(`${m[3]}-${m[2]}-${m[1]}T${m[4]}:${m[5]}:${m[6]}-03:00`);
+        return isNaN(d.getTime()) || d.getTime() < MIN_VALID_TS_S * 1000 ? null : d;
+      };
+      const timestampDados: Date =
+        tsFromEpoch((dados as any).ts) ??
+        tsFromEpoch(dados.timestamp) ??
+        tsFromDatetimeStr(dados.timestamp) ??
+        new Date();
 
       // 🛑 Frame de inversor com overflow UINT do Modbus (leitura corrompida):
       // total_yield=2^32, daily_yield=2^16/10, info.output_type=65535, etc.
@@ -1158,10 +1375,14 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       }
     }
 
-    // equipamentoId -> Set<topicoPrimario> (ignora /status e /cmd/ack)
+    // equipamentoId -> Set<topicoPrimario>. Subtópicos DERIVADOS (criados por
+    // subscribeTopic a partir do primário) não podem entrar aqui: se entrarem, o
+    // reconcile os vê como primário "não desejado" e os desinscreve — foi o que
+    // acontecia com /inputs e /evt (a ingestão parava após o 1º reconcile).
+    const DERIVADOS = ['/status', '/cmd/ack', '/inputs', '/evt'];
     const currentMap = new Map<string, Set<string>>();
     for (const [topic, equipIds] of this.subscriptions.entries()) {
-      if (topic.endsWith('/status') || topic.endsWith('/cmd/ack')) continue;
+      if (DERIVADOS.some((suf) => topic.endsWith(suf))) continue;
       for (const equipId of equipIds) {
         const id = equipId.trim();
         if (!currentMap.has(id)) currentMap.set(id, new Set());
@@ -1187,8 +1408,10 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       for (const topic of currentTopics) {
         if (desiredTopic !== topic) {
           this.unsubscribeTopic(topic, equipamentoId, 'reconcile');
-          this.unsubscribeTopic(`${topic}/status`, equipamentoId, 'reconcile');
-          this.unsubscribeTopic(`${topic}/cmd/ack`, equipamentoId, 'reconcile');
+          // Leva junto os derivados do primário removido.
+          for (const suf of DERIVADOS) {
+            this.unsubscribeTopic(`${topic}${suf}`, equipamentoId, 'reconcile');
+          }
           removed.push({ equipamentoId, topic });
         }
       }

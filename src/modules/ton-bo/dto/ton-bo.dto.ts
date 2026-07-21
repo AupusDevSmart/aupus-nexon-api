@@ -11,7 +11,9 @@ import {
 } from 'class-validator';
 
 export const BO_MIN = 1;
-export const BO_MAX = 6;
+// Teto SINTATICO (maior modelo = TON-V2 com 8). O teto real por modelo
+// (v1=6, ton3v2/ton4v2=8, ton1v2/ton2v2=0) e validado no service via tonBoMax.
+export const BO_MAX = 8;
 export const PULSO_MS_MIN = 50;
 export const PULSO_MS_MAX = 60_000;
 export const PULSO_MS_DEFAULT = 500;
@@ -19,8 +21,9 @@ export const PULSO_MS_DEFAULT = 500;
 export class CreateTonBoDto {
   @ApiProperty({
     description:
-      'Numero do BO (1..6) no hardware da TON. bo_numero = rele fisico R1..R6. ' +
-      'TON3/TON4 tem 6 reles; TON1/TON2 nao tem (criar BO nesses retorna 409).',
+      'Numero do BO no hardware da TON. bo_numero = rele fisico RN. ' +
+      'TON3/TON4 tem 6 reles; TON3v2/TON4v2 tem 8; modelos sem rele rejeitam ' +
+      'com 400 (o maximo real do modelo e validado no service).',
     minimum: BO_MIN,
     maximum: BO_MAX,
     example: 1,

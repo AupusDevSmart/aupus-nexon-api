@@ -48,10 +48,10 @@ export class TonBiController {
   @Get()
   @Permissions('equipamentos.view')
   @ApiOperation({
-    summary: 'Lista 6 BIs da TON (mapeamentos atuais + placeholders)',
+    summary: 'Lista os BIs da TON (mapeamentos atuais + placeholders)',
     description:
-      'Sempre retorna 6 entradas (bi_numero 1..6). Entradas com id="" sao ' +
-      'placeholders — frontend deve fazer POST ao salvar.',
+      'Retorna as entradas do modelo (v1: bi_numero 1..6; TON-V2: 1..8). ' +
+      'Entradas com id="" sao placeholders — frontend deve fazer POST ao salvar.',
   })
   @ApiParam({ name: 'tonId', description: 'ID da TON (equipamento)' })
   @ApiResponse({ status: 200, type: [TonBiResponseDto] })

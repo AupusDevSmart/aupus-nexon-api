@@ -10,13 +10,16 @@ import {
 } from 'class-validator';
 
 export const BI_MIN = 1;
-export const BI_MAX = 6;
+// Teto SINTATICO (maior modelo = TON-V2 com 8). O teto real por modelo
+// (v1=6, v2=8) e validado no service via tonBiCount(tipo_equipamento).
+export const BI_MAX = 8;
 
 export class CreateTonBiDto {
   @ApiProperty({
     description:
-      'Numero do BI (1..6) no hardware da TON. bi_numero = entrada digital ' +
-      'd1..d6 (optoacoplada). TON4 tem 6 entradas.',
+      'Numero do BI no hardware da TON. bi_numero = entrada digital dN ' +
+      '(optoacoplada). Modelos v1 tem 6 entradas (d1..d6); TON-V2 tem 8 ' +
+      '(d1..d8) — o maximo real do modelo e validado no service.',
     minimum: BI_MIN,
     maximum: BI_MAX,
     example: 1,
