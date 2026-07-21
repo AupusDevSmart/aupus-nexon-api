@@ -89,7 +89,56 @@ export class NotificacaoDispatcherService {
    * Monta o texto do boletim das usinas informadas (ou todas, se null) para a data.
    * Só usinas com geração > 0. Retorna null se nenhuma tem dados.
    */
-  async montarTexto(data: string, unidadeIds: string[] | null): Promise<string | null> {
+
+  /** Saudacao pelo horario de SP (o boletim sai ~21h, mas envio manual pode ser a qualquer hora). */
+  private saudacao(): string {
+    const h = Number(
+      new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', hour12: false }).format(new Date()),
+    );
+    if (h < 12) return 'Bom dia';
+    if (h < 18) return 'Boa tarde';
+    return 'Boa noite';
+  }
+
+  /**
+   * Texto do boletim INDIVIDUAL — vai para o DONO da usina, nao para um grupo tecnico.
+   * Por isso tem saudacao, trata "sua usina" e explicita a meta em kWh (no grupo, todo
+   * mundo ja' conhece o contexto e a lista e' longa; aqui e' uma pessoa so').
+   */
+  async montarTextoIndividual(
+    data: string,
+    unidadeIds: string[] | null,
+    nome?: string | null,
+  ): Promise<string | null> {
+    const rows = await this.linhasGeracao(data, unidadeIds);
+    if (!rows.length) return null;
+
+    const dataBR = data.split('-').reverse().join('/');
+    const primeiro = (nome ?? '').trim().split(/\s+/)[0];
+    const ola = primeiro ? `${this.saudacao()}, ${primeiro}!` : `${this.saudacao()}!`;
+    const plural = rows.length > 1;
+
+    const linhas = rows.map((r) => {
+      const real = Number(r.kwh_realizado) || 0;
+      const prev = Number(r.kwh_previsto) || 0;
+      const pct = prev > 0 ? Math.round((real / prev) * 100) : null;
+      const meta = prev > 0 ? `\n   Meta do dia: ${this.fmtKwh(prev)} kWh (*${pct}%* alcancado)` : '';
+      return `☀️ *${r.nome}*\n   Geracao: *${this.fmtKwh(real)} kWh*${meta}`;
+    });
+
+    const total = rows.reduce((s, r) => s + (Number(r.kwh_realizado) || 0), 0);
+    const rodapeTotal = plural ? `\n\n*Total do dia:* ${this.fmtKwh(total)} kWh` : '';
+
+    return (
+      `${ola}\n\n` +
+      `Segue a geracao ${plural ? 'das suas usinas' : 'da sua usina'} em ${dataBR}:\n\n` +
+      `${linhas.join('\n\n')}${rodapeTotal}\n\n` +
+      `Qualquer duvida, estamos a' disposicao.\n_Aupus Energia_`
+    );
+  }
+
+  /** Linhas de geracao (>0) do dia, opcionalmente filtradas por unidade. Base dos dois textos. */
+  private async linhasGeracao(data: string, unidadeIds: string[] | null) {
     const filtro =
       unidadeIds && unidadeIds.length
         ? Prisma.sql`AND TRIM(g.unidade_id) IN (${Prisma.join(unidadeIds.map((i) => i.trim()))})`
@@ -107,6 +156,12 @@ export class NotificacaoDispatcherService {
         ${filtro}
       ORDER BY u.nome
     `;
+    return rows;
+  }
+
+  /** Texto do boletim do GRUPO — lista compacta, publico ja' familiarizado. */
+  async montarTexto(data: string, unidadeIds: string[] | null): Promise<string | null> {
+    const rows = await this.linhasGeracao(data, unidadeIds);
     if (!rows.length) return null;
     const dataBR = data.split('-').reverse().join('/');
     const linhas = rows.map((r) => {
@@ -155,7 +210,7 @@ export class NotificacaoDispatcherService {
       const dests = await this.destinatariosAtivos();
       for (const d of dests) {
         if (opts.phones && !opts.phones.includes(d.telefone)) continue;
-        const texto = await this.montarTexto(data, d.unidade_ids ?? []);
+        const texto = await this.montarTextoIndividual(data, d.unidade_ids ?? [], d.nome);
         if (!texto) {
           alvos.push({ destino: d.telefone, tipo: 'numero', nome: d.nome, status: 'sem_dados' });
           continue;
