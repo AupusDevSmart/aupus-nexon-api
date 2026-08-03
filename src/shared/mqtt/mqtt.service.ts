@@ -1158,10 +1158,19 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       }
     }
 
-    // equipamentoId -> Set<topicoPrimario> (ignora /status e /cmd/ack)
+    // equipamentoId -> Set<topicoPrimario> (ignora os derivados de subscribeTopic)
+    // /inputs entra aqui junto com /status e /cmd/ack: sem isso ele era tratado
+    // como topico primario, nunca batia com o desejado e era desinscrito a cada
+    // reconciliacao (que roda a cada 5 min), derrubando as entradas digitais.
     const currentMap = new Map<string, Set<string>>();
     for (const [topic, equipIds] of this.subscriptions.entries()) {
-      if (topic.endsWith('/status') || topic.endsWith('/cmd/ack')) continue;
+      if (
+        topic.endsWith('/status') ||
+        topic.endsWith('/cmd/ack') ||
+        topic.endsWith('/inputs')
+      ) {
+        continue;
+      }
       for (const equipId of equipIds) {
         const id = equipId.trim();
         if (!currentMap.has(id)) currentMap.set(id, new Set());
@@ -1189,6 +1198,7 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
           this.unsubscribeTopic(topic, equipamentoId, 'reconcile');
           this.unsubscribeTopic(`${topic}/status`, equipamentoId, 'reconcile');
           this.unsubscribeTopic(`${topic}/cmd/ack`, equipamentoId, 'reconcile');
+          this.unsubscribeTopic(`${topic}/inputs`, equipamentoId, 'reconcile');
           removed.push({ equipamentoId, topic });
         }
       }
