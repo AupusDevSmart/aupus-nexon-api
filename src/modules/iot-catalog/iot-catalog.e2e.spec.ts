@@ -10,6 +10,11 @@
  * Pre-requisito: nexon-api rodando em localhost:3001 (pnpm start:dev).
  * Se ele estiver offline, todos os testes falham com ECONNREFUSED.
  *
+ * Por isso esta suite NAO roda no `pnpm test` padrao: ela e excluida via
+ * testPathIgnorePatterns e tem script proprio, `pnpm test:e2e:live`. Antes
+ * dessa separacao, `pnpm test` vinha vermelho por padrao com 14 falhas de
+ * conexao, o que escondia regressao de verdade no meio do ruido.
+ *
  * Cleanup: entries criadas tem prefixo "e2e_test_" no codigo do tipo OU no
  * fabricante do modelo. Removidas em beforeAll + afterAll pra nao acumular.
  */
