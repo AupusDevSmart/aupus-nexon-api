@@ -43,6 +43,17 @@ export class GeracaoManualController {
     return { data: { ok: true } };
   }
 
+  @Put('meta')
+  @ApiOperation({ summary: 'Define a meta (kWh/dia) da usina — unidades.predicao_diaria_kwh (cadastro)' })
+  async salvarMeta(
+    @Body() body: { unidadeId: string; predicao: number | null },
+    @CurrentUser() user?: ScopedUser,
+  ) {
+    this.service.assertEditor(user);
+    await this.service.salvarMeta(body?.unidadeId, body?.predicao ?? null);
+    return { data: { ok: true } };
+  }
+
   @Post('importar')
   @ApiOperation({ summary: 'Import em lote (Excel/CSV parseado no front → JSON array)' })
   async importar(@Body() body: { linhas: LinhaManual[] }, @CurrentUser() user?: ScopedUser) {

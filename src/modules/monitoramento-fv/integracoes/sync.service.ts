@@ -73,7 +73,9 @@ export class MonitoramentoSyncService {
     return this.prisma.$queryRaw<UnidadeFv[]>`
       SELECT TRIM(c.unidade_id) AS unidade_id, TRIM(u.nome) AS nome,
              c.provedor_planta_id AS provedor_planta_id,
-             COALESCE(c.predicao_diaria_kwh, 0)::float8 AS predicao
+             -- Meta = CADASTRO da instalacao (unidades.predicao_diaria_kwh). Fallback na
+             -- config antiga so' por retrocompat. Fonte unica de meta = a unidade.
+             COALESCE(u.predicao_diaria_kwh, c.predicao_diaria_kwh, 0)::float8 AS predicao
       FROM unidade_fv_config c
       JOIN unidades u ON TRIM(u.id) = TRIM(c.unidade_id) AND u.deleted_at IS NULL
       WHERE c.provedor_monitoramento = ${provedor}

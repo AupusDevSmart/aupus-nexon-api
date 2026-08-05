@@ -82,7 +82,7 @@ export class ConfigFvService {
     const configs = await this.prisma.$queryRaw<any[]>`
       SELECT TRIM(c.unidade_id) AS unidade_id, TRIM(u.nome) AS nome,
              c.provedor_monitoramento AS provedor, c.provedor_planta_id AS provedor_planta_id,
-             c.predicao_diaria_kwh::float8 AS predicao, c.frequencia_min AS frequencia_min,
+             COALESCE(u.predicao_diaria_kwh, c.predicao_diaria_kwh)::float8 AS predicao, c.frequencia_min AS frequencia_min,
              c.ativo AS ativo, to_char(c.ultima_sync_em, 'YYYY-MM-DD HH24:MI') AS ultima_sync
       FROM unidade_fv_config c
       JOIN unidades u ON TRIM(u.id) = TRIM(c.unidade_id) AND u.deleted_at IS NULL
@@ -172,6 +172,15 @@ export class ConfigFvService {
         ativo                  = ${ativo},
         updated_at             = now()
     `);
+
+    // Meta = propriedade da INSTALACAO. Editar a predicao aqui (ou no cadastro da
+    // unidade) grava no MESMO lugar: unidades.predicao_diaria_kwh (fonte unica).
+    if (predicao != null) {
+      await this.prisma.$executeRaw(Prisma.sql`
+        UPDATE unidades SET predicao_diaria_kwh = ${predicao}, updated_at = now()
+        WHERE TRIM(id) = ${unidadeId}
+      `);
+    }
   }
 
   async remover(unidadeId: string): Promise<{ removidas: number }> {

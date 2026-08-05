@@ -34,9 +34,10 @@ export class GeracaoManualService {
   }
 
   /** Unidades FV elegíveis (cloud-tracked ou com histórico) — popula dropdown + template. */
-  async listarUnidades(): Promise<Array<{ unidade_id: string; nome: string; provedor: string | null }>> {
+  async listarUnidades(): Promise<Array<{ unidade_id: string; nome: string; provedor: string | null; predicao: number | null }>> {
     return this.prisma.$queryRaw`
-      SELECT TRIM(u.id) AS unidade_id, TRIM(u.nome) AS nome, c.provedor_monitoramento AS provedor
+      SELECT TRIM(u.id) AS unidade_id, TRIM(u.nome) AS nome, c.provedor_monitoramento AS provedor,
+             u.predicao_diaria_kwh::float8 AS predicao
       FROM unidades u
       LEFT JOIN unidade_fv_config c ON TRIM(c.unidade_id) = TRIM(u.id)
       WHERE u.deleted_at IS NULL
@@ -44,6 +45,20 @@ export class GeracaoManualService {
              OR EXISTS (SELECT 1 FROM geracao_diaria_plantas g WHERE TRIM(g.unidade_id) = TRIM(u.id)))
       ORDER BY nome
     `;
+  }
+
+  /**
+   * Meta da usina (kWh/dia) — propriedade da INSTALACAO. Fonte unica: unidades.predicao_diaria_kwh.
+   * O cron e as telas leem daqui; editar aqui vale para toda usina (inclusive as manuais, que
+   * nao tem config de sync). null limpa a meta.
+   */
+  async salvarMeta(unidadeId: string, predicao: number | null): Promise<void> {
+    const id = (unidadeId ?? '').trim();
+    if (!id) throw new Error('unidadeId obrigatório');
+    if (predicao != null && (!Number.isFinite(predicao) || predicao < 0)) throw new Error('meta inválida');
+    await this.prisma.$executeRaw(
+      Prisma.sql`UPDATE unidades SET predicao_diaria_kwh = ${predicao}, updated_at = now() WHERE TRIM(id) = ${id} AND deleted_at IS NULL`,
+    );
   }
 
   /** Linhas de geração p/ a tabela editável (janela de datas, opcionalmente 1 unidade). */
