@@ -60,7 +60,7 @@
     "typescript": "^5.9.2"
   },
   "dependencies": {
-    "@aupus/api-shared": "git+https://github.com/AupusDevSmart/api-shared.git#v0.15.1",
+    "@aupus/api-shared": "git+https://github.com/AupusDevSmart/api-shared.git#v0.15.2",
     "@nestjs/config": "^4.0.2",
     "@nestjs/event-emitter": "^3.1.0",
     "@nestjs/jwt": "^11.0.0",
