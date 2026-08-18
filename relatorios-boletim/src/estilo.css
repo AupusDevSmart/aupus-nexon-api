@@ -1,0 +1,403 @@
+/* =========================================================
+   Boletim Semanal da Operação — identidade visual Aupus
+   Renderização: WeasyPrint (A4 retrato, página única)
+   ========================================================= */
+
+:root {
+  --navy: #10203C;
+  --navy-2: #1F2A44;
+  --navy-3: #35415C;
+  --green: #16A34A;
+  --green-aupus: #45FD5C;
+  --green-bg: #E9F9EE;
+  --red: #D92D20;
+  --red-bg: #FDECEA;
+  --amber: #B45309;
+  --amber-bg: #FEF3C7;
+  --grey: #6B7280;
+  --grey-2: #9AA3B2;
+  --line: #E4E9F0;
+  --surface: #F6F8FB;
+}
+
+@page {
+  size: A4 portrait;
+  margin: 0;
+}
+
+* { box-sizing: border-box; }
+
+html {
+  font-family: "DejaVu Sans", "Segoe UI", Arial, sans-serif;
+  font-size: 8.2pt;
+  color: var(--navy-2);
+  -weasy-hyphens: none;
+}
+
+body { margin: 0; }
+
+.pagina {
+  width: 210mm;
+  min-height: 297mm;
+  display: flex;
+  flex-direction: column;
+}
+
+.conteudo {
+  flex: 1;
+  padding: 4mm 9mm 2mm 9mm;
+}
+
+/* ---------------- Cabeçalho ---------------- */
+
+.topo {
+  background: var(--navy);
+  color: #fff;
+  padding: 5.2mm 9mm 4.8mm 9mm;
+  display: flex;
+  align-items: center;
+  border-bottom: 1.2mm solid var(--green-aupus);
+}
+
+.topo .logo { height: 13mm; }
+
+.topo .titulo {
+  flex: 1;
+  padding-left: 7mm;
+}
+
+.topo h1 {
+  margin: 0;
+  font-size: 15.5pt;
+  font-weight: 700;
+  letter-spacing: 0.4pt;
+  line-height: 1.05;
+}
+
+.topo .sub {
+  margin: 1.6mm 0 0 0;
+  font-size: 9pt;
+  color: #C8D2E2;
+}
+
+.topo .sub strong { color: var(--green-aupus); font-weight: 700; }
+
+.topo .periodo {
+  text-align: right;
+  border-left: 0.3mm solid rgba(255, 255, 255, 0.22);
+  padding-left: 6mm;
+  min-width: 46mm;
+}
+
+.topo .periodo .rot {
+  font-size: 6.6pt;
+  letter-spacing: 1pt;
+  text-transform: uppercase;
+  color: var(--grey-2);
+}
+
+.topo .periodo .val {
+  font-size: 10pt;
+  font-weight: 700;
+  color: var(--green-aupus);
+  margin-top: 0.8mm;
+}
+
+.topo .periodo .ger {
+  font-size: 6.8pt;
+  color: #C8D2E2;
+  margin-top: 2.2mm;
+}
+
+/* ---------------- KPIs ---------------- */
+
+.kpis {
+  display: flex;
+  gap: 2.4mm;
+  margin-bottom: 2.8mm;
+}
+
+.kpi {
+  flex: 1;
+  background: #fff;
+  border: 0.25mm solid var(--line);
+  border-radius: 2mm;
+  padding: 2.6mm 2.8mm 2.4mm 2.8mm;
+}
+
+.kpi .rot {
+  font-size: 5.9pt;
+  letter-spacing: 0.4pt;
+  text-transform: uppercase;
+  color: var(--grey);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.kpi .val {
+  font-size: 15pt;
+  font-weight: 700;
+  color: var(--navy);
+  line-height: 1.15;
+  margin-top: 1.2mm;
+  white-space: nowrap;
+}
+
+.kpi .val .un {
+  font-size: 7.5pt;
+  font-weight: 700;
+  color: var(--grey);
+  margin-left: 0.6mm;
+}
+
+.kpi .barra {
+  height: 1.1mm;
+  background: var(--line);
+  border-radius: 1mm;
+  margin: 2mm 0 1.4mm 0;
+  overflow: hidden;
+}
+
+.kpi .barra span { display: block; height: 1.1mm; border-radius: 1mm; }
+.kpi .barra .ok { background: var(--green); }
+.kpi .barra .alerta { background: #F59E0B; }
+
+.kpi .meta { font-size: 6.4pt; color: var(--grey); }
+.kpi .meta b { color: var(--navy-2); }
+
+/* ---------------- Blocos ---------------- */
+
+.bloco {
+  background: #fff;
+  border: 0.25mm solid var(--line);
+  border-radius: 2mm;
+  padding: 3mm 3.4mm;
+  margin-bottom: 3.4mm;
+}
+
+.bloco > h2 {
+  margin: 0 0 2.6mm 0;
+  font-size: 8.6pt;
+  font-weight: 700;
+  letter-spacing: 0.8pt;
+  text-transform: uppercase;
+  color: var(--navy);
+  padding-left: 2.4mm;
+  border-left: 1mm solid var(--green-aupus);
+  line-height: 1.15;
+}
+
+.colunas { display: flex; gap: 3.6mm; }
+.colunas > .bloco { margin-bottom: 0; }
+.col-6 { width: 50%; }
+
+/* ---------------- Tabela comparativa ---------------- */
+
+table.comp {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 8pt;
+}
+
+table.comp thead th {
+  background: var(--navy);
+  color: #fff;
+  font-size: 6.4pt;
+  letter-spacing: 0.4pt;
+  text-transform: uppercase;
+  font-weight: 700;
+  padding: 1.8mm 1.6mm;
+  text-align: center;
+}
+
+table.comp thead th.ind { text-align: left; }
+table.comp thead th small {
+  display: block;
+  font-weight: 400;
+  color: var(--grey-2);
+  font-size: 5.8pt;
+  letter-spacing: 0;
+  margin-top: 0.4mm;
+}
+
+table.comp thead th.sep { border-left: 0.6mm solid var(--green-aupus); }
+table.comp td.sep { border-left: 0.6mm solid #EDF3EE; }
+
+table.comp tbody td {
+  padding: 1.7mm 1.6mm;
+  border-bottom: 0.2mm solid var(--line);
+  text-align: center;
+}
+
+table.comp tbody tr:last-child td { border-bottom: none; }
+table.comp tbody tr:nth-child(even) td { background: var(--surface); }
+
+table.comp td.ind {
+  text-align: left;
+  white-space: nowrap;
+  font-weight: 700;
+  color: var(--navy);
+}
+
+table.comp td b { font-weight: 700; color: var(--navy); }
+
+.pill {
+  display: inline-block;
+  padding: 0.5mm 1.6mm;
+  border-radius: 3mm;
+  font-size: 7pt;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.pill.pos { background: var(--green-bg); color: var(--green); }
+.pill.neg { background: var(--red-bg); color: var(--red); }
+.pill.neutro { background: #EEF1F6; color: var(--grey); }
+
+/* ---------------- Gráficos ---------------- */
+
+.legenda {
+  display: flex;
+  gap: 5mm;
+  font-size: 6.8pt;
+  color: var(--grey);
+  margin-bottom: 1.4mm;
+}
+
+.legenda i {
+  display: inline-block;
+  width: 4mm;
+  height: 1mm;
+  border-radius: 1mm;
+  margin-right: 1.2mm;
+  vertical-align: middle;
+}
+
+.legenda .l-atual i { background: var(--green); }
+.legenda .l-ant i { background: var(--navy-3); }
+.legenda .l-esp i { background: var(--grey-2); }
+
+.grafico svg { width: 100%; height: auto; display: block; }
+
+/* ---------------- Alarmes ---------------- */
+
+.alarmes-linha { display: flex; gap: 3mm; align-items: center; }
+.alarmes-linha .rosca { width: 33mm; }
+.alarmes-linha .barras { flex: 1; }
+
+.sub-rot {
+  font-size: 6.4pt;
+  letter-spacing: 0.7pt;
+  text-transform: uppercase;
+  color: var(--grey);
+  font-weight: 700;
+  margin-bottom: 1.6mm;
+}
+
+.legenda-rosca { margin-top: 1.6mm; font-size: 6.8pt; color: var(--navy-2); }
+.legenda-rosca div { margin-bottom: 0.9mm; }
+.legenda-rosca i {
+  display: inline-block;
+  width: 2.2mm;
+  height: 2.2mm;
+  border-radius: 0.6mm;
+  margin-right: 1.4mm;
+}
+.legenda-rosca .c i { background: var(--red); }
+.legenda-rosca .n i { background: #F59E0B; }
+.legenda-rosca b { color: var(--navy); }
+
+/* ---------------- Ocorrências ---------------- */
+
+.ocorrencias { display: flex; flex-wrap: wrap; gap: 2.4mm; }
+
+.oc {
+  width: calc(50% - 1.2mm);
+  border: 0.25mm solid var(--line);
+  border-radius: 1.6mm;
+  border-left: 1mm solid var(--line);
+  padding: 2.2mm 2.4mm;
+  background: #fff;
+}
+
+.oc.critico { border-left-color: var(--red); }
+.oc.atencao { border-left-color: #F59E0B; }
+.oc.info { border-left-color: var(--navy-3); }
+.oc.ok { border-left-color: var(--green); }
+
+.oc .rot {
+  font-size: 6.2pt;
+  letter-spacing: 0.6pt;
+  text-transform: uppercase;
+  font-weight: 700;
+  color: var(--grey);
+}
+
+.oc .num {
+  font-size: 12pt;
+  font-weight: 700;
+  color: var(--navy);
+  line-height: 1.2;
+  margin-top: 0.8mm;
+}
+
+.oc .num small { font-size: 7pt; color: var(--grey); font-weight: 700; }
+.oc .det { font-size: 6.6pt; color: var(--grey); margin-top: 0.6mm; }
+
+/* ---------------- Destaques ---------------- */
+
+.destaques { background: var(--surface); }
+.destaques ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  columns: 2;
+  column-gap: 6mm;
+}
+
+.destaques li {
+  font-size: 7.6pt;
+  color: var(--navy-2);
+  padding-left: 4mm;
+  margin-bottom: 1.1mm;
+  position: relative;
+  break-inside: avoid;
+}
+
+.destaques li::before {
+  content: "";
+  position: absolute;
+  left: 0.6mm;
+  top: 1.1mm;
+  width: 1.8mm;
+  height: 1.8mm;
+  border-radius: 2mm;
+  background: var(--green-aupus);
+}
+
+/* ---------------- Rodapé ---------------- */
+
+.rodape {
+  background: var(--navy);
+  color: #fff;
+  padding: 3mm 9mm;
+  display: flex;
+  align-items: center;
+  border-top: 1.2mm solid var(--green-aupus);
+}
+
+.rodape .marca { font-size: 10pt; font-weight: 700; letter-spacing: 0.3pt; }
+.rodape .marca span { color: var(--green-aupus); }
+.rodape .slogan { flex: 1; text-align: center; font-size: 7.6pt; color: #C8D2E2; }
+.rodape .slogan span { color: var(--green-aupus); font-weight: 700; }
+.rodape .site { font-size: 7.6pt; color: #C8D2E2; }
+
+/* ---------------- Nota de rodapé do conteúdo ---------------- */
+
+.nota {
+  margin: 0.6mm 0 0 0;
+  font-size: 6.2pt;
+  color: var(--grey-2);
+  text-align: center;
+  line-height: 1.5;
+}

@@ -26,7 +26,7 @@ export class CreateRegraLogDto {
   campo_json: string;
 
   @IsString()
-  @IsIn(['<', '>', '<=', '>=', '==', '!='])
+  @IsIn(['<', '>', '<=', '>=', '==', '!=', 'sem_comunicacao'])
   operador: string;
 
   @IsNumber()

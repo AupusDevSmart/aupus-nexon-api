@@ -1,0 +1,80 @@
+{
+  "usina": {
+    "nome": "Usinas Solares",
+    "potencia_kwp": 3500
+  },
+  "periodo": {
+    "inicio": "11/08/2025",
+    "fim": "17/08/2025",
+    "gerado_em": "18/08/2025",
+    "rotulo_ano_atual": "2025",
+    "rotulo_ano_anterior": "2024",
+    "janela_ano_atual": "01/01 a 17/08/2025",
+    "janela_ano_anterior": "01/01 a 17/08/2024",
+    "janela_semana_anterior": "04/08 a 10/08/2025"
+  },
+  "metas": {
+    "disponibilidade": 99.0,
+    "pr": 80.0,
+    "mes_mwh": 2500.0,
+    "ano_mwh": 16000.0
+  },
+  "semana": {
+    "geracao_mwh": 686.2,
+    "esperada_mwh": 702.1,
+    "disponibilidade": 99.21,
+    "pr": 84.7,
+    "alarmes": 12
+  },
+  "semana_anterior": {
+    "geracao_mwh": 654.8,
+    "disponibilidade": 98.74,
+    "pr": 82.2,
+    "alarmes": 18
+  },
+  "acumulado": {
+    "mes_mwh": 2812.6,
+    "ano_mwh": 18452.7,
+    "disponibilidade": 99.12,
+    "pr": 84.4,
+    "alarmes": 222
+  },
+  "ano_anterior": {
+    "geracao_mwh": 17138.9,
+    "disponibilidade": 98.41,
+    "pr": 80.1,
+    "alarmes": 407
+  },
+  "serie_diaria": [
+    { "rotulo": "11/08", "dia": "Seg", "atual": 123.7, "anterior": 111.7, "esperado": 111.0 },
+    { "rotulo": "12/08", "dia": "Ter", "atual": 99.6, "anterior": 89.3, "esperado": 99.3 },
+    { "rotulo": "13/08", "dia": "Qua", "atual": 112.4, "anterior": 105.3, "esperado": 105.9 },
+    { "rotulo": "14/08", "dia": "Qui", "atual": 101.0, "anterior": 91.7, "esperado": 96.7 },
+    { "rotulo": "15/08", "dia": "Sex", "atual": 108.8, "anterior": 102.1, "esperado": 104.4 },
+    { "rotulo": "16/08", "dia": "Sáb", "atual": 81.1, "anterior": 71.8, "esperado": 97.8 },
+    { "rotulo": "17/08", "dia": "Dom", "atual": 59.6, "anterior": 48.6, "esperado": 87.0 }
+  ],
+  "alarmes_severidade": {
+    "criticos": 2,
+    "nao_criticos": 10
+  },
+  "alarmes_tipo": [
+    { "tipo": "Comunicação", "qtd": 5 },
+    { "tipo": "Falha inversor", "qtd": 3 },
+    { "tipo": "Subestação CC", "qtd": 2 },
+    { "tipo": "Sobretensão CA", "qtd": 1 },
+    { "tipo": "Temperatura", "qtd": 1 }
+  ],
+  "ocorrencias": {
+    "falhas_criticas": { "qtd": 2, "detalhe": "1 inversor · 1 string box" },
+    "falhas_nao_criticas": { "qtd": 10, "detalhe": "Diversos alarmes de monitoramento" },
+    "os_abertas": { "qtd": 6, "detalhe": "4 não críticas · 2 críticas" },
+    "os_concluidas": { "qtd": 8, "detalhe": "100% dentro do prazo" }
+  },
+  "destaques": [
+    "Geração 7,7% acima do mesmo período do ano anterior.",
+    "Disponibilidade acima da meta contratual em toda a semana.",
+    "Redução de 29% na perda financeira frente à semana anterior.",
+    "Manutenção preventiva em dia, sem pendências."
+  ]
+}

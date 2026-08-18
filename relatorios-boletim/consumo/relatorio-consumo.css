@@ -1,0 +1,449 @@
+/* =========================================================
+   Relatório de Gestão de Energia — Visão Semanal
+   Identidade visual Aupus. A4 retrato, página única.
+   Tudo escopado em .relatorio-consumo — não vaza para a aplicação.
+   ========================================================= */
+
+.relatorio-consumo {
+  --navy: #10203C;
+  --navy-2: #1F2A44;
+  --navy-3: #35415C;
+  --green: #16A34A;
+  --green-aupus: #45FD5C;
+  --green-bg: #E9F9EE;
+  --red: #D92D20;
+  --amber: #F59E0B;
+  --grey: #6B7280;
+  --grey-2: #9AA3B2;
+  --line: #E4E9F0;
+  --surface: #F6F8FB;
+
+  font-family: "DejaVu Sans", "Segoe UI", Arial, sans-serif;
+  font-size: 7.8pt;
+  color: var(--navy-2);
+  width: 210mm;
+  min-height: 297mm;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  box-sizing: border-box;
+}
+
+.relatorio-consumo *,
+.relatorio-consumo *::before,
+.relatorio-consumo *::after { box-sizing: border-box; }
+
+@page { size: A4 portrait; margin: 0; }
+
+.relatorio-consumo .svg-fluido { width: 100%; height: auto; display: block; }
+
+/* ---------------- Cabeçalho ---------------- */
+
+.relatorio-consumo .topo {
+  background: var(--navy);
+  color: #fff;
+  padding: 5mm 9mm 4.6mm 9mm;
+  display: flex;
+  align-items: center;
+  border-bottom: 1.2mm solid var(--green-aupus);
+}
+
+.relatorio-consumo .topo .logo { height: 12mm; width: auto; }
+
+.relatorio-consumo .topo .titulo { flex: 1; text-align: center; padding: 0 5mm; }
+
+.relatorio-consumo .topo h1 {
+  margin: 0;
+  font-size: 12.4pt;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4pt;
+  line-height: 1.15;
+}
+
+.relatorio-consumo .topo .sub {
+  margin: 1.2mm 0 0 0;
+  font-size: 10pt;
+  font-weight: 700;
+  color: var(--green-aupus);
+  text-transform: uppercase;
+  letter-spacing: 0.6pt;
+}
+
+.relatorio-consumo .cartoes { min-width: 46mm; }
+
+.relatorio-consumo .cartao {
+  border: 0.25mm solid rgba(255, 255, 255, 0.22);
+  border-radius: 1.6mm;
+  padding: 1.8mm 2.6mm;
+  margin-bottom: 1.6mm;
+}
+
+.relatorio-consumo .cartao:last-child { margin-bottom: 0; }
+
+.relatorio-consumo .cartao .rot {
+  font-size: 6.4pt;
+  letter-spacing: 0.8pt;
+  text-transform: uppercase;
+  color: var(--grey-2);
+  font-weight: 700;
+}
+
+.relatorio-consumo .cartao .val { font-size: 8pt; color: #fff; margin-top: 0.6mm; line-height: 1.35; }
+.relatorio-consumo .cartao .val b { color: var(--green-aupus); }
+
+/* ---------------- Conteúdo ---------------- */
+
+.relatorio-consumo .conteudo { flex: 1; padding: 3mm 9mm 1.6mm 9mm; }
+
+/* ---------------- KPIs ---------------- */
+
+.relatorio-consumo .kpis { display: flex; gap: 1.8mm; margin-bottom: 2.2mm; }
+
+.relatorio-consumo .kpi {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  border: 0.25mm solid var(--line);
+  border-radius: 2mm;
+  padding: 2.2mm;
+}
+
+.relatorio-consumo .kpi .rot {
+  font-size: 5.4pt;
+  letter-spacing: 0.3pt;
+  text-transform: uppercase;
+  color: var(--grey);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.relatorio-consumo .kpi .val {
+  font-size: 11.8pt;
+  font-weight: 700;
+  color: var(--navy);
+  line-height: 1.15;
+  margin-top: 0.9mm;
+  white-space: nowrap;
+}
+
+.relatorio-consumo .kpi .val.texto { font-size: 10.4pt; color: var(--green); }
+.relatorio-consumo .kpi .val .un { font-size: 6.6pt; font-weight: 700; color: var(--grey); margin-left: 0.6mm; }
+
+.relatorio-consumo .kpi .barra {
+  height: 1.1mm;
+  background: var(--line);
+  border-radius: 1mm;
+  margin: auto 0 1mm 0;
+  overflow: hidden;
+}
+
+.relatorio-consumo .kpi .barra span { display: block; height: 1.1mm; border-radius: 1mm; }
+.relatorio-consumo .kpi .barra .ok { background: var(--green); }
+.relatorio-consumo .kpi .barra .alerta { background: var(--amber); }
+
+.relatorio-consumo .kpi .meta { font-size: 5.9pt; color: var(--grey); }
+.relatorio-consumo .kpi .meta b { color: var(--navy-2); }
+
+.relatorio-consumo .kpi .nota-kpi {
+  font-size: 5.9pt;
+  color: var(--grey);
+  margin-top: auto;
+  padding-top: 1mm;
+  border-top: 0.2mm solid var(--line);
+  line-height: 1.3;
+}
+
+/* ---------------- Faixa do acumulado ---------------- */
+
+.relatorio-consumo .faixa {
+  display: flex;
+  align-items: center;
+  background: var(--surface);
+  border: 0.25mm solid var(--line);
+  border-left: 1mm solid var(--navy);
+  border-radius: 2mm;
+  padding: 1.5mm 3mm;
+  margin-bottom: 2.2mm;
+}
+
+.relatorio-consumo .faixa .rot {
+  font-size: 7.2pt;
+  font-weight: 700;
+  letter-spacing: 0.7pt;
+  text-transform: uppercase;
+  color: var(--navy);
+  padding-right: 5mm;
+}
+
+.relatorio-consumo .faixa .item {
+  flex: 1;
+  font-size: 7.6pt;
+  color: var(--grey);
+  text-align: center;
+  border-left: 0.2mm solid var(--line);
+}
+
+.relatorio-consumo .faixa .item b { color: var(--navy); font-size: 8.6pt; }
+
+/* ---------------- Blocos ---------------- */
+
+.relatorio-consumo .colunas {
+  display: flex;
+  gap: 2.4mm;
+  align-items: stretch;
+  margin-bottom: 1.9mm;
+}
+
+.relatorio-consumo .bloco {
+  background: #fff;
+  border: 0.25mm solid var(--line);
+  border-radius: 2mm;
+  margin-bottom: 1.9mm;
+  /* sem overflow:hidden — as colunas esticam para a mesma altura e o conteúdo
+     do bloco mais alto seria cortado em silêncio */
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+.relatorio-consumo .colunas > .bloco { margin-bottom: 0; }
+
+.relatorio-consumo .bloco > h2 {
+  margin: 0 0 0 0;
+  font-size: 8pt;
+  font-weight: 700;
+  letter-spacing: 0.8pt;
+  text-transform: uppercase;
+  color: var(--navy);
+  background: var(--surface);
+  border-left: 1mm solid var(--green-aupus);
+  border-radius: 1.7mm 1.7mm 0 0;
+  padding: 1.6mm 2.4mm;
+  line-height: 1.15;
+}
+
+.relatorio-consumo .bloco > h2 .n {
+  display: inline-block;
+  background: var(--navy);
+  color: #fff;
+  font-size: 6.6pt;
+  border-radius: 1mm;
+  padding: 0.3mm 1.3mm;
+  margin-right: 1.6mm;
+  vertical-align: 0.3mm;
+}
+
+.relatorio-consumo .bloco-corpo { padding: 2mm 2.2mm; }
+
+.relatorio-consumo .col-3 { width: 33.333%; }
+.relatorio-consumo .col-demanda { flex: 1; }
+.relatorio-consumo .col-ficha { width: 63mm; }
+
+/* ---------------- Legenda de postos ---------------- */
+
+.relatorio-consumo .chave {
+  display: flex;
+  gap: 3.4mm;
+  font-size: 6.9pt;
+  color: var(--navy-2);
+  margin-bottom: 1.4mm;
+}
+
+.relatorio-consumo .chave-item i,
+.relatorio-consumo .bolinha {
+  display: inline-block;
+  width: 2.2mm;
+  height: 2.2mm;
+  border-radius: 0.5mm;
+  margin-right: 1.2mm;
+}
+
+/* ---------------- Tabelas ---------------- */
+
+.relatorio-consumo table.dados {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 7.4pt;
+}
+
+.relatorio-consumo table.dados thead th {
+  background: #EDF1F7;
+  color: var(--navy);
+  font-size: 6.1pt;
+  letter-spacing: 0.3pt;
+  text-transform: uppercase;
+  font-weight: 700;
+  padding: 1mm 1.3mm;
+  text-align: right;
+  border-bottom: 0.25mm solid var(--line);
+  line-height: 1.2;
+}
+
+.relatorio-consumo table.dados thead th:first-child { text-align: left; }
+
+.relatorio-consumo table.dados td {
+  padding: 0.72mm 1.2mm;
+  border-bottom: 0.2mm solid var(--line);
+  text-align: right;
+}
+
+.relatorio-consumo table.dados td:first-child { text-align: left; }
+.relatorio-consumo table.dados td:nth-child(2) { white-space: nowrap; }
+.relatorio-consumo table.dados tr:last-child td { border-bottom: none; }
+.relatorio-consumo table.dados td b { color: var(--navy); }
+
+.relatorio-consumo table.dados tr.total td {
+  background: var(--surface);
+  font-weight: 700;
+  color: var(--navy);
+  border-bottom: none;
+}
+
+.relatorio-consumo table.dados.ficha td { white-space: nowrap; }
+.relatorio-consumo table.dados.ficha td:first-child { font-size: 7.1pt; }
+.relatorio-consumo table.dados.ficha td:last-child { font-weight: 700; color: var(--navy); }
+.relatorio-consumo table.dados .alerta { color: var(--red); }
+
+.relatorio-consumo td.centro,
+.relatorio-consumo th.centro { text-align: center !important; }
+
+.relatorio-consumo .dot {
+  display: inline-block;
+  width: 2.4mm;
+  height: 2.4mm;
+  border-radius: 2mm;
+}
+
+.relatorio-consumo .dot.ok { background: var(--green); }
+.relatorio-consumo .dot.atencao { background: var(--amber); }
+.relatorio-consumo .dot.critico { background: var(--red); }
+
+/* ---------------- Destaque de média diária ---------------- */
+
+.relatorio-consumo .destaque {
+  margin-top: 1.6mm;
+  background: var(--green-bg);
+  border: 0.25mm solid #BDE9CB;
+  border-radius: 2mm;
+  padding: 1.8mm;
+  text-align: center;
+}
+
+.relatorio-consumo .destaque .rot {
+  font-size: 6.8pt;
+  text-transform: uppercase;
+  letter-spacing: 0.6pt;
+  color: var(--grey);
+  font-weight: 700;
+}
+
+.relatorio-consumo .destaque .val { font-size: 12.5pt; font-weight: 700; color: var(--green); line-height: 1.25; }
+.relatorio-consumo .destaque .det { font-size: 7pt; color: var(--navy-2); }
+
+/* ---------------- Gráfico + tabela lado a lado ----------------
+   Tabela de layout, não flex: com flex a tabela interna não encolhe
+   e a última coluna vaza para fora do bloco. */
+
+.relatorio-consumo .lado-a-lado {
+  display: table;
+  width: 100%;
+  table-layout: fixed;
+  border-spacing: 0;
+}
+
+.relatorio-consumo .lado-a-lado > .lado-tabela { display: table-cell; vertical-align: middle; }
+
+.relatorio-consumo .lado-a-lado > .lado-svg {
+  display: table-cell;
+  vertical-align: middle;
+  padding-left: 3mm;
+}
+
+.relatorio-consumo .lado-svg.fp { width: 46mm; text-align: center; }
+
+.relatorio-consumo .sub-rot {
+  font-size: 6.4pt;
+  letter-spacing: 0.7pt;
+  text-transform: uppercase;
+  color: var(--grey);
+  font-weight: 700;
+  margin-bottom: 1.1mm;
+}
+
+.relatorio-consumo .fp-resumo {
+  font-size: 6.3pt;
+  white-space: nowrap;
+  color: var(--grey);
+  margin-top: 1mm;
+  border-top: 0.2mm solid var(--line);
+  padding-top: 1mm;
+}
+
+.relatorio-consumo .fp-resumo b { color: var(--navy); }
+
+/* ---------------- Alarmes ---------------- */
+
+.relatorio-consumo .alarmes { display: flex; gap: 3.4mm; align-items: flex-start; }
+.relatorio-consumo .alarmes-rosca { width: 58mm; }
+.relatorio-consumo .alarmes-eventos { flex: 1; }
+
+.relatorio-consumo .rosca-linha { display: flex; align-items: center; gap: 2.4mm; }
+.relatorio-consumo .rosca-svg { width: 26mm; }
+
+.relatorio-consumo .rosca-chave { font-size: 6.6pt; color: var(--navy-2); line-height: 1.35; }
+.relatorio-consumo .rosca-chave > div { margin-bottom: 1.2mm; }
+.relatorio-consumo .rosca-chave b { color: var(--navy); }
+
+.relatorio-consumo .rosca-chave i {
+  display: inline-block;
+  width: 2.2mm;
+  height: 2.2mm;
+  border-radius: 0.5mm;
+  margin-right: 1.2mm;
+}
+
+.relatorio-consumo .economia {
+  width: 58mm;
+  background: var(--green-bg);
+  border: 0.25mm solid #BDE9CB;
+  border-radius: 2mm;
+  padding: 2.4mm;
+}
+
+.relatorio-consumo .economia .rot {
+  font-size: 6.8pt;
+  font-weight: 700;
+  letter-spacing: 0.6pt;
+  text-transform: uppercase;
+  color: var(--green);
+  margin-bottom: 1.4mm;
+}
+
+.relatorio-consumo .economia p { margin: 0; font-size: 6.6pt; color: var(--navy-2); line-height: 1.45; }
+.relatorio-consumo .economia .valor { font-size: 12.5pt; font-weight: 700; color: var(--green); margin-top: 1.6mm; text-align: center; }
+
+/* ---------------- Nota e rodapé ---------------- */
+
+.relatorio-consumo .nota {
+  margin: 1.2mm 0 1.4mm 0;
+  font-size: 5.8pt;
+  color: var(--grey-2);
+  text-align: center;
+  line-height: 1.4;
+}
+
+.relatorio-consumo .rodape {
+  background: var(--navy);
+  color: #fff;
+  padding: 3mm 9mm;
+  display: flex;
+  align-items: center;
+  border-top: 1.2mm solid var(--green-aupus);
+}
+
+.relatorio-consumo .rodape .marca { font-size: 10pt; font-weight: 700; }
+.relatorio-consumo .rodape .marca span { color: var(--green-aupus); }
+.relatorio-consumo .rodape .slogan { flex: 1; text-align: center; font-size: 7.6pt; color: #C8D2E2; }
+.relatorio-consumo .rodape .slogan span { color: var(--green-aupus); font-weight: 700; }
+.relatorio-consumo .rodape .site { font-size: 7.6pt; color: #C8D2E2; }

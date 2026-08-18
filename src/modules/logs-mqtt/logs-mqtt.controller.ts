@@ -1,6 +1,7 @@
 import {
   Controller,
   Get,
+  Post,
   Delete,
   Param,
   Query,
@@ -23,6 +24,11 @@ export class LogsMqttController {
   @Get(':id')
   findOne(@Param('id') id: string, @CurrentUser() user?: any) {
     return this.service.findOne(id, user);
+  }
+
+  @Post(':id/reconhecer')
+  reconhecer(@Param('id') id: string, @CurrentUser() user?: any) {
+    return this.service.reconhecer(id, user);
   }
 
   @Delete(':id')

@@ -121,4 +121,21 @@ export class LogsMqttService {
     await this.findOne(id, user);
     return this.prisma.logs_mqtt.delete({ where: { id: id.trim() } });
   }
+
+  /**
+   * Reconhecer (ack) um alarme: marca reconhecido_em/por. Usado pro modelo
+   * "alarme fica ativo até o operador marcar como visto" (ex.: trip do relé).
+   * findOne valida existência + escopo (tenant isolation). Colunas de ack não
+   * estão no model Prisma → gravadas por raw (idempotente: só marca se NULL).
+   */
+  async reconhecer(id: string, user?: ScopedUser) {
+    await this.findOne(id, user);
+    const u: any = user || {};
+    const quem = String(u.nome || u.email || u.id || 'operador').slice(0, 64);
+    await this.prisma.$executeRaw`
+      UPDATE logs_mqtt SET reconhecido_em = now(), reconhecido_por = ${quem}
+      WHERE TRIM(id) = ${id.trim()} AND reconhecido_em IS NULL
+    `;
+    return { ok: true, reconhecido_por: quem };
+  }
 }

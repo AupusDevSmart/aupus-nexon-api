@@ -1,0 +1,113 @@
+{
+  "unidade": {
+    "nome": "Fazenda Aupus",
+    "ponto": "Subestação Principal"
+  },
+  "periodo": {
+    "inicio": "11/05/2025",
+    "fim": "17/05/2025",
+    "gerado_em": "18/05/2025 08:30",
+    "referencia_demanda": "01/05 a 31/05/2025"
+  },
+  "semana": {
+    "consumo_kwh": 52816,
+    "disponibilidade": 99.46,
+    "fic": 2,
+    "dic": "01h 35m",
+    "demanda_maxima_kw": 755,
+    "qualidade_tensao": {
+      "classificacao": "Adequada"
+    }
+  },
+  "metas": {
+    "disponibilidade": 99.0
+  },
+  "mes": {
+    "consumo_kwh": 215487,
+    "disponibilidade": 99.12,
+    "fic": 7,
+    "dic": "05h 42m"
+  },
+  "postos": [
+    {
+      "nome": "Fora de ponta",
+      "consumo_kwh": 31245,
+      "tempo": "86h 30m",
+      "tempo_horas": 86.5,
+      "custo": 5482.37,
+      "acionamentos": 22
+    },
+    {
+      "nome": "Ponta",
+      "consumo_kwh": 14823,
+      "tempo": "41h 15m",
+      "tempo_horas": 41.25,
+      "custo": 9767.88,
+      "acionamentos": 16
+    },
+    {
+      "nome": "Reservado",
+      "consumo_kwh": 6748,
+      "tempo": "27h 40m",
+      "tempo_horas": 27.6667,
+      "custo": 2615.19,
+      "acionamentos": 10
+    }
+  ],
+  "funcionamento": {
+    "tempo_total": "155h 25m",
+    "media_diaria": "22h 12m",
+    "dias": 7
+  },
+  "demanda": {
+    "contratada_kw": 600,
+    "serie": [
+      { "rotulo": "01/05", "valor": 520 },
+      { "rotulo": "04/05", "valor": 560 },
+      { "rotulo": "07/05", "valor": 545 },
+      { "rotulo": "10/05", "valor": 580 },
+      { "rotulo": "13/05", "valor": 755 },
+      { "rotulo": "16/05", "valor": 590 },
+      { "rotulo": "19/05", "valor": 630 },
+      { "rotulo": "22/05", "valor": 585 },
+      { "rotulo": "25/05", "valor": 560 },
+      { "rotulo": "28/05", "valor": 615 },
+      { "rotulo": "31/05", "valor": 570 }
+    ],
+    "maior_registrada_kw": 755,
+    "data_pico": "13/05/2025 18:30",
+    "permanencia_pico": "45 min",
+    "ultrapassagens": 3
+  },
+  "qualidade": {
+    "indicadores": [
+      { "indicador": "Desequilíbrio de tensão (V)", "valor": "1,32%", "limite": "≤ 2%", "status": "ok" },
+      { "indicador": "Desequilíbrio de corrente (I)", "valor": "3,45%", "limite": "≤ 10%", "status": "ok" },
+      { "indicador": "Fator de potência máximo", "valor": "0,98 (capacitivo)", "limite": "—", "status": "ok" },
+      { "indicador": "Fator de potência mínimo", "valor": "0,88 (indutivo)", "limite": "≥ 0,92", "status": "atencao" },
+      { "indicador": "Fator de potência médio", "valor": "0,96 (capacitivo)", "limite": "≥ 0,92", "status": "ok" },
+      { "indicador": "Tensão máxima registrada", "valor": "1,07 pu", "limite": "≤ 1,10 pu", "status": "ok" },
+      { "indicador": "Tensão mínima registrada", "valor": "0,93 pu", "limite": "≥ 0,90 pu", "status": "atencao" }
+    ],
+    "fator_potencia": {
+      "medio": 0.96,
+      "tipo_medio": "capacitivo",
+      "minimo": 0.88,
+      "tipo_minimo": "indutivo",
+      "maximo": 0.98,
+      "tipo_maximo": "capacitivo",
+      "limite": 0.92
+    }
+  },
+  "eventos": [
+    { "evento": "Sobretensão", "qtd": 8, "severidade": "alta" },
+    { "evento": "Subtensão", "qtd": 6, "severidade": "media" },
+    { "evento": "Ultrapassagem de demanda", "qtd": 3, "severidade": "alta" },
+    { "evento": "Falha de comunicação", "qtd": 4, "severidade": "media" }
+  ],
+  "oportunidade": {
+    "titulo": "Oportunidade de economia",
+    "texto": "28,0% do consumo da semana ocorreu na ponta. Deslocar 30% dessa carga para fora de ponta reduziria o custo em:",
+    "valor": 2145.32
+  }
+}

@@ -32,7 +32,9 @@ export class RegrasLogsMqttEngine implements OnModuleInit {
   async recarregarCache() {
     try {
       const regras = await this.prisma.regras_logs_mqtt.findMany({
-        where: { ativo: true, deleted_at: null },
+        // Exclui regras "sem_comunicacao" (offline) — essas são tratadas pelo
+        // RegrasOfflineService (checker periódico), não pelo motor de valor.
+        where: { ativo: true, deleted_at: null, operador: { not: 'sem_comunicacao' } },
       });
 
       this.regrasCache.clear();

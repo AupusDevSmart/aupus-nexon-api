@@ -39,6 +39,9 @@ export interface UnidadeResumo {
   nome: string;
   tipo: string;
   status: 'ONLINE' | 'OFFLINE' | 'ALERTA';
+  trip?: boolean; // TRIP real (SOE não reconhecido) — vermelho no COA, distinto de OFFLINE (sem info)
+  nuvem?: boolean; // sem TON ao vivo, mas com geração de NUVEM recente (cor própria, não é offline)
+  equipamentosOffline?: string[]; // nomes de equipamentos sem comunicação (pior-caso do status)
   ultimaLeitura: Date | null;
   coordenadas?: {
     latitude: number;
@@ -272,6 +275,7 @@ export class CoaService {
           ed.timestamp_dados,
           ed.qualidade,
           e.unidade_id,
+          e.nome AS equipamento_nome,
           e.tipo_equipamento
         FROM equipamentos_dados ed
         INNER JOIN equipamentos e ON e.id = ed.equipamento_id
@@ -491,6 +495,65 @@ export class CoaService {
       unidadesPorPlanta.get(unidade.planta_id)!.push(unidade);
     }
 
+    // Unidades com TRIP real ativo (SOE não reconhecido) → vermelho no COA,
+    // distinto de OFFLINE (sem info, cinza). reconhecido_em/dados_snapshot são raw.
+    const tripUnidades = new Set<string>();
+    try {
+      const tripRows = await this.prisma.$queryRaw<Array<{ unidade_id: string }>>`
+        SELECT DISTINCT TRIM(e.unidade_id) AS unidade_id
+        FROM logs_mqtt l
+        JOIN equipamentos e ON TRIM(e.id) = TRIM(l.equipamento_id)
+        WHERE l.dados_snapshot->>'kind' = 'trip'
+          AND l.reconhecido_em IS NULL
+          AND e.deleted_at IS NULL
+      `;
+      for (const r of tripRows) if (r?.unidade_id) tripUnidades.add(String(r.unidade_id).trim());
+    } catch (e) {
+      this.logger.warn(`[COA] consulta de trips falhou (segue sem destaque): ${e instanceof Error ? e.message : e}`);
+    }
+
+    // Equipamentos esperados (mqtt_habilitado) por unidade — pra saber se ALGUM
+    // está sem reportar (unidade não pode ficar verde com equipamento off).
+    const expectedPorUnidade = new Map<string, Array<{ id: string; nome: string }>>();
+    try {
+      // "Esperado" = mqtt_habilitado QUE REALMENTE REPORTA (dado nos últimos 7 dias).
+      // Sem o EXISTS, equipamento marcado mqtt_habilitado mas que NUNCA enviou (cadastro/
+      // diagrama: disjuntor, trafo, TON sem feed, "Power Meter" fantasma) deixava a
+      // unidade perma-AMARELA. Só conta quem tem feed real.
+      const eqRows = await this.prisma.$queryRaw<Array<{ id: string; nome: string; unidade_id: string }>>`
+        SELECT TRIM(e.id) AS id, e.nome, TRIM(e.unidade_id) AS unidade_id
+        FROM equipamentos e
+        WHERE e.mqtt_habilitado = true AND e.deleted_at IS NULL
+          AND EXISTS (
+            SELECT 1 FROM equipamentos_dados ed
+            WHERE TRIM(ed.equipamento_id) = TRIM(e.id)
+              AND ed.timestamp_dados > now() - interval '7 days'
+          )
+      `;
+      for (const r of eqRows) {
+        const uid = String(r.unidade_id || '').trim();
+        if (!uid) continue;
+        if (!expectedPorUnidade.has(uid)) expectedPorUnidade.set(uid, []);
+        expectedPorUnidade.get(uid)!.push({ id: String(r.id).trim(), nome: r.nome });
+      }
+    } catch (e) {
+      this.logger.warn(`[COA] consulta de equipamentos esperados falhou: ${e instanceof Error ? e.message : e}`);
+    }
+
+    // Unidades com geração de NUVEM recente (últimos 2 dias) — monitoradas por nuvem
+    // (dado diário), sem TON ao vivo. Ganham cor própria no COA (não "sem info"/cinza).
+    const cloudRecentUnidades = new Set<string>();
+    try {
+      const cloudRows = await this.prisma.$queryRaw<Array<{ unidade_id: string }>>`
+        SELECT DISTINCT TRIM(unidade_id) AS unidade_id
+        FROM geracao_diaria_plantas
+        WHERE data >= current_date - 1 AND COALESCE(kwh_realizado, 0) > 0
+      `;
+      for (const r of cloudRows) if (r?.unidade_id) cloudRecentUnidades.add(String(r.unidade_id).trim());
+    } catch (e) {
+      this.logger.warn(`[COA] consulta de nuvem recente falhou: ${e instanceof Error ? e.message : e}`);
+    }
+
     for (const planta of plantas) {
       const unidadesPlanta = unidadesPorPlanta.get(planta.id) || [];
       const unidadesProcessadas: UnidadeResumo[] = [];
@@ -507,8 +570,13 @@ export class CoaService {
         let potenciaTotal = 0;
         let fatorPotencia = 0;
         let ultimaLeitura: Date | null = null;
-        let status: 'ONLINE' | 'OFFLINE' | 'ALERTA' = 'OFFLINE';
-        let unidadeJaContada = false; // Flag para garantir que contamos a unidade apenas uma vez
+        // Status "pior caso": ONLINE (verde) só se TODOS os equipamentos esperados
+        // estão frescos. Qualquer um off (velho ou silencioso) → ALERTA; nada atual
+        // → OFFLINE (sem info).
+        let freshCount = 0;
+        let suspeito = false;
+        const reportingIds = new Set<string>();
+        const offlineNomes: string[] = [];
 
         // ✅ CORRIGIDO: Usar energia agregada do dia (soma de todas as leituras desde meia-noite)
         // Em vez de somar apenas as últimas leituras
@@ -561,36 +629,18 @@ export class CoaService {
 
           potenciaTotal += potencia;
 
-          // Determinar status baseado no timestamp
+          // Frescor por equipamento (uma linha = último dado de um equipamento).
+          reportingIds.add(String(leitura.equipamento_id).trim());
           const tempoDesdeUltimaLeitura = Date.now() - new Date(leitura.timestamp_dados).getTime();
-
-          if (tempoDesdeUltimaLeitura < this.TEMPO_OFFLINE) {
+          if (tempoDesdeUltimaLeitura < 30 * 60 * 1000) { // fresco (<30 min)
+            freshCount++;
             if (!ultimaLeitura || leitura.timestamp_dados > ultimaLeitura) {
               ultimaLeitura = leitura.timestamp_dados;
             }
-
-            if (tempoDesdeUltimaLeitura < 5 * 60 * 1000) { // 5 minutos
-              status = 'ONLINE';
-              // Contar a unidade apenas uma vez, mesmo que tenha múltiplos equipamentos online
-              if (!unidadeJaContada) {
-                unidadesOnline++;
-                unidadesAtivasPlanta++;
-                unidadeJaContada = true;
-              }
-            } else if (leitura.qualidade === 'SUSPEITO') {
-              status = 'ALERTA';
-
-              // Criar alerta
-              alertas.push({
-                id: `${unidade.id}-quality`,
-                tipo: 'QUALIDADE_DADOS',
-                severidade: 'warning',
-                mensagem: `Qualidade dos dados suspeita na unidade ${unidade.nome}`,
-                unidadeId: unidade.id,
-                unidadeNome: unidade.nome,
-                timestamp: new Date(),
-              });
-            }
+            if (leitura.qualidade === 'SUSPEITO') suspeito = true;
+          } else {
+            // presente mas velho → equipamento parou de reportar (off)
+            offlineNomes.push(leitura.equipamento_nome || 'Equipamento');
           }
 
           // Extrair fator de potência do JSON se disponível
@@ -631,6 +681,39 @@ export class CoaService {
           }
         }
 
+        // Equipamentos esperados (mqtt_habilitado) que NÃO reportaram na última
+        // hora = silenciosos (off). Somados aos "velhos" → lista do popup.
+        const esperados = expectedPorUnidade.get(unidade.id.trim()) || [];
+        for (const eq of esperados) {
+          if (!reportingIds.has(eq.id)) offlineNomes.push(eq.nome || 'Equipamento');
+        }
+        const offlineUnicos = Array.from(new Set(offlineNomes));
+
+        // Status pior-caso: verde só quando NADA está off.
+        let status: 'ONLINE' | 'OFFLINE' | 'ALERTA';
+        if (freshCount === 0) {
+          status = 'OFFLINE'; // nada atual → sem info
+        } else if (offlineUnicos.length > 0 || suspeito) {
+          status = 'ALERTA'; // algum equipamento off/suspeito → não pode ficar verde
+        } else {
+          status = 'ONLINE';
+        }
+        if (status === 'ONLINE') {
+          unidadesOnline++;
+          unidadesAtivasPlanta++;
+        }
+        if (suspeito) {
+          alertas.push({
+            id: `${unidade.id}-quality`,
+            tipo: 'QUALIDADE_DADOS',
+            severidade: 'warning',
+            mensagem: `Qualidade dos dados suspeita na unidade ${unidade.nome}`,
+            unidadeId: unidade.id,
+            unidadeNome: unidade.nome,
+            timestamp: new Date(),
+          });
+        }
+
         // Buscar custo desta unidade (se calculado)
         const custoUnidade = custosPorUnidade.get(unidade.id);
 
@@ -639,6 +722,9 @@ export class CoaService {
           nome: unidade.nome,
           tipo: unidade.tipo,
           status,
+          trip: tripUnidades.has(unidade.id.trim()),
+          nuvem: status === 'OFFLINE' && cloudRecentUnidades.has(unidade.id.trim()),
+          equipamentosOffline: offlineUnicos.length > 0 ? offlineUnicos : undefined,
           ultimaLeitura,
           coordenadas: unidade.latitude && unidade.longitude ? {
             latitude: Number(unidade.latitude),

@@ -1,0 +1,25 @@
+{
+  "name": "boletim-aupus",
+  "version": "1.0.0",
+  "description": "Boletim Semanal da Operação — gerador de PDF no padrão visual Aupus Energia",
+  "type": "module",
+  "main": "src/boletim.js",
+  "exports": {
+    ".": "./src/boletim.js"
+  },
+  "scripts": {
+    "gerar": "node gerar.js dados_exemplo.json boletim-semanal.pdf",
+    "html": "node gerar.js dados_exemplo.json boletim-semanal.html",
+    "build:consumo": "esbuild consumo/RelatorioConsumo.jsx --bundle --platform=node --format=esm --jsx=automatic --external:react --external:react-dom --external:react/jsx-runtime --outfile=consumo/bundle.mjs",
+    "gerar:consumo": "node gerar-consumo.mjs consumo/dados_exemplo_consumo.json relatorio-consumo.pdf"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "esbuild": "^0.28.2",
+    "puppeteer": "^23.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  }
+}
