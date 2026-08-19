@@ -22,6 +22,7 @@ import { CoaModule } from './modules/coa/coa.module';
 import { LogsMqttModule } from './modules/logs-mqtt/logs-mqtt.module';
 import { RegrasLogsMqttModule } from './modules/regras-logs-mqtt/regras-logs-mqtt.module';
 import { RelatoriosModule } from './modules/relatorios/relatorios.module';
+import { BombaCombustivelModule } from './modules/bomba-combustivel/bomba-combustivel.module';
 import { UploadsModule } from './modules/uploads/uploads.module';
 import { IoTModule } from './modules/iot/iot.module';
 import { OtaModule } from './modules/ota/ota.module';
@@ -100,6 +101,7 @@ import { IotCatalogModule } from './modules/iot-catalog/iot-catalog.module';
     MonitoramentoFvModule,
     ReleEventosModule,
     RelatoriosModule,
+    BombaCombustivelModule,
   ],
   controllers: [AppController],
   providers: [

@@ -418,6 +418,51 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     if (!evtEquipamentos.includes(equipId)) {
       evtEquipamentos.push(equipId);
     }
+
+    // 6) Bomba de combustível: transações <base>/abastecimento e telemetria <base>/bomba.
+    for (const suf of ['abastecimento', 'bomba']) {
+      const t = `${topic}/${suf}`;
+      if (!this.subscriptions.has(t)) {
+        this.subscriptions.set(t, []);
+        this.client?.subscribe(t, (err) => {
+          if (err) console.warn(`⚠️ [MQTT] Falha ao subscrever ${t}: ${err.message}`);
+        });
+      }
+      const arr = this.subscriptions.get(t)!;
+      if (!arr.includes(equipId)) arr.push(equipId);
+    }
+  }
+
+  /** Ingere uma transação de abastecimento publicada pela bomba em `<base>/abastecimento`. */
+  private async ingerirAbastecimento(equipamentoId: string, d: any): Promise<void> {
+    try {
+      const eid = equipamentoId.trim();
+      const pl = await this.prisma.$queryRaw<Array<{ planta_id: string; maquina_nome: string }>>`
+        SELECT TRIM(u.planta_id) AS planta_id,
+               (SELECT maquina_nome FROM rfid_autorizados r WHERE r.uid = ${String(d.uid ?? '')} LIMIT 1) AS maquina_nome
+        FROM equipamentos e JOIN unidades u ON TRIM(u.id) = TRIM(e.unidade_id)
+        WHERE TRIM(e.id) = ${eid} LIMIT 1`;
+      const id = randomBytes(13).toString('hex');
+      await this.prisma.$executeRaw`
+        INSERT INTO abastecimentos (id, equipamento_id, uid, maquina_nome, planta_id, litros, nivel_antes, nivel_depois, status, created_at)
+        VALUES (${id}, ${eid}, ${d.uid ?? null}, ${pl[0]?.maquina_nome ?? null}, ${pl[0]?.planta_id ?? null},
+                ${d.litros ?? null}, ${d.nivel_antes ?? null}, ${d.nivel_depois ?? null}, ${d.status ?? null}, now())`;
+    } catch (e) {
+      console.warn(`[bomba] ingerir abastecimento falhou: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
+  /** Atualiza o estado da bomba (nível/estado) publicado em `<base>/bomba` — pro modal. */
+  private async atualizarBombaEstado(equipamentoId: string, d: any): Promise<void> {
+    try {
+      const eid = equipamentoId.trim();
+      await this.prisma.$executeRaw`
+        UPDATE bomba_combustivel_config
+        SET ultimo_estado = ${d.estado ?? null}, ultimo_nivel_pct = ${d.nivel_pct ?? null}, ultima_leitura = now(), updated_at = now()
+        WHERE TRIM(equipamento_id) = ${eid}`;
+    } catch (e) {
+      console.warn(`[bomba] atualizar estado falhou: ${e instanceof Error ? e.message : e}`);
+    }
   }
 
   /**
@@ -601,6 +646,16 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
         for (const equipamentoId of equipamentoIds) {
           await this.processReleEvento(equipamentoId, dados);
         }
+        return;
+      }
+
+      // Bomba de combustível: transação de abastecimento / telemetria da bomba.
+      if (topic.endsWith('/abastecimento')) {
+        for (const equipamentoId of equipamentoIds) await this.ingerirAbastecimento(equipamentoId, dados);
+        return;
+      }
+      if (topic.endsWith('/bomba')) {
+        for (const equipamentoId of equipamentoIds) await this.atualizarBombaEstado(equipamentoId, dados);
         return;
       }
 

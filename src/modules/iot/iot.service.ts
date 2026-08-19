@@ -207,6 +207,9 @@ export class IoTService {
         // Devices Modbus (rele/medidor/inversor) tambem viram equipamento sozinhos —
         // depois da TON, pois o topico deles deriva do topico dela.
         await this.ensureDeviceEquipamentos(tx, trimmedId, data.diagrama);
+        // Bomba de combustivel: liga automacao + cria os pontos canonicos, pra ela
+        // aparecer no Configurar BOs/BIs da TON (mecanismo IO padrao).
+        await this.ensureBombaEquipamentos(tx, data.diagrama);
         updateData.diagrama = data.diagrama as unknown as Prisma.InputJsonValue;
         updateData.view_pan_x = data.diagrama.pan?.x ?? 0;
         updateData.view_pan_y = data.diagrama.pan?.y ?? 0;
@@ -343,6 +346,100 @@ export class IoTService {
         ...props,
         equipamento_id: equipId,
       };
+    }
+  }
+
+  /**
+   * Bomba de combustível: prepara o equipamento da bomba pro mecanismo PADRÃO de
+   * IO da TON. A bomba NÃO guarda BO/BI nas props — quem mapeia relé/entrada é a
+   * TON (modal da TON → Configurar BOs/BIs → ton_bo/ton_bi), e esses modais só
+   * listam equipamentos com `automacao=true` e escolhem entre os PONTOS dele.
+   * Então aqui, a cada save (idempotente):
+   *   (1) liga `automacao` no equipamento da bomba;
+   *   (2) cria os pontos canônicos se faltarem — comando Ligar/Desligar/Solenoide,
+   *       status Cartão/Emergência, medição Nível.
+   * Os NOMES casam com a resolução por papel do gerador de firmware
+   * (`boRole`/`biRole` em iot-diagram.tsx), que lê ton_bo/ton_bi e injeta os
+   * números físicos na geração. O nível (AI) não entra aqui: não há `ton_ai`.
+   */
+  private async ensureBombaEquipamentos(
+    tx: Prisma.TransactionClient,
+    diagrama: IotDiagrama,
+  ): Promise<void> {
+    if (!Array.isArray(diagrama.components)) return;
+    const bombas = (diagrama.components as Array<Record<string, any>>).filter(
+      (c) => String(c?.type ?? '').toLowerCase() === 'bomba',
+    );
+    if (bombas.length === 0) return;
+
+    // Pontos canônicos. Nomes normalizados no front batem com os papéis:
+    // "Ligar"→liga, "Desligar"→desliga, "Solenoide"→solenoide, "Cartão"→cartao,
+    // "Emergência"→estop.
+    const PONTOS: Array<{
+      tipo: string;
+      nome: string;
+      unidade: string | null;
+      ordem: number;
+    }> = [
+      { tipo: 'comando', nome: 'Ligar', unidade: null, ordem: 1 },
+      { tipo: 'comando', nome: 'Desligar', unidade: null, ordem: 2 },
+      { tipo: 'comando', nome: 'Solenoide', unidade: null, ordem: 3 },
+      { tipo: 'status', nome: 'Cartão', unidade: null, ordem: 1 },
+      { tipo: 'status', nome: 'Emergência', unidade: null, ordem: 2 },
+      { tipo: 'medicao', nome: 'Nível', unidade: '%', ordem: 1 },
+    ];
+
+    for (const comp of bombas) {
+      const equipId = this.rawEquipamentoId(
+        comp as unknown as IotDiagramaComponent,
+      );
+      if (!equipId) continue; // bomba ainda não associada — nada a preparar
+      const eq = await tx.equipamentos.findFirst({
+        where: { id: equipId, deleted_at: null },
+        select: { id: true, automacao: true },
+      });
+      if (!eq) continue;
+
+      if (!eq.automacao) {
+        await tx.equipamentos.update({
+          where: { id: equipId },
+          data: { automacao: true },
+        });
+      }
+
+      for (const pt of PONTOS) {
+        // UNIQUE (equipamento_id, nome) inclui soft-deletados — casa por nome e
+        // reativa em vez de recriar (evita conflito no unique).
+        const ja = await tx.equipamento_pontos.findFirst({
+          where: { equipamento_id: equipId, nome: pt.nome },
+          select: { id: true, ativo: true, deleted_at: true },
+        });
+        if (ja) {
+          if (!ja.ativo || ja.deleted_at) {
+            await tx.equipamento_pontos.update({
+              where: { id: ja.id },
+              data: {
+                tipo: pt.tipo,
+                unidade: pt.unidade,
+                ordem: pt.ordem,
+                ativo: true,
+                deleted_at: null,
+              },
+            });
+          }
+          continue;
+        }
+        await tx.equipamento_pontos.create({
+          data: {
+            equipamento_id: equipId,
+            tipo: pt.tipo,
+            nome: pt.nome,
+            unidade: pt.unidade,
+            ordem: pt.ordem,
+            ativo: true,
+          },
+        });
+      }
     }
   }
 
