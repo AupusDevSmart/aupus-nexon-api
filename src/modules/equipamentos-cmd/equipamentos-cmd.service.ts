@@ -167,7 +167,13 @@ export class EquipamentosCmdService {
     // 1. Equipamento + ponto
     const equipamento = await this.prisma.equipamentos.findFirst({
       where: { id: eqId, deleted_at: null },
-      select: { id: true, nome: true, automacao: true },
+      select: {
+        id: true,
+        nome: true,
+        automacao: true,
+        tipo_equipamento: true,
+        tipo_equipamento_rel: { select: { codigo: true } },
+      },
     });
     if (!equipamento) {
       throw new NotFoundException(`Equipamento ${eqId} nao encontrado`);
@@ -175,6 +181,23 @@ export class EquipamentosCmdService {
     if (!equipamento.automacao) {
       throw new BadRequestException(
         `Equipamento "${equipamento.nome}" nao tem automacao habilitada.`,
+      );
+    }
+
+    // Bomba de combustível é AUTÔNOMA: seus BO/BI são mapeados (Configurar BOs) só
+    // pra o firmware saber a FIAÇÃO (relé X = Ligar) — NÃO são botões manuais. O
+    // acionamento real é da máquina de estados (RFID/regras/nível). Bloqueia o
+    // disparo manual na OPERAÇÃO; o painel de bancada (sim=true) pode, pra testar o
+    // relé sem a lógica. Detecta por código do tipo OU pela string (nasce das duas
+    // formas: /rapido não seta a string; ensureBombaEquipamentos seta).
+    const codigoTipo = String(
+      equipamento.tipo_equipamento_rel?.codigo ??
+        equipamento.tipo_equipamento ??
+        '',
+    ).toUpperCase();
+    if (codigoTipo.includes('BOMBA') && !sim) {
+      throw new BadRequestException(
+        `"${equipamento.nome}" é uma bomba autônoma — o relé é acionado pela lógica (RFID/regras/nível), não por comando manual. Use o painel de bancada (🧪) para testar o relé.`,
       );
     }
 

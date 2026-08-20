@@ -52,3 +52,12 @@ export function tonBoMax(tipoEquipamento?: string | null): number {
   if (!caps) return 6;
   return caps.versao === 2 ? caps.bo_count : 6;
 }
+
+/**
+ * Número de entradas ANALÓGICAS (AI) configuráveis. Hoje 2 pra todos os modelos:
+ * v1 tem AN1/AN2 (IO6/7, com ADC nativo); v2 idem (AN_C 4-20mA em IO39/40 tem
+ * ressalva de ADC — ver base de conhecimento TON2). Ajustar por modelo se mudar.
+ */
+export function tonAiCount(_tipoEquipamento?: string | null): number {
+  return 2;
+}

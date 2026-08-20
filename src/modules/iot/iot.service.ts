@@ -207,9 +207,10 @@ export class IoTService {
         // Devices Modbus (rele/medidor/inversor) tambem viram equipamento sozinhos —
         // depois da TON, pois o topico deles deriva do topico dela.
         await this.ensureDeviceEquipamentos(tx, trimmedId, data.diagrama);
-        // Bomba de combustivel: liga automacao + cria os pontos canonicos, pra ela
-        // aparecer no Configurar BOs/BIs da TON (mecanismo IO padrao).
-        await this.ensureBombaEquipamentos(tx, data.diagrama);
+        // Bomba de combustivel: AUTO-CRIA/associa o equipamento (igual TON/devices),
+        // liga automacao e cria os pontos canonicos, pra ela aparecer no Configurar
+        // BOs/BIs da TON (mecanismo IO padrao).
+        await this.ensureBombaEquipamentos(tx, trimmedId, data.diagrama);
         updateData.diagrama = data.diagrama as unknown as Prisma.InputJsonValue;
         updateData.view_pan_x = data.diagrama.pan?.x ?? 0;
         updateData.view_pan_y = data.diagrama.pan?.y ?? 0;
@@ -288,23 +289,32 @@ export class IoTService {
     const tipoTonId = tipoTon?.id?.trim() || null;
 
     for (const comp of tons) {
-      // (1) ja vinculado e valido? pula.
-      const rawEquip = this.rawEquipamentoId(comp);
-      if (rawEquip) {
-        const ok = await tx.equipamentos.findFirst({
-          where: { id: rawEquip, deleted_at: null },
-          select: { id: true },
-        });
-        if (ok) continue;
-      }
-
       const props =
         ((comp as { props?: Record<string, unknown> }).props ?? {}) as Record<
           string,
           unknown
         >;
       const topico = String(props.mqtt_topic_base ?? '').trim();
-      if (!topico) continue; // sem topico nao da p/ criar (comando/OTA dependem dele)
+
+      // (1) ja vinculado e valido? MANTEM o vinculo; so PROPAGA o topico se ele
+      // mudou (usuario preencheu o Topico Base DEPOIS de ja ter o equipamento) —
+      // e aí liga o MQTT. Sem isso, preencher o topico depois nunca chegava no ativo.
+      const rawEquip = this.rawEquipamentoId(comp);
+      if (rawEquip) {
+        const ok = await tx.equipamentos.findFirst({
+          where: { id: rawEquip, deleted_at: null },
+          select: { id: true, topico_mqtt: true },
+        });
+        if (ok) {
+          if (topico && (ok.topico_mqtt ?? '').trim() !== topico) {
+            await tx.equipamentos.update({
+              where: { id: ok.id },
+              data: { topico_mqtt: topico, mqtt_habilitado: true },
+            });
+          }
+          continue;
+        }
+      }
 
       const tipo = String((comp as { type?: string }).type ?? '').toLowerCase();
       // Capacidade por DADO, nunca igualdade exata de tipo (briefing TON-V2
@@ -313,14 +323,24 @@ export class IoTService {
 
       let equipId: string;
       // (2) reusa equipamento existente com este topico_mqtt (idempotencia forte).
-      const existente = await tx.equipamentos.findFirst({
-        where: { topico_mqtt: topico, deleted_at: null },
-        select: { id: true },
-      });
+      //     SO quando ha topico — senao `null` casaria com centenas de equipamentos
+      //     sem topico e "reusaria" o ativo errado.
+      const existente = topico
+        ? await tx.equipamentos.findFirst({
+            where: { topico_mqtt: topico, deleted_at: null },
+            select: { id: true },
+          })
+        : null;
       if (existente) {
         equipId = existente.id.trim();
       } else {
-        // (3) cria. NOT NULL: nome, classificacao, criticidade, mqtt_habilitado, automacao.
+        // (3) cria — MESMO SEM topico. A TON e' criada+associada ja no save, igual
+        //     aos outros ativos (inversor/medidor via /rapido tambem nascem sem
+        //     topico). O Topico Base pode ser preenchido depois: o passo (1) acima
+        //     propaga pro ativo no proximo save. Comando/OTA/telemetria so
+        //     funcionam com topico (por isso mqtt_habilitado segue o topico), mas a
+        //     TON ja aparece ASSOCIADA no dropdown — que era a dor do usuario.
+        //     topico_mqtt e' nullable e tem so INDEX (nao unique) — null e' seguro.
         const nome =
           String(props.name ?? props.ota_hostname ?? tipo.toUpperCase()).trim() || 'TON';
         const novo = await tx.equipamentos.create({
@@ -330,9 +350,9 @@ export class IoTService {
             classificacao: 'UC',
             criticidade: '3',
             tipo_equipamento: tipo.toUpperCase(),
-            mqtt_habilitado: true,
+            mqtt_habilitado: !!topico,
             automacao,
-            topico_mqtt: topico,
+            topico_mqtt: topico || null,
             ...(unidadeId ? { unidade_id: unidadeId } : {}),
             ...(tipoTonId ? { tipo_equipamento_id: tipoTonId } : {}),
           },
@@ -364,23 +384,47 @@ export class IoTService {
    */
   private async ensureBombaEquipamentos(
     tx: Prisma.TransactionClient,
+    projetoId: string,
     diagrama: IotDiagrama,
   ): Promise<void> {
     if (!Array.isArray(diagrama.components)) return;
-    const bombas = (diagrama.components as Array<Record<string, any>>).filter(
+    const comps = diagrama.components as Array<Record<string, any>>;
+    const bombas = comps.filter(
       (c) => String(c?.type ?? '').toLowerCase() === 'bomba',
     );
     if (bombas.length === 0) return;
 
-    // Pontos canônicos. Nomes normalizados no front batem com os papéis:
+    const proj = await tx.iot_projetos.findFirst({
+      where: { id: projetoId },
+      select: { unidade_id: true },
+    });
+    const unidadeId = proj?.unidade_id?.trim() || null;
+    // Tipo do catálogo (codigo BOMBA_COMBUSTIVEL) — mesma abordagem do ensureTon
+    // (busca por nome='TON'). Fallback pela string se o rel não existir.
+    const tipoBomba = await tx.tipos_equipamentos.findFirst({
+      where: { codigo: 'BOMBA_COMBUSTIVEL' },
+      select: { id: true },
+    });
+    const tipoBombaId = tipoBomba?.id?.trim() || null;
+
+    // Ids já usados por QUALQUER componente do diagrama — pra não reusar um ativo
+    // que outro nó já reivindicou (nem outra bomba irmã).
+    const jaReferenciados = new Set<string>(
+      comps
+        .map((c) =>
+          this.rawEquipamentoId(c as unknown as IotDiagramaComponent) ?? '',
+        )
+        .filter(Boolean),
+    );
+
+    // Pontos vêm do CATÁLOGO (iot_device_tipos.pontos da bomba) — configurável por
+    // DADO, sem deploy: bo→comando, bi→status, ai→medicao. Adicionar/mudar um papel
+    // = editar o catálogo. Fallback pro conjunto canônico se o catálogo vier vazio.
+    // Os NOMES batem com a resolução por papel do gerador (boRole/biRole/aiRole:
     // "Ligar"→liga, "Desligar"→desliga, "Solenoide"→solenoide, "Cartão"→cartao,
-    // "Emergência"→estop.
-    const PONTOS: Array<{
-      tipo: string;
-      nome: string;
-      unidade: string | null;
-      ordem: number;
-    }> = [
+    // "Emergência"→estop, "Nível"→nivel).
+    type PontoDef = { tipo: string; nome: string; unidade: string | null; ordem: number };
+    const FALLBACK_PONTOS: PontoDef[] = [
       { tipo: 'comando', nome: 'Ligar', unidade: null, ordem: 1 },
       { tipo: 'comando', nome: 'Desligar', unidade: null, ordem: 2 },
       { tipo: 'comando', nome: 'Solenoide', unidade: null, ordem: 3 },
@@ -388,18 +432,105 @@ export class IoTService {
       { tipo: 'status', nome: 'Emergência', unidade: null, ordem: 2 },
       { tipo: 'medicao', nome: 'Nível', unidade: '%', ordem: 1 },
     ];
+    const catalogo = await tx.iot_device_tipos.findFirst({
+      where: { codigo: 'bomba_combustivel' },
+      select: { pontos: true },
+    });
+    const catPontos = (catalogo?.pontos ?? null) as {
+      bo?: Array<{ id?: string; label?: string; unit?: string }>;
+      bi?: Array<{ id?: string; label?: string; unit?: string }>;
+      ai?: Array<{ id?: string; label?: string; unit?: string }>;
+    } | null;
+    const mapCat = (
+      arr: Array<{ id?: string; label?: string; unit?: string }> | undefined,
+      tipo: string,
+      unidadeDefault: string | null,
+    ): PontoDef[] =>
+      (arr ?? [])
+        .map((p, i) => ({
+          tipo,
+          nome: String(p.label ?? p.id ?? '').trim(),
+          unidade: p.unit ?? unidadeDefault,
+          ordem: i + 1,
+        }))
+        .filter((p) => !!p.nome);
+    const doCatalogo: PontoDef[] = [
+      ...mapCat(catPontos?.bo, 'comando', null),
+      ...mapCat(catPontos?.bi, 'status', null),
+      ...mapCat(catPontos?.ai, 'medicao', '%'),
+    ];
+    const PONTOS: PontoDef[] = doCatalogo.length > 0 ? doCatalogo : FALLBACK_PONTOS;
 
     for (const comp of bombas) {
-      const equipId = this.rawEquipamentoId(
+      const props = (comp.props ?? {}) as Record<string, unknown>;
+
+      // (1) já vinculado e válido? mantém.
+      let equipId = this.rawEquipamentoId(
         comp as unknown as IotDiagramaComponent,
       );
-      if (!equipId) continue; // bomba ainda não associada — nada a preparar
+      if (equipId) {
+        const ok = await tx.equipamentos.findFirst({
+          where: { id: equipId, deleted_at: null },
+          select: { id: true },
+        });
+        if (!ok) equipId = null;
+      }
+
+      // (2) não vinculado → REUSA uma bomba existente da unidade ainda não
+      // reivindicada por outro nó; senão CRIA (igual aos outros ativos: nasce no
+      // save, sem tópico — a telemetria da bomba sai pelo tópico da TON).
+      if (!equipId) {
+        const reusavel =
+          unidadeId
+            ? await tx.equipamentos.findFirst({
+                where: {
+                  unidade_id: unidadeId,
+                  deleted_at: null,
+                  id: { notIn: Array.from(jaReferenciados) },
+                  ...(tipoBombaId
+                    ? { tipo_equipamento_id: tipoBombaId }
+                    : { tipo_equipamento: 'BOMBA_COMBUSTIVEL' }),
+                },
+                select: { id: true },
+                orderBy: { created_at: 'asc' },
+              })
+            : null;
+        if (reusavel) {
+          equipId = reusavel.id.trim();
+        } else {
+          const nome =
+            String(props.name ?? 'Bomba de Combustível').trim() ||
+            'Bomba de Combustível';
+          const novo = await tx.equipamentos.create({
+            data: {
+              id: this.generateId(),
+              nome,
+              classificacao: 'UC',
+              criticidade: '3',
+              tipo_equipamento: 'BOMBA_COMBUSTIVEL',
+              mqtt_habilitado: false, // telemetria sai pelo tópico da TON, não daqui
+              automacao: true, // obrigatória: Configurar BOs/BIs só lista automação
+              ...(unidadeId ? { unidade_id: unidadeId } : {}),
+              ...(tipoBombaId ? { tipo_equipamento_id: tipoBombaId } : {}),
+            },
+            select: { id: true },
+          });
+          equipId = novo.id.trim();
+        }
+        jaReferenciados.add(equipId);
+        // carimba no JSON (salvo logo depois pelo updateProjeto).
+        (comp as { props?: Record<string, unknown> }).props = {
+          ...props,
+          equipamento_id: equipId,
+        };
+      }
+
+      // (3) garante automação ligada (Configurar BOs/BIs exige) + pontos canônicos.
       const eq = await tx.equipamentos.findFirst({
         where: { id: equipId, deleted_at: null },
         select: { id: true, automacao: true },
       });
       if (!eq) continue;
-
       if (!eq.automacao) {
         await tx.equipamentos.update({
           where: { id: equipId },
@@ -439,6 +570,34 @@ export class IoTService {
             ativo: true,
           },
         });
+      }
+
+      // (4) Espelha a CONFIG da bomba na tabela bomba_combustivel_config. A fonte da
+      // verdade passou a ser as props do IoT (a aba "Config" do unifilar foi removida);
+      // listarBombas e a telemetria consomem essa tabela. Sem UNIQUE em equipamento_id
+      // (só PK em id) → checa-existência + UPDATE/INSERT (mesmo padrão do service).
+      const nivelMin = Number(props.nivel_min_pct ?? 5) || 5;
+      const timeoutS = Math.trunc(Number(props.timeout_s ?? 600)) || 600;
+      const kFator = Number(props.k_fator ?? 450) || 450;
+      const modoLeitor =
+        String(props.modo_leitor ?? 'rs485').trim().slice(0, 12) || 'rs485';
+      const temCfg =
+        (
+          await tx.$queryRaw<Array<{ x: number }>>`
+            SELECT 1 AS x FROM bomba_combustivel_config
+            WHERE TRIM(equipamento_id) = ${equipId} LIMIT 1`
+        ).length > 0;
+      if (temCfg) {
+        await tx.$executeRaw`
+          UPDATE bomba_combustivel_config
+          SET nivel_min_pct = ${nivelMin}, timeout_s = ${timeoutS},
+              k_fator = ${kFator}, rfid_mode = ${modoLeitor}, updated_at = now()
+          WHERE TRIM(equipamento_id) = ${equipId}`;
+      } else {
+        await tx.$executeRaw`
+          INSERT INTO bomba_combustivel_config
+            (id, equipamento_id, nivel_min_pct, timeout_s, k_fator, rfid_mode)
+          VALUES (${this.generateId()}, ${equipId}, ${nivelMin}, ${timeoutS}, ${kFator}, ${modoLeitor})`;
       }
     }
   }
