@@ -419,8 +419,8 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       evtEquipamentos.push(equipId);
     }
 
-    // 6) Bomba de combustível: transações <base>/abastecimento e telemetria <base>/bomba.
-    for (const suf of ['abastecimento', 'bomba']) {
+    // 6) Bomba de combustível + carregador: <base>/abastecimento, <base>/bomba, <base>/carregador.
+    for (const suf of ['abastecimento', 'bomba', 'carregador']) {
       const t = `${topic}/${suf}`;
       if (!this.subscriptions.has(t)) {
         this.subscriptions.set(t, []);
@@ -462,6 +462,48 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
         WHERE TRIM(equipamento_id) = ${eid}`;
     } catch (e) {
       console.warn(`[bomba] atualizar estado falhou: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
+  /**
+   * Carregador elétrico: telemetria/energia em `<base>/carregador`.
+   * Espera { kwh?, estado?, conectado?, evento? }. Atualiza kWh acumulado, o kWh
+   * corrente da sessão ativa, e ao DESCONECTAR encerra a sessão (kwh_total + ocioso).
+   */
+  private async ingerirCarregador(equipamentoId: string, d: any): Promise<void> {
+    try {
+      const eid = equipamentoId.trim();
+      const kwh = d.kwh ?? d.energia ?? d.kwh_total ?? null;
+      const estado = d.estado ?? null;
+      const desconectado =
+        d.conectado === false ||
+        d.evento === 'desconectado' ||
+        String(d.estado ?? '').toLowerCase() === 'desconectado';
+      if (kwh != null) {
+        const existe = (await this.prisma.$queryRaw<any[]>`SELECT 1 FROM carregador_config WHERE TRIM(equipamento_id)=${eid} LIMIT 1`).length > 0;
+        if (existe) {
+          await this.prisma.$executeRaw`UPDATE carregador_config SET ultima_leitura_kwh=${kwh}, ultimo_estado=${estado}, ultima_leitura=now(), updated_at=now() WHERE TRIM(equipamento_id)=${eid}`;
+        } else {
+          await this.prisma.$executeRaw`INSERT INTO carregador_config (id, equipamento_id, ultima_leitura_kwh, ultimo_estado, ultima_leitura) VALUES (${randomBytes(13).toString('hex')}, ${eid}, ${kwh}, ${estado}, now())`;
+        }
+        await this.prisma.$executeRaw`
+          UPDATE carregador_sessoes SET kwh_fim=${kwh},
+            kwh_total = CASE WHEN kwh_inicio IS NOT NULL THEN GREATEST(${kwh}::numeric - kwh_inicio, 0) ELSE kwh_total END, updated_at=now()
+          WHERE TRIM(equipamento_id)=${eid} AND status='ativa'`;
+      } else if (estado) {
+        await this.prisma.$executeRaw`UPDATE carregador_config SET ultimo_estado=${estado}, ultima_leitura=now(), updated_at=now() WHERE TRIM(equipamento_id)=${eid}`;
+      }
+      if (desconectado) {
+        await this.prisma.$executeRaw`
+          UPDATE carregador_sessoes
+          SET fim=now(), kwh_fim=COALESCE(${kwh}::numeric, kwh_fim),
+              kwh_total = CASE WHEN COALESCE(${kwh}::numeric, kwh_fim) IS NOT NULL AND kwh_inicio IS NOT NULL THEN GREATEST(COALESCE(${kwh}::numeric, kwh_fim) - kwh_inicio, 0) ELSE kwh_total END,
+              ocioso_min = CASE WHEN ocioso_inicio IS NOT NULL THEN GREATEST(EXTRACT(EPOCH FROM (now() - ocioso_inicio))/60, 0)::int ELSE 0 END,
+              status='encerrada', updated_at=now()
+          WHERE TRIM(equipamento_id)=${eid} AND status='ativa'`;
+      }
+    } catch (e) {
+      console.warn(`[carregador] ingerir falhou: ${e instanceof Error ? e.message : e}`);
     }
   }
 
@@ -656,6 +698,11 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       }
       if (topic.endsWith('/bomba')) {
         for (const equipamentoId of equipamentoIds) await this.atualizarBombaEstado(equipamentoId, dados);
+        return;
+      }
+      // Carregador elétrico: energia/estado + fim de sessão na desconexão.
+      if (topic.endsWith('/carregador')) {
+        for (const equipamentoId of equipamentoIds) await this.ingerirCarregador(equipamentoId, dados);
         return;
       }
 

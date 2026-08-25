@@ -211,6 +211,8 @@ export class IoTService {
         // liga automacao e cria os pontos canonicos, pra ela aparecer no Configurar
         // BOs/BIs da TON (mecanismo IO padrao).
         await this.ensureBombaEquipamentos(tx, trimmedId, data.diagrama);
+        // Carregador eletrico: mesmo padrao — auto-cria/associa + pontos + config.
+        await this.ensureCarregadorEquipamentos(tx, trimmedId, data.diagrama);
         updateData.diagrama = data.diagrama as unknown as Prisma.InputJsonValue;
         updateData.view_pan_x = data.diagrama.pan?.x ?? 0;
         updateData.view_pan_y = data.diagrama.pan?.y ?? 0;
@@ -598,6 +600,173 @@ export class IoTService {
           INSERT INTO bomba_combustivel_config
             (id, equipamento_id, nivel_min_pct, timeout_s, k_fator, rfid_mode)
           VALUES (${this.generateId()}, ${equipId}, ${nivelMin}, ${timeoutS}, ${kFator}, ${modoLeitor})`;
+      }
+    }
+  }
+
+  /**
+   * Carregador Elétrico: espelha a bomba. Auto-cria/reusa o equipamento, liga
+   * automacao, semeia os pontos do catálogo (bo Habilitar/Desabilitar, bi Conectado)
+   * pro Configurar BOs/BIs da TON, e sincroniza carregador_config das props do IoT
+   * (fonte kWh, tarifa, potência, tópico). Idempotente (roda a cada save).
+   */
+  private async ensureCarregadorEquipamentos(
+    tx: Prisma.TransactionClient,
+    projetoId: string,
+    diagrama: IotDiagrama,
+  ): Promise<void> {
+    if (!Array.isArray(diagrama.components)) return;
+    const comps = diagrama.components as Array<Record<string, any>>;
+    const cars = comps.filter(
+      (c) => String(c?.type ?? '').toLowerCase() === 'carregador',
+    );
+    if (cars.length === 0) return;
+
+    const proj = await tx.iot_projetos.findFirst({
+      where: { id: projetoId },
+      select: { unidade_id: true },
+    });
+    const unidadeId = proj?.unidade_id?.trim() || null;
+    const tipoCar = await tx.tipos_equipamentos.findFirst({
+      where: { codigo: 'CARREGADOR_ELETRICO' },
+      select: { id: true },
+    });
+    const tipoCarId = tipoCar?.id?.trim() || null;
+
+    const jaReferenciados = new Set<string>(
+      comps
+        .map((c) => this.rawEquipamentoId(c as unknown as IotDiagramaComponent) ?? '')
+        .filter(Boolean),
+    );
+
+    type PontoDef = { tipo: string; nome: string; unidade: string | null; ordem: number };
+    const FALLBACK: PontoDef[] = [
+      { tipo: 'comando', nome: 'Habilitar', unidade: null, ordem: 1 },
+      { tipo: 'comando', nome: 'Desabilitar', unidade: null, ordem: 2 },
+      { tipo: 'status', nome: 'Conectado', unidade: null, ordem: 1 },
+    ];
+    const cat = await tx.iot_device_tipos.findFirst({
+      where: { codigo: 'carregador_eletrico' },
+      select: { pontos: true },
+    });
+    const cp = (cat?.pontos ?? null) as {
+      bo?: Array<{ id?: string; label?: string; unit?: string }>;
+      bi?: Array<{ id?: string; label?: string; unit?: string }>;
+    } | null;
+    const mapCat = (
+      arr: Array<{ id?: string; label?: string; unit?: string }> | undefined,
+      tipo: string,
+    ): PontoDef[] =>
+      (arr ?? [])
+        .map((p, i) => ({ tipo, nome: String(p.label ?? p.id ?? '').trim(), unidade: p.unit ?? null, ordem: i + 1 }))
+        .filter((p) => !!p.nome);
+    const doCat: PontoDef[] = [...mapCat(cp?.bo, 'comando'), ...mapCat(cp?.bi, 'status')];
+    const PONTOS: PontoDef[] = doCat.length > 0 ? doCat : FALLBACK;
+
+    for (const comp of cars) {
+      const props = (comp.props ?? {}) as Record<string, unknown>;
+      let equipId = this.rawEquipamentoId(comp as unknown as IotDiagramaComponent);
+      if (equipId) {
+        const ok = await tx.equipamentos.findFirst({
+          where: { id: equipId, deleted_at: null },
+          select: { id: true },
+        });
+        if (!ok) equipId = null;
+      }
+      if (!equipId) {
+        const reusavel = unidadeId
+          ? await tx.equipamentos.findFirst({
+              where: {
+                unidade_id: unidadeId,
+                deleted_at: null,
+                id: { notIn: Array.from(jaReferenciados) },
+                ...(tipoCarId
+                  ? { tipo_equipamento_id: tipoCarId }
+                  : { tipo_equipamento: 'CARREGADOR_ELETRICO' }),
+              },
+              select: { id: true },
+              orderBy: { created_at: 'asc' },
+            })
+          : null;
+        if (reusavel) {
+          equipId = reusavel.id.trim();
+        } else {
+          const nome =
+            String(props.name ?? 'Carregador Elétrico').trim() || 'Carregador Elétrico';
+          const novo = await tx.equipamentos.create({
+            data: {
+              id: this.generateId(),
+              nome,
+              classificacao: 'UC',
+              criticidade: '3',
+              tipo_equipamento: 'CARREGADOR_ELETRICO',
+              mqtt_habilitado: false,
+              automacao: true,
+              ...(unidadeId ? { unidade_id: unidadeId } : {}),
+              ...(tipoCarId ? { tipo_equipamento_id: tipoCarId } : {}),
+            },
+            select: { id: true },
+          });
+          equipId = novo.id.trim();
+        }
+        jaReferenciados.add(equipId);
+        (comp as { props?: Record<string, unknown> }).props = {
+          ...props,
+          equipamento_id: equipId,
+        };
+      }
+
+      const eq = await tx.equipamentos.findFirst({
+        where: { id: equipId, deleted_at: null },
+        select: { id: true, automacao: true },
+      });
+      if (!eq) continue;
+      if (!eq.automacao) {
+        await tx.equipamentos.update({ where: { id: equipId }, data: { automacao: true } });
+      }
+
+      for (const pt of PONTOS) {
+        const ja = await tx.equipamento_pontos.findFirst({
+          where: { equipamento_id: equipId, nome: pt.nome },
+          select: { id: true, ativo: true, deleted_at: true },
+        });
+        if (ja) {
+          if (!ja.ativo || ja.deleted_at) {
+            await tx.equipamento_pontos.update({
+              where: { id: ja.id },
+              data: { tipo: pt.tipo, unidade: pt.unidade, ordem: pt.ordem, ativo: true, deleted_at: null },
+            });
+          }
+          continue;
+        }
+        await tx.equipamento_pontos.create({
+          data: { equipamento_id: equipId, tipo: pt.tipo, nome: pt.nome, unidade: pt.unidade, ordem: pt.ordem, ativo: true },
+        });
+      }
+
+      // Espelha config nas tabelas (fonte da verdade = props do IoT).
+      const fonte =
+        String(props.fonte_kwh ?? 'ton').trim() === 'carregador' ? 'carregador' : 'ton';
+      const tarifaN = Number(props.tarifa_kwh);
+      const tarifaV = Number.isFinite(tarifaN) ? tarifaN : null;
+      const potN = Number(props.potencia_kw);
+      const potV = Number.isFinite(potN) ? potN : null;
+      const topico = String(props.topico_energia ?? '').trim() || null;
+      const temCfg =
+        (
+          await tx.$queryRaw<Array<{ x: number }>>`
+            SELECT 1 AS x FROM carregador_config WHERE TRIM(equipamento_id) = ${equipId} LIMIT 1`
+        ).length > 0;
+      if (temCfg) {
+        await tx.$executeRaw`
+          UPDATE carregador_config
+          SET fonte_kwh = ${fonte}, tarifa_kwh = ${tarifaV}, potencia_kw = ${potV},
+              topico_energia = ${topico}, updated_at = now()
+          WHERE TRIM(equipamento_id) = ${equipId}`;
+      } else {
+        await tx.$executeRaw`
+          INSERT INTO carregador_config (id, equipamento_id, fonte_kwh, tarifa_kwh, potencia_kw, topico_energia)
+          VALUES (${this.generateId()}, ${equipId}, ${fonte}, ${tarifaV}, ${potV}, ${topico})`;
       }
     }
   }

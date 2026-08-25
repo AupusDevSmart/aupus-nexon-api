@@ -23,6 +23,7 @@ import { LogsMqttModule } from './modules/logs-mqtt/logs-mqtt.module';
 import { RegrasLogsMqttModule } from './modules/regras-logs-mqtt/regras-logs-mqtt.module';
 import { RelatoriosModule } from './modules/relatorios/relatorios.module';
 import { BombaCombustivelModule } from './modules/bomba-combustivel/bomba-combustivel.module';
+import { CarregadorEletricoModule } from './modules/carregador-eletrico/carregador-eletrico.module';
 import { UploadsModule } from './modules/uploads/uploads.module';
 import { IoTModule } from './modules/iot/iot.module';
 import { OtaModule } from './modules/ota/ota.module';
@@ -104,6 +105,7 @@ import { IotCatalogModule } from './modules/iot-catalog/iot-catalog.module';
     ReleEventosModule,
     RelatoriosModule,
     BombaCombustivelModule,
+    CarregadorEletricoModule,
   ],
   controllers: [AppController],
   providers: [
