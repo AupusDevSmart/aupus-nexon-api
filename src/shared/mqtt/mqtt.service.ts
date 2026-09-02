@@ -7,7 +7,7 @@ import {
   PrismaService,
   EQUIPAMENTO_MQTT_CHANGED,
   EquipamentoMqttChangedPayload,
-} from '@aupus/api-shared';
+} from '@/core';
 import { MqttIngestionService } from '../../modules/equipamentos-dados/services/mqtt-ingestion.service';
 import { detectarOverflowUint } from '../util/inverter-overflow';
 import { MqttRedisBufferService } from './mqtt-redis-buffer.service';
@@ -1421,7 +1421,7 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
 
   /**
    * Handler de evento emitido pelo CRUD de equipamentos (idealmente dentro
-   * do EquipamentosService em @aupus/api-shared, apos commit da transacao).
+   * do EquipamentosService em src/core, apos commit da transacao).
    * Idempotente: chamar duas vezes com o mesmo payload e seguro.
    */
   @OnEvent(EQUIPAMENTO_MQTT_CHANGED, { async: true })

@@ -1,6 +1,6 @@
 import { Body, Controller, Delete, ForbiddenException, Get, Param, Post, Put, Query, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
-import { JwtAuthGuard, PermissionScopeService, PrismaService, CurrentUser, ScopedUser } from '@aupus/api-shared';
+import { JwtAuthGuard, PermissionScopeService, PrismaService, CurrentUser, ScopedUser } from '@/core';
 import { NotificacaoService } from './notificacao.service';
 import { EnvioAdminService, ConfigInput, DestinatarioInput } from './envio-admin.service';
 import { NotificacaoDispatcherService } from './dispatcher.service';

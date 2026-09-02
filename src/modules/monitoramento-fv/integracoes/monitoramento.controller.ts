@@ -1,6 +1,6 @@
 import { Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
-import { JwtAuthGuard, PermissionScopeService, CurrentUser, ScopedUser } from '@aupus/api-shared';
+import { JwtAuthGuard, PermissionScopeService, CurrentUser, ScopedUser } from '@/core';
 import { MonitoramentoSyncService } from './sync.service';
 import { MonitoramentoSyncHorarioService } from './sync-horario.service';
 

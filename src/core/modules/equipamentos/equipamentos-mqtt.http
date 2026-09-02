@@ -1,0 +1,95 @@
+### ================================================
+### TESTES - MQTT e Dados em Tempo Real
+### ================================================
+### Utilize a extensão REST Client do VS Code para testar essas rotas
+###
+### IMPORTANTE:
+### 1. Substitua {{equipamentoId}} por um ID real de equipamento
+### 2. Execute as rotas na sequência para testar o fluxo completo
+### ================================================
+
+@baseUrl = http://localhost:3000/api/v1
+@equipamentoId = SUBSTITUA_PELO_ID_DO_EQUIPAMENTO
+
+### ================================================
+### 1. CONFIGURAR MQTT DO EQUIPAMENTO
+### ================================================
+### Configura o tópico MQTT para um equipamento
+
+PATCH {{baseUrl}}/equipamentos/{{equipamentoId}}/mqtt
+Content-Type: application/json
+
+{
+  "topico_mqtt": "usina/ufv-principal/inversor-01",
+  "mqtt_habilitado": true
+}
+
+### ================================================
+### 2. OBTER DADO ATUAL DO EQUIPAMENTO
+### ================================================
+### Retorna o último dado recebido via MQTT
+
+GET {{baseUrl}}/equipamentos/{{equipamentoId}}/dados/atual
+
+### ================================================
+### 3. OBTER HISTÓRICO DE DADOS - Todos
+### ================================================
+### Retorna os últimos 100 registros (padrão)
+
+GET {{baseUrl}}/equipamentos/{{equipamentoId}}/dados/historico
+
+### ================================================
+### 4. OBTER HISTÓRICO DE DADOS - Com Filtros
+### ================================================
+### Filtra por período e limita resultados
+
+GET {{baseUrl}}/equipamentos/{{equipamentoId}}/dados/historico?inicio=2025-10-16T00:00:00Z&fim=2025-10-16T23:59:59Z&limite=50
+
+### ================================================
+### 5. OBTER HISTÓRICO DE DADOS - Com Intervalo
+### ================================================
+### Agrupa por intervalo de 5 minutos (futura implementação)
+
+GET {{baseUrl}}/equipamentos/{{equipamentoId}}/dados/historico?intervalo=5min&limite=20
+
+### ================================================
+### 6. DESABILITAR MQTT DO EQUIPAMENTO
+### ================================================
+### Desabilita o recebimento de dados via MQTT
+
+PATCH {{baseUrl}}/equipamentos/{{equipamentoId}}/mqtt
+Content-Type: application/json
+
+{
+  "topico_mqtt": "usina/ufv-principal/inversor-01",
+  "mqtt_habilitado": false
+}
+
+### ================================================
+### EXEMPLO DE PAYLOADS MQTT
+### ================================================
+###
+### Para testar o recebimento de dados via MQTT, use um cliente MQTT
+### (mosquitto_pub, MQTT.fx, ou outro) para publicar mensagens no tópico configurado.
+###
+### Exemplo de payload JSON para inversor solar:
+###
+### Tópico: usina/ufv-principal/inversor-01
+### Payload:
+### {
+###   "potenciaAtual": 850.5,
+###   "tensao": 380,
+###   "corrente": 12.5,
+###   "temperatura": 45.2,
+###   "eficiencia": 98.5,
+###   "status": "NORMAL",
+###   "timestamp": "2025-10-16T10:45:30Z",
+###   "qualidade": "GOOD"
+### }
+###
+### Comando mosquitto_pub (exemplo):
+### mosquitto_pub -h localhost -p 1883 \
+###   -t "usina/ufv-principal/inversor-01" \
+###   -m '{"potenciaAtual":850.5,"tensao":380,"corrente":12.5,"temperatura":45.2,"eficiencia":98.5,"status":"NORMAL","timestamp":"2025-10-16T10:45:30Z","qualidade":"GOOD"}'
+###
+### ================================================

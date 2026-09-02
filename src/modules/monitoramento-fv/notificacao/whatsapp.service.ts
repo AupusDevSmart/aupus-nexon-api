@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { PrismaService } from '@aupus/api-shared';
+import { PrismaService } from '@/core';
 
 export interface WhatsappGrupo {
   jid: string;

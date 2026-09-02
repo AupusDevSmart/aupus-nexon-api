@@ -1,6 +1,6 @@
 import { ForbiddenException, Injectable } from '@nestjs/common';
 import { randomBytes } from 'crypto';
-import { PrismaService, Prisma, ScopedUser, PlantaScope } from '@aupus/api-shared';
+import { PrismaService, Prisma, ScopedUser, PlantaScope } from '@/core';
 
 const PAPEIS_EDITORES = ['super_admin', 'admin'];
 

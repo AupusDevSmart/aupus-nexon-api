@@ -3,7 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { PrismaService } from '@aupus/api-shared';
+import { PrismaService } from '@/core';
 import { ClassificacaoHorariosService } from './classificacao-horarios.service';
 import { ConfiguracaoCustoService, ConfiguracaoCustoData } from './configuracao-custo.service';
 import {

@@ -1,6 +1,6 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
-import { PrismaService } from '@aupus/api-shared';
+import { PrismaService } from '@/core';
 
 /**
  * SOE → alarme de TRIP.

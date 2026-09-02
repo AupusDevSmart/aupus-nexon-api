@@ -1,6 +1,6 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { Redis } from 'ioredis';
-import { PrismaService } from '@aupus/api-shared';
+import { PrismaService } from '@/core';
 
 /**
  * Serviço de Buffer MQTT com Redis

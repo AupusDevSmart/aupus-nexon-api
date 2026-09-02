@@ -23,8 +23,8 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { PrismaClient } from '@aupus/api-shared';
-import type { Prisma } from '@aupus/api-shared';
+import { PrismaClient } from '@/core';
+import type { Prisma } from '@/core';
 
 interface RawComponent {
   id: string | number;

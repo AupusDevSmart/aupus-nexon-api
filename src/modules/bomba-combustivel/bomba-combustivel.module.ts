@@ -1,5 +1,5 @@
 import { Module, forwardRef } from '@nestjs/common';
-import { PrismaModule } from '@aupus/api-shared';
+import { PrismaModule } from '@/core';
 import { MqttModule } from '../../shared/mqtt/mqtt.module';
 import { BombaCombustivelController } from './bomba-combustivel.controller';
 import { BombaCombustivelService } from './bomba-combustivel.service';

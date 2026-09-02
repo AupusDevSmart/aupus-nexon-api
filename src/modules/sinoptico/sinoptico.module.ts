@@ -1,5 +1,5 @@
 import { Module } from '@nestjs/common';
-import { PrismaModule } from '@aupus/api-shared';
+import { PrismaModule } from '@/core';
 import { SinopticoController } from './sinoptico.controller';
 import { SinopticoService } from './sinoptico.service';
 

@@ -20,7 +20,7 @@ import {
   CompilePublishOtaDto,
   OtaStatusResponseDto,
 } from './dto/trigger-ota.dto';
-import { JwtAuthGuard, Permissions } from '@aupus/api-shared';
+import { JwtAuthGuard, Permissions } from '@/core';
 
 @ApiTags('OTA')
 @ApiBearerAuth()

@@ -1,5 +1,5 @@
 // aupus-nexon-api - modulo raiz
-// Importa modulos compartilhados de @aupus/api-shared + modulos especificos do NexOn
+// Modulos do nucleo (src/core, antes o pacote @aupus/api-shared) + modulos do NexOn
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
@@ -36,7 +36,7 @@ import { TonAiModule } from './modules/ton-ai/ton-ai.module';
 import { MonitoramentoFvModule } from './modules/monitoramento-fv/monitoramento-fv.module';
 import { ReleEventosModule } from './modules/rele-eventos/rele-eventos.module';
 
-// Modulos compartilhados (de @aupus/api-shared)
+// Modulos do nucleo (src/core)
 import {
   PrismaModule,
   MailModule,
@@ -48,11 +48,10 @@ import {
   PlantaOperadoresModule,
   UnidadesModule,
   EquipamentosModule,
-  AtivosFuncionaisModule,
   TiposEquipamentosModule,
   CategoriasEquipamentosModule,
   ConcessionariasModule,
-} from '@aupus/api-shared';
+} from '@/core';
 import { IotCatalogModule } from './modules/iot-catalog/iot-catalog.module';
 
 @Module({
@@ -81,7 +80,6 @@ import { IotCatalogModule } from './modules/iot-catalog/iot-catalog.module';
     PlantaOperadoresModule,
     UnidadesModule,
     EquipamentosModule,
-    AtivosFuncionaisModule,
     TiposEquipamentosModule,
     CategoriasEquipamentosModule,
     ConcessionariasModule,

@@ -1,8 +1,8 @@
 import { Controller, Get, Query, UseGuards, HttpCode, HttpStatus, Logger } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import { CoaService, DashboardData } from './coa.service';
-import { JwtAuthGuard } from '@aupus/api-shared';
-import { UserProprietarioId, CurrentUser } from '@aupus/api-shared';
+import { JwtAuthGuard } from '@/core';
+import { UserProprietarioId, CurrentUser } from '@/core';
 
 @ApiTags('COA - Centro de Operações')
 @Controller('coa')

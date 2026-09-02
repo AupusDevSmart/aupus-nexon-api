@@ -1,0 +1,1 @@
+export { Equipamento, DadoTecnico, PlantaBasica, EquipamentoPai, ComponenteUAR } from './equipamento.entity';

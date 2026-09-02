@@ -16,7 +16,7 @@ import {
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
-import { JwtAuthGuard, Public } from '@aupus/api-shared';
+import { JwtAuthGuard, Public } from '@/core';
 import { IotCatalogService } from './iot-catalog.service';
 import { CreateIotDeviceModeloDto } from './dto/create-iot-device-modelo.dto';
 import { CreateIotDeviceTipoDto } from './dto/create-iot-device-tipo.dto';

@@ -3,7 +3,7 @@ import { DiagramasController } from './diagramas.controller';
 import { DiagramasService } from './services/diagramas.service';
 import { EquipamentosDiagramaService } from './services/equipamentos-diagrama.service';
 import { ConexoesDiagramaService } from './services/conexoes-diagrama.service';
-import { PrismaModule } from '@aupus/api-shared';
+import { PrismaModule } from '@/core';
 
 @Module({
   imports: [PrismaModule],

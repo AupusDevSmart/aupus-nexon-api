@@ -1,6 +1,6 @@
 import { Injectable, Logger, ForbiddenException, NotFoundException, BadRequestException } from '@nestjs/common';
 import { randomBytes } from 'node:crypto';
-import { PrismaService, PermissionScopeService, ScopedUser } from '@aupus/api-shared';
+import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
 import { MqttService } from '../../shared/mqtt/mqtt.service';
 
 /**

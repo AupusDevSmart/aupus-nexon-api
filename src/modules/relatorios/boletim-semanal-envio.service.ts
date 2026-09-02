@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { createHmac, randomBytes } from 'node:crypto';
-import { PrismaService } from '@aupus/api-shared';
+import { PrismaService } from '@/core';
 import { WhatsappService } from '../monitoramento-fv/notificacao/whatsapp.service';
 
 const CFG_ID = 'bolsemdefault0000000000000';

@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { randomBytes } from 'crypto';
-import { PrismaService } from '@aupus/api-shared';
+import { PrismaService } from '@/core';
 import { IsolarCloudService } from './isolarcloud/isolarcloud.service';
 import { DeyeCloudService } from './deye-cloud/deye-cloud.service';
 

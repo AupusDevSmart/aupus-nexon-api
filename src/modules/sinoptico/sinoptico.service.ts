@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { PrismaService, PermissionScopeService, ScopedUser } from '@aupus/api-shared';
+import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
 
 export interface SinopticoStatusResult {
   /** ISO UTC do dado mais recente da unidade. Frontend formata em horario local. */

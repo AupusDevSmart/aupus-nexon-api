@@ -1,6 +1,6 @@
 import { Controller, Get, Query, Res } from '@nestjs/common';
 import type { Response } from 'express';
-import { Public } from '@aupus/api-shared';
+import { Public } from '@/core';
 import { BoletimConsumoEnvioService } from './boletim-consumo-envio.service';
 import { BoletimConsumoService } from './boletim-consumo.service';
 import { RelatoriosService } from './relatorios.service';

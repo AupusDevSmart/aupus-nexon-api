@@ -1,5 +1,5 @@
 import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
-import { PrismaService, PermissionScopeService, ScopedUser } from '@aupus/api-shared';
+import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
 import { CreateRegraLogDto } from './dto/create-regra-log.dto';
 import { UpdateRegraLogDto } from './dto/update-regra-log.dto';
 import { QueryRegrasLogsDto } from './dto/query-regras-logs.dto';

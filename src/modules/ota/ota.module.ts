@@ -1,5 +1,5 @@
 import { Module } from '@nestjs/common';
-import { PrismaModule } from '@aupus/api-shared';
+import { PrismaModule } from '@/core';
 
 import { MqttModule } from '../../shared/mqtt/mqtt.module';
 import { OtaController } from './ota.controller';

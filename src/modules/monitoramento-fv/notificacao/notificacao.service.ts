@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { PrismaService } from '@aupus/api-shared';
+import { PrismaService } from '@/core';
 import { NOTIFICACAO_TIPOS, getNotificacaoTipo } from './notificacao-tipos';
 
 /**

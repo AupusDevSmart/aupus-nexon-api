@@ -1,5 +1,5 @@
 import { Module } from '@nestjs/common';
-import { PrismaModule } from '@aupus/api-shared';
+import { PrismaModule } from '@/core';
 import { ReleEventosController } from './rele-eventos.controller';
 import { ReleEventosService } from './rele-eventos.service';
 

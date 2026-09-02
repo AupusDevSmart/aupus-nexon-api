@@ -5,9 +5,9 @@ import {
   BadRequestException,
   Logger,
 } from '@nestjs/common';
-import { PrismaService, PermissionScopeService, ScopedUser } from '@aupus/api-shared';
+import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
 import { tonBiCount } from '../../shared/util/ton-caps';
-import { Prisma } from '@aupus/api-shared';
+import { Prisma } from '@/core';
 import { customAlphabet } from 'nanoid';
 
 import {

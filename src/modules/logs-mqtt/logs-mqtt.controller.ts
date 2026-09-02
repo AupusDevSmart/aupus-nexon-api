@@ -8,7 +8,7 @@ import {
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
-import { CurrentUser } from '@aupus/api-shared';
+import { CurrentUser } from '@/core';
 import { LogsMqttService } from './logs-mqtt.service';
 import { QueryLogsMqttDto } from './dto/query-logs-mqtt.dto';
 

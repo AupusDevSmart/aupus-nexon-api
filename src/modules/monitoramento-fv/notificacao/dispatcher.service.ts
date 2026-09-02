@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { randomBytes } from 'crypto';
-import { PrismaService, Prisma } from '@aupus/api-shared';
+import { PrismaService, Prisma } from '@/core';
 import { WhatsappService } from './whatsapp.service';
 
 export interface EnvioConfig {

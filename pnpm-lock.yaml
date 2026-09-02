@@ -8,18 +8,24 @@ importers:
 
   .:
     dependencies:
-      '@aupus/api-shared':
-        specifier: git+https://github.com/AupusDevSmart/api-shared.git#v0.31.0
-        version: git+https://github.com/AupusDevSmart/api-shared.git#0f766419d9fdf22c97a2e82985fc6db8e52f09ca(d6ff59ddccf13a582fdf75761bad6f13)
+      '@nestjs/common':
+        specifier: ^11.0.0
+        version: 11.1.19(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2)
       '@nestjs/config':
         specifier: ^4.0.2
         version: 4.0.2(@nestjs/common@11.1.19(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2))(rxjs@7.8.2)
+      '@nestjs/core':
+        specifier: ^11.0.0
+        version: 11.1.19(@nestjs/common@11.1.19(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/platform-express@11.1.19)(@nestjs/websockets@11.1.19)(reflect-metadata@0.2.2)(rxjs@7.8.2)
       '@nestjs/event-emitter':
         specifier: ^3.1.0
         version: 3.1.0(@nestjs/common@11.1.19(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.19)
       '@nestjs/jwt':
         specifier: ^11.0.0
         version: 11.0.2(@nestjs/common@11.1.19(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2))
+      '@nestjs/mapped-types':
+        specifier: ^2.0.0
+        version: 2.1.1(@nestjs/common@11.1.19(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2))(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)
       '@nestjs/passport':
         specifier: ^11.0.5
         version: 11.0.5(@nestjs/common@11.1.19(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2))(passport@0.7.0)
@@ -41,6 +47,9 @@ importers:
       '@nestjs/websockets':
         specifier: ^11.1.6
         version: 11.1.19(@nestjs/common@11.1.19(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.19)(@nestjs/platform-socket.io@11.1.19)(reflect-metadata@0.2.2)(rxjs@7.8.2)
+      '@prisma/client':
+        specifier: ^6.0.0
+        version: 6.19.3(prisma@6.19.3(typescript@5.9.3))(typescript@5.9.3)
       '@sentry/nestjs':
         specifier: ^10.42.0
         version: 10.51.0(@nestjs/common@11.1.19(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.19)
@@ -194,32 +203,6 @@ packages:
   '@angular-devkit/schematics@19.2.24':
     resolution: {integrity: sha512-lnw+ZM1Io+cJAkReC0NPDjqObL8NtKzKIkdgEEKC8CUmkhurYhedbicN8Y8NYHgG1uLd2GozW3+/QqPRZaN+Lw==}
     engines: {node: ^18.19.1 || ^20.11.1 || >=22.0.0, npm: ^6.11.0 || ^7.5.6 || >=8.0.0, yarn: '>= 1.13.0'}
-
-  '@aupus/api-shared@git+https://github.com/AupusDevSmart/api-shared.git#0f766419d9fdf22c97a2e82985fc6db8e52f09ca':
-    resolution: {commit: 0f766419d9fdf22c97a2e82985fc6db8e52f09ca, repo: https://github.com/AupusDevSmart/api-shared.git, type: git}
-    version: 0.31.0
-    peerDependencies:
-      '@nestjs/common': ^11.0.0
-      '@nestjs/config': ^4.0.0
-      '@nestjs/core': ^11.0.0
-      '@nestjs/event-emitter': ^3.0.0
-      '@nestjs/jwt': ^11.0.0
-      '@nestjs/mapped-types': ^2.0.0
-      '@nestjs/passport': ^11.0.0
-      '@nestjs/platform-express': ^11.0.0
-      '@nestjs/swagger': ^11.0.0
-      '@prisma/client': ^6.0.0
-      bcryptjs: ^3.0.0
-      class-transformer: ^0.5.0
-      class-validator: ^0.14.0
-      multer: ^2.0.0
-      nanoid: ^5.0.0
-      nodemailer: ^8.0.0
-      passport: ^0.7.0
-      passport-jwt: ^4.0.0
-      reflect-metadata: ^0.2.0
-      rxjs: ^7.0.0
-      uuid: '>=10.0.0'
 
   '@babel/code-frame@7.29.0':
     resolution: {integrity: sha512-9NhCeYjq9+3uxgdtp20LSiJXJvN0FeCtNGpJxuMFZ1Kv3cWUNb6DOhJwUvcVCzKGR66cw4njwM6hrJLqgOwbcw==}
@@ -3763,30 +3746,6 @@ snapshots:
       rxjs: 7.8.1
     transitivePeerDependencies:
       - chokidar
-
-  '@aupus/api-shared@git+https://github.com/AupusDevSmart/api-shared.git#0f766419d9fdf22c97a2e82985fc6db8e52f09ca(d6ff59ddccf13a582fdf75761bad6f13)':
-    dependencies:
-      '@nestjs/common': 11.1.19(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2)
-      '@nestjs/config': 4.0.2(@nestjs/common@11.1.19(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2))(rxjs@7.8.2)
-      '@nestjs/core': 11.1.19(@nestjs/common@11.1.19(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/platform-express@11.1.19)(@nestjs/websockets@11.1.19)(reflect-metadata@0.2.2)(rxjs@7.8.2)
-      '@nestjs/event-emitter': 3.1.0(@nestjs/common@11.1.19(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.19)
-      '@nestjs/jwt': 11.0.2(@nestjs/common@11.1.19(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2))
-      '@nestjs/mapped-types': 2.1.1(@nestjs/common@11.1.19(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2))(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)
-      '@nestjs/passport': 11.0.5(@nestjs/common@11.1.19(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2))(passport@0.7.0)
-      '@nestjs/platform-express': 11.1.19(@nestjs/common@11.1.19(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.19)
-      '@nestjs/swagger': 11.4.2(@nestjs/common@11.1.19(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.19)(class-transformer@0.5.1)(class-validator@0.14.4)(reflect-metadata@0.2.2)
-      '@prisma/client': 6.19.3(prisma@6.19.3(typescript@5.9.3))(typescript@5.9.3)
-      bcryptjs: 3.0.3
-      class-transformer: 0.5.1
-      class-validator: 0.14.4
-      multer: 2.1.1
-      nanoid: 5.1.9
-      nodemailer: 8.0.7
-      passport: 0.7.0
-      passport-jwt: 4.0.1
-      reflect-metadata: 0.2.2
-      rxjs: 7.8.2
-      uuid: 13.0.1
 
   '@babel/code-frame@7.29.0':
     dependencies:

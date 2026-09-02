@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { PrismaService } from '@aupus/api-shared';
+import { PrismaService } from '@/core';
 import { MqttService } from '../../shared/mqtt/mqtt.service';
 
 export interface HealthStatus {
