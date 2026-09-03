@@ -173,10 +173,20 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     const mqttUrl = `mqtt://${mqttHost}:${mqttPort}`;
 
     const options: mqtt.IClientOptions = {
-      clientId: `aupus-${instanceId}-${Math.random().toString(16).substr(2, 8)}`,
+      // Sem sufixo aleatorio: clientId TEM que ser estavel para uma sessao
+      // persistente ter o que retomar. `instanceId` ja diferencia dev/staging/
+      // prod (ver .env), e `ecosystem.config.cjs` fixa este processo em
+      // `instances: 1, exec_mode: 'fork'` — nao ha dois workers deste servico
+      // disputando o mesmo clientId ao mesmo tempo.
+      clientId: `aupus-${instanceId}`,
       username: process.env.MQTT_USERNAME,
       password: process.env.MQTT_PASSWORD,
-      clean: true,
+      // `clean: false` = sessao persistente: o broker guarda as inscricoes e
+      // enfileira mensagem QoS>=1 recebida enquanto este cliente esta
+      // desconectado, e entrega tudo na reconexao. Antes, `clean: true` fazia
+      // o broker esquecer a sessao em TODA reconexao — nao so em deploy, em
+      // qualquer soluco de rede — perdendo o que chegou no meio.
+      clean: false,
       reconnectPeriod: 5000,
       // 🔧 FIX: Parâmetros adicionais para estabilidade de conexão
       keepalive: 30,              // Enviar PINGREQ a cada 30s para manter conexão ativa
@@ -190,9 +200,13 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     }
     this.client = mqtt.connect(mqttUrl, options);
 
-    this.client.on('connect', () => {
+    this.client.on('connect', (packet) => {
       if (this.logLevel !== 'minimal') {
-        console.log('✅ [MQTT] Conectado com sucesso!');
+        // `sessionPresent` vem no CONNACK: true quando o broker retomou a
+        // sessao persistente (e entregou o que ficou em fila), false quando
+        // comecou do zero — primeira conexao, ou o broker expirou a sessao por
+        // ficar tempo demais sem este clientId aparecer.
+        console.log(`✅ [MQTT] Conectado com sucesso! sessionPresent=${packet?.sessionPresent ?? 'indisponivel'}`);
       }
       this.carregarTopicosEquipamentos();
       // Discovery de bancada (modo simulação): escuta TESTE/# só pra registrar
@@ -334,7 +348,7 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     if (!this.subscriptions.has(topic)) {
       this.subscriptions.set(topic, []);
       isNewTopic = true;
-      this.client?.subscribe(topic, (err) => {
+      this.client?.subscribe(topic, { qos: 1 }, (err) => {
         if (err) {
           console.warn(`⚠️ [MQTT] Falha ao subscrever ${topic}: ${err.message}`);
         }
@@ -358,7 +372,7 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     const statusTopic = `${topic}/status`;
     if (!this.subscriptions.has(statusTopic)) {
       this.subscriptions.set(statusTopic, []);
-      this.client?.subscribe(statusTopic, (err) => {
+      this.client?.subscribe(statusTopic, { qos: 1 }, (err) => {
         if (err) {
           console.warn(`⚠️ [MQTT] Falha ao subscrever ${statusTopic}: ${err.message}`);
         }
@@ -374,7 +388,7 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     const ackTopic = `${topic}/cmd/ack`;
     if (!this.subscriptions.has(ackTopic)) {
       this.subscriptions.set(ackTopic, []);
-      this.client?.subscribe(ackTopic, (err) => {
+      this.client?.subscribe(ackTopic, { qos: 1 }, (err) => {
         if (err) {
           console.warn(`⚠️ [MQTT] Falha ao subscrever ${ackTopic}: ${err.message}`);
         }
@@ -391,7 +405,7 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     const inputsTopic = `${topic}/inputs`;
     if (!this.subscriptions.has(inputsTopic)) {
       this.subscriptions.set(inputsTopic, []);
-      this.client?.subscribe(inputsTopic, (err) => {
+      this.client?.subscribe(inputsTopic, { qos: 1 }, (err) => {
         if (err) {
           console.warn(`⚠️ [MQTT] Falha ao subscrever ${inputsTopic}: ${err.message}`);
         }
@@ -408,7 +422,7 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     const evtTopic = `${topic}/evt`;
     if (!this.subscriptions.has(evtTopic)) {
       this.subscriptions.set(evtTopic, []);
-      this.client?.subscribe(evtTopic, (err) => {
+      this.client?.subscribe(evtTopic, { qos: 1 }, (err) => {
         if (err) {
           console.warn(`⚠️ [MQTT] Falha ao subscrever ${evtTopic}: ${err.message}`);
         }
@@ -424,7 +438,7 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       const t = `${topic}/${suf}`;
       if (!this.subscriptions.has(t)) {
         this.subscriptions.set(t, []);
-        this.client?.subscribe(t, (err) => {
+        this.client?.subscribe(t, { qos: 1 }, (err) => {
           if (err) console.warn(`⚠️ [MQTT] Falha ao subscrever ${t}: ${err.message}`);
         });
       }
@@ -1118,7 +1132,7 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     const ackTopic = `${topic}/ack`;
     if (!this.subscriptions.has(ackTopic)) {
       this.subscriptions.set(ackTopic, []);
-      this.client?.subscribe(ackTopic, (err) => {
+      this.client?.subscribe(ackTopic, { qos: 1 }, (err) => {
         if (err) console.warn(`⚠️ [MQTT] Falha ao subscrever ${ackTopic}: ${err.message}`);
       });
     }
@@ -1597,7 +1611,7 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     const alreadyRegistered = this.otaStatusListeners.has(topic);
     this.otaStatusListeners.set(topic, handler);
     if (alreadyRegistered) return;
-    this.client?.subscribe(topic, (err) => {
+    this.client?.subscribe(topic, { qos: 1 }, (err) => {
       if (err) {
         console.warn(`⚠️ [MQTT] Falha subscrevendo ota/status ${topic}: ${err.message}`);
       }

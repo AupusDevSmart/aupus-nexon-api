@@ -26,8 +26,14 @@ describe('MqttService — dynamic subscribe', () => {
     service = moduleRef.get<MqttService>(MqttService);
 
     // Stub do client mqtt — subscribeTopic usa client?.subscribe; injetamos um mock leve.
+    // Aceita as duas assinaturas da lib real: (topic, cb) e (topic, options, cb) —
+    // subscribeTopic() passa { qos: 1 } como segundo argumento, e sem este `|| cb2`
+    // o segundo argumento (o objeto de options) seria confundido com o callback.
     mqttClientMock = {
-      subscribe: jest.fn((_topic, cb) => cb && cb(null)),
+      subscribe: jest.fn((_topic, cbOrOpts, cb2) => {
+        const callback = typeof cbOrOpts === 'function' ? cbOrOpts : cb2;
+        callback?.(null);
+      }),
       unsubscribe: jest.fn(),
       connected: true,
       end: jest.fn(),
@@ -51,7 +57,7 @@ describe('MqttService — dynamic subscribe', () => {
       expect(getSubs().has('TEST/X/Y')).toBe(true);
       expect(getSubs().get('TEST/X/Y')).toContain('eq-1');
       expect(getSubs().has('TEST/X/Y/status')).toBe(true);
-      expect(mqttClientMock.subscribe).toHaveBeenCalledWith('TEST/X/Y', expect.any(Function));
+      expect(mqttClientMock.subscribe).toHaveBeenCalledWith('TEST/X/Y', { qos: 1 }, expect.any(Function));
     });
 
     it('migra de topico antigo para topico novo', async () => {
@@ -191,6 +197,30 @@ describe('MqttService — dynamic subscribe', () => {
 
       expect(result.added).toEqual([{ equipamentoId: 'eq-mig', topic: 'NOVO' }]);
       expect(result.removed).toEqual([{ equipamentoId: 'eq-mig', topic: 'VELHO' }]);
+    });
+  });
+
+  /**
+   * Sessao persistente so entrega mensagem perdida se o broker soube que devia
+   * GUARDAR — e isso depende de QoS >= 1 no SUBSCRIBE, nao so de `clean: false`
+   * na conexao. QoS 0 nunca e enfileirado, com ou sem sessao persistente, e o
+   * fix inteiro vira decoracao se um subscribe escapar sem o qos explicito.
+   */
+  describe('subscribeTopic — qos', () => {
+    it('toda inscricao de telemetria pede qos:1, nao o default (0)', () => {
+      (service as any).subscribeTopic('QOS/TEST', 'eq-qos', 'boot');
+
+      const chamada = mqttClientMock.subscribe.mock.calls.find(c => c[0] === 'QOS/TEST');
+      expect(chamada?.[1]).toEqual({ qos: 1 });
+    });
+
+    it('os topicos derivados (status, ack, inputs, evt) tambem pedem qos:1', () => {
+      (service as any).subscribeTopic('QOS/TEST2', 'eq-qos2', 'boot');
+
+      for (const sufixo of ['/status', '/cmd/ack', '/inputs', '/evt']) {
+        const chamada = mqttClientMock.subscribe.mock.calls.find(c => c[0] === `QOS/TEST2${sufixo}`);
+        expect(chamada?.[1]).toEqual({ qos: 1 });
+      }
     });
   });
 });
