@@ -3484,3 +3484,14 @@ model sincronizacao_auditoria {
 
   @@index([recurso, registro_id, criado_em(sort: Desc)], map: "sincronizacao_auditoria_registro_idx")
 }
+
+/// Quem e este no: 'service' ou 'nexon'. Uma linha so.
+///
+/// O trigger de captura le daqui para carimbar a origem no evento, e a origem e
+/// o que desempata conflito de versao. Vazia, o trigger levanta excecao em vez
+/// de gravar evento anonimo — evento sem origem nao tem como ser desempatado
+/// depois, e o erro so apareceria no dia do conflito.
+model sincronizacao_no {
+  travar Boolean @id @default(true)
+  origem String  @db.VarChar(20)
+}

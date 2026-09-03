@@ -22,6 +22,7 @@ export * from './modules/plantas';
 export * from './modules/planta-operadores';
 export * from './modules/unidades';
 export * from './modules/equipamentos';
+export * from './modules/sincronizacao';
 export * from './modules/categorias-equipamentos';
 export * from './modules/tipos-equipamentos';
 export * from './modules/concessionarias';
