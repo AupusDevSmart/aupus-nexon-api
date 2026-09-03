@@ -1,7 +1,7 @@
 import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { randomBytes } from 'crypto';
-import { PrismaService, PermissionScopeService, ScopedUser } from '@aupus/api-shared';
+import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
 import { FusionSolarService, FusionInverterKpi } from './fusion-solar/fusion-solar.service';
 
 interface MapRow {
