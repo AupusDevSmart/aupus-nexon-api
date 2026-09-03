@@ -90,4 +90,19 @@ export class UploadsController {
       });
     }
   }
+
+  @Get('comissionamento/:filename')
+  @ApiOperation({ summary: 'Serve commissioning proof photo' })
+  async serveComissionamentoFoto(@Param('filename') filename: string, @Res() res: Response) {
+    try {
+      const safe = filename.replace(/[^A-Za-z0-9._-]/g, '');
+      const filePath = join(process.cwd(), 'uploads', 'comissionamento', safe);
+      if (!existsSync(filePath)) {
+        return res.status(HttpStatus.NOT_FOUND).json({ message: 'File not found' });
+      }
+      return res.sendFile(filePath);
+    } catch (error) {
+      return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({ message: 'Error serving file', error: error.message });
+    }
+  }
 }
