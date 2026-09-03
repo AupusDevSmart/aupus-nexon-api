@@ -11,6 +11,7 @@ import { IsolarCloudService } from './integracoes/isolarcloud/isolarcloud.servic
 import { DeyeCloudService } from './integracoes/deye-cloud/deye-cloud.service';
 import { MonitoramentoSyncService } from './integracoes/sync.service';
 import { MonitoramentoSyncHorarioService } from './integracoes/sync-horario.service';
+import { FusionInverterFallbackService } from './integracoes/fusion-inverter-fallback.service';
 import { MonitoramentoController } from './integracoes/monitoramento.controller';
 import { GeracaoManualController } from './geracao/geracao-manual.controller';
 import { GeracaoManualService } from './geracao/geracao-manual.service';
@@ -38,6 +39,7 @@ import { ConfigFvService } from './config/config-fv.service';
     DeyeCloudService,
     MonitoramentoSyncService,
     MonitoramentoSyncHorarioService,
+    FusionInverterFallbackService,
     GeracaoManualService,
     ConfigFvService,
   ],

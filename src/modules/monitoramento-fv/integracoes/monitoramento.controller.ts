@@ -1,8 +1,9 @@
-import { Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
-import { JwtAuthGuard, PermissionScopeService, CurrentUser, ScopedUser } from '@aupus/api-shared';
+import { JwtAuthGuard, Permissions, PermissionScopeService, CurrentUser, ScopedUser } from '@aupus/api-shared';
 import { MonitoramentoSyncService } from './sync.service';
 import { MonitoramentoSyncHorarioService } from './sync-horario.service';
+import { FusionInverterFallbackService } from './fusion-inverter-fallback.service';
 
 /**
  * Sync manual das APIs de nuvem → `geracao_diaria_plantas`. SÓ trigger manual (sem cron
@@ -21,6 +22,7 @@ export class MonitoramentoController {
   constructor(
     private readonly sync: MonitoramentoSyncService,
     private readonly syncHorario: MonitoramentoSyncHorarioService,
+    private readonly invFallback: FusionInverterFallbackService,
     private readonly scope: PermissionScopeService,
   ) {}
 
@@ -55,5 +57,38 @@ export class MonitoramentoController {
   async registros(@Query('meses') meses?: string, @CurrentUser() user?: ScopedUser) {
     const scope = await this.scope.getScope(user);
     return { data: await this.sync.getRegistros(meses ? Number(meses) : 12, scope) };
+  }
+
+  // --- Fallback por-inversor (nuvem Fusion → modal "Dados em Tempo Real") ---
+
+  @Post('inversores-nuvem/sync')
+  @Permissions('equipamentos.manage')
+  @ApiOperation({ summary: 'Dispara o fallback por-inversor Fusion (grava nuvem onde a TON está obsoleta)' })
+  async syncInversoresNuvem() {
+    return { data: await this.invFallback.runFallback() };
+  }
+
+  @Get('inversores-nuvem/dispositivos')
+  @Permissions('equipamentos.manage')
+  @ApiOperation({ summary: 'Lista inversores Huawei da planta + candidatos NexON + mapa atual (config, ?unidadeId=)' })
+  async dispositivos(@Query('unidadeId') unidadeId: string, @CurrentUser() user?: ScopedUser) {
+    return { data: await this.invFallback.listarDispositivos(unidadeId, user) };
+  }
+
+  @Post('inversores-nuvem/mapa')
+  @Permissions('equipamentos.manage')
+  @ApiOperation({ summary: 'Vincula um inversor (equipamento) a um device Huawei { equipamentoId, deviceId }' })
+  async salvarMapa(
+    @Body() body: { equipamentoId: string; deviceId: string },
+    @CurrentUser() user?: ScopedUser,
+  ) {
+    return { data: await this.invFallback.salvarMapa(body.equipamentoId, body.deviceId, user) };
+  }
+
+  @Delete('inversores-nuvem/mapa')
+  @Permissions('equipamentos.manage')
+  @ApiOperation({ summary: 'Remove o vínculo nuvem de um inversor (?equipamentoId=)' })
+  async removerMapa(@Query('equipamentoId') equipamentoId: string, @CurrentUser() user?: ScopedUser) {
+    return { data: await this.invFallback.removerMapa(equipamentoId, user) };
   }
 }
