@@ -40,6 +40,63 @@ export class EquipamentosCmdService {
     private readonly scopeService: PermissionScopeService,
   ) {}
 
+  /**
+   * Configura redes WiFi de um TON EM RUNTIME (sem reflash) publicando em
+   * <topico_mqtt>/cmd/wifi. O firmware multi-WiFi mantem ate 4 redes no NVS e
+   * cicla entre elas quando a atual cai. Fire-and-forget (o firmware nao envia
+   * ack neste topico) — o TON precisa estar ONLINE (ainda na WiFi/Ethernet
+   * atual) quando o comando chega. NAO retido de proposito: um comando retido
+   * re-aplicaria 'remove' a cada boot. Nunca loga a senha.
+   */
+  async configurarWifi(
+    equipamentoId: string,
+    action: 'add' | 'remove' | 'list',
+    ssid: string | undefined,
+    pass: string | undefined,
+    user?: ScopedUser,
+  ): Promise<{ ok: boolean; topico: string; action: string; ssid?: string }> {
+    const trimmedId = equipamentoId.trim();
+    if (user) await this.scopeService.assertEntityInScope('equipamento', trimmedId, user);
+
+    const eqp = await this.prisma.equipamentos.findFirst({
+      where: { id: trimmedId, deleted_at: null },
+      select: { id: true, nome: true, topico_mqtt: true, mqtt_habilitado: true },
+    });
+    if (!eqp) throw new NotFoundException(`Equipamento ${trimmedId} nao encontrado`);
+    if (!eqp.mqtt_habilitado) {
+      throw new BadRequestException(
+        `Equipamento ${eqp.nome} esta com mqtt_habilitado=false`,
+      );
+    }
+    const baseTopico = eqp.topico_mqtt?.trim();
+    if (!baseTopico) {
+      throw new BadRequestException(
+        `Equipamento ${eqp.nome} nao tem topico_mqtt configurado`,
+      );
+    }
+    const ssidTrim = (ssid ?? '').trim();
+    if ((action === 'add' || action === 'remove') && !ssidTrim) {
+      throw new BadRequestException(`ssid e obrigatorio para action=${action}`);
+    }
+    if (!this.mqtt.isConnected()) {
+      throw new ServiceUnavailableException('Broker MQTT desconectado');
+    }
+
+    const topico = `${baseTopico}/cmd/wifi`;
+    const payload = JSON.stringify(
+      action === 'list'
+        ? { action }
+        : action === 'remove'
+          ? { action, ssid: ssidTrim }
+          : { action, ssid: ssidTrim, pass: pass ?? '' },
+    );
+    await this.mqtt.publish(topico, payload, { qos: 1, retain: false });
+    this.logger.log(
+      `[wifi-cfg] ${eqp.nome} <- ${action}${ssidTrim ? ' ssid=' + ssidTrim : ''} (topico ${topico})`,
+    );
+    return { ok: true, topico, action, ssid: ssidTrim || undefined };
+  }
+
   async sendCommand(
     equipamentoId: string,
     dto: SendCommandDto,
