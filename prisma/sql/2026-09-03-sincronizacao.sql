@@ -129,7 +129,18 @@ CREATE TABLE IF NOT EXISTS sincronizacao_no (
   CONSTRAINT sincronizacao_no_linha_unica CHECK (travar)
 );
 
-CREATE OR REPLACE FUNCTION sincronizacao_capturar() RETURNS TRIGGER AS $$
+-- `SET search_path = public` como ATRIBUTO da funcao, nao no script.
+--
+-- O corpo resolve os nomes na hora em que o trigger dispara, com o search_path
+-- de quem escreveu — nao com o de quem criou a funcao. E o banco de producao
+-- tem um schema `bdo` (do bdo-aupus-api) com tabelas chamadas `usuarios` e
+-- `unidades`, os MESMOS nomes que este trigger observa.
+--
+-- Hoje o Prisma conecta com `?schema=public` e nada quebraria. Mas basta um
+-- `ALTER DATABASE ... SET search_path`, ou uma conexao de manutencao aberta com
+-- outro path, para o trigger passar a olhar a tabela errada — e o sintoma seria
+-- evento de sincronizacao com dado de outro sistema, nao um erro.
+CREATE OR REPLACE FUNCTION public.sincronizacao_capturar() RETURNS TRIGGER AS $$
 DECLARE
   v_id      TEXT;
   v_versao  BIGINT;
@@ -175,17 +186,19 @@ BEGIN
 
   RETURN COALESCE(NEW, OLD);
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = public, pg_temp;
 
 DO $$
 DECLARE t TEXT;
 BEGIN
   FOREACH t IN ARRAY ARRAY['usuarios','plantas','unidades','equipamentos'] LOOP
-    EXECUTE format('DROP TRIGGER IF EXISTS sincronizacao_captura ON %I', t);
+    -- `public.%I` explicito pelo mesmo motivo: sem o schema, QUAL `usuarios`
+    -- recebe o trigger depende do search_path de quem roda este arquivo.
+    EXECUTE format('DROP TRIGGER IF EXISTS sincronizacao_captura ON public.%I', t);
     EXECUTE format(
       'CREATE TRIGGER sincronizacao_captura
-         AFTER INSERT OR UPDATE OR DELETE ON %I
-         FOR EACH ROW EXECUTE FUNCTION sincronizacao_capturar(%L)', t, t);
+         AFTER INSERT OR UPDATE OR DELETE ON public.%I
+         FOR EACH ROW EXECUTE FUNCTION public.sincronizacao_capturar(%L)', t, t);
   END LOOP;
 END $$;
 
