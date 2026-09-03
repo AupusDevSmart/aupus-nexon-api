@@ -4,7 +4,7 @@ import { HealthService } from './health.service';
 import { AlertService } from './alert.service';
 import { MetricsService } from './metrics.service';
 import { EquipmentMonitorService } from './equipment-monitor.service';
-import { PrismaModule } from '@aupus/api-shared';
+import { PrismaModule } from '@/core';
 import { MqttModule } from '../../shared/mqtt/mqtt.module';
 
 @Module({

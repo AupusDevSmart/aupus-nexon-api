@@ -1,5 +1,5 @@
 import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
-import { PrismaService } from '@aupus/api-shared';
+import { PrismaService } from '@/core';
 
 // Constante de divisao do medidor SSU acoplado ao A966. Energia (kWh) =
 // leitura_bruta * KD. Hoje hardcoded; quando houver mais de uma unidade

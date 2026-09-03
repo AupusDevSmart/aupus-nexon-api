@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { PrismaService } from '@aupus/api-shared';
+import { PrismaService } from '@/core';
 import { MqttService } from './mqtt.service';
 import { MqttIngestionService } from '../../modules/equipamentos-dados/services/mqtt-ingestion.service';
 

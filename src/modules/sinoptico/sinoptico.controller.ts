@@ -1,5 +1,5 @@
 import { Controller, Get, Param, Query } from '@nestjs/common';
-import { CurrentUser } from '@aupus/api-shared';
+import { CurrentUser } from '@/core';
 import { SinopticoService } from './sinoptico.service';
 
 @Controller('sinoptico')

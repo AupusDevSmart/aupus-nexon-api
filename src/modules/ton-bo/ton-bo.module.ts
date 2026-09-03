@@ -1,5 +1,5 @@
 import { Module } from '@nestjs/common';
-import { PrismaModule } from '@aupus/api-shared';
+import { PrismaModule } from '@/core';
 
 import { TonBoController } from './ton-bo.controller';
 import { TonBoService } from './ton-bo.service';

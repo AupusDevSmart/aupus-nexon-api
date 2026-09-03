@@ -1,7 +1,7 @@
 import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
 import { randomBytes } from 'node:crypto';
-import { PrismaService, PermissionScopeService, ScopedUser } from '@aupus/api-shared';
-import { Prisma } from '@aupus/api-shared';
+import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
+import { Prisma } from '@/core';
 import { tonCapsForTipo } from '../../shared/util/ton-caps';
 import type {
   IotDiagrama,

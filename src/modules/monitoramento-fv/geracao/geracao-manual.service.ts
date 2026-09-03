@@ -1,6 +1,6 @@
 import { ForbiddenException, Injectable, BadRequestException } from '@nestjs/common';
 import { randomBytes } from 'crypto';
-import { PrismaService, Prisma, ScopedUser } from '@aupus/api-shared';
+import { PrismaService, Prisma, ScopedUser } from '@/core';
 
 /**
  * Entrada/correção MANUAL da geração diária (igual ao fluxo de xlsx do BDO). Analistas e

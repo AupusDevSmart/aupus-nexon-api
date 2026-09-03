@@ -9,7 +9,7 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import { PrismaService, PermissionScopeService, ScopedUser } from '@aupus/api-shared';
+import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
 import { MqttService } from '../../shared/mqtt/mqtt.service';
 import { SendCommandDto } from './dto/send-command.dto';
 import { CommandResultDto } from './dto/command-result.dto';

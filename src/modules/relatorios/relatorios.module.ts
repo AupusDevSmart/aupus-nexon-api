@@ -1,5 +1,5 @@
 import { Module } from '@nestjs/common';
-import { PrismaModule } from '@aupus/api-shared';
+import { PrismaModule } from '@/core';
 import { RelatoriosController } from './relatorios.controller';
 import { RelatoriosPublicController } from './relatorios-publico.controller';
 import { RelatoriosConsumoController } from './relatorios-consumo.controller';

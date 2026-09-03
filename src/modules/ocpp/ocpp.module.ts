@@ -1,5 +1,5 @@
 import { Module } from '@nestjs/common';
-import { PrismaModule } from '@aupus/api-shared';
+import { PrismaModule } from '@/core';
 
 import { OcppController } from './ocpp.controller';
 import { OcppService } from './ocpp.service';

@@ -17,7 +17,7 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
-import { JwtAuthGuard, CurrentUser } from '@aupus/api-shared';
+import { JwtAuthGuard, CurrentUser } from '@/core';
 
 import { IoTService } from './iot.service';
 import { MqttService } from '../../shared/mqtt/mqtt.service';

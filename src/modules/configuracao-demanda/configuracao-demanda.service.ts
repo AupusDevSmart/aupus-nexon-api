@@ -1,5 +1,5 @@
 import { Injectable, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
-import { PrismaService, PermissionScopeService, ScopedUser } from '@aupus/api-shared';
+import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
 import { CreateConfiguracaoDemandaDto } from './dto/create-configuracao-demanda.dto';
 import { UpdateConfiguracaoDemandaDto } from './dto/update-configuracao-demanda.dto';
 

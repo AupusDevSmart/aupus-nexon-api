@@ -1,5 +1,5 @@
 import { Injectable, NotFoundException, BadRequestException, ConflictException } from '@nestjs/common';
-import { PrismaService } from '@aupus/api-shared';
+import { PrismaService } from '@/core';
 import { AddEquipamentoDiagramaDto, UpdateEquipamentoDiagramaDto, AddEquipamentosBulkDto } from '../dto/add-equipamento-diagrama.dto';
 
 @Injectable()

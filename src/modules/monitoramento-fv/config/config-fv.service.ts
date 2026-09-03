@@ -1,5 +1,5 @@
 import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
-import { PrismaService, Prisma, ScopedUser } from '@aupus/api-shared';
+import { PrismaService, Prisma, ScopedUser } from '@/core';
 import { FusionSolarService } from '../integracoes/fusion-solar/fusion-solar.service';
 import { IsolarCloudService } from '../integracoes/isolarcloud/isolarcloud.service';
 import { DeyeCloudService } from '../integracoes/deye-cloud/deye-cloud.service';

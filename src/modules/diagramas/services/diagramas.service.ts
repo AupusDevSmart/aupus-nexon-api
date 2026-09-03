@@ -1,5 +1,5 @@
 import { Injectable, NotFoundException, BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
-import { PrismaService, PermissionScopeService, ScopedUser } from '@aupus/api-shared';
+import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
 import { CreateDiagramaDto } from '../dto/create-diagrama.dto';
 import { UpdateDiagramaDto } from '../dto/update-diagrama.dto';
 import { SaveLayoutDto } from '../dto/save-layout.dto';

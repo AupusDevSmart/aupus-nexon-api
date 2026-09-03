@@ -1,6 +1,6 @@
 import { Body, Controller, Delete, Get, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
-import { JwtAuthGuard, Permissions, PermissionScopeService, CurrentUser, ScopedUser } from '@aupus/api-shared';
+import { JwtAuthGuard, Permissions, PermissionScopeService, CurrentUser, ScopedUser } from '@/core';
 import { MonitoramentoSyncService } from './sync.service';
 import { MonitoramentoSyncHorarioService } from './sync-horario.service';
 import { FusionInverterFallbackService } from './fusion-inverter-fallback.service';

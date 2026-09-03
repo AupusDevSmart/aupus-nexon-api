@@ -1,5 +1,5 @@
 import { Body, Controller, Delete, ForbiddenException, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
-import { JwtAuthGuard, CurrentUser } from '@aupus/api-shared';
+import { JwtAuthGuard, CurrentUser } from '@/core';
 import { ComissionamentoService } from './comissionamento.service';
 
 /**

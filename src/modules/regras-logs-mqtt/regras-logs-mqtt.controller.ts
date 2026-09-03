@@ -10,7 +10,7 @@ import {
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
-import { CurrentUser } from '@aupus/api-shared';
+import { CurrentUser } from '@/core';
 import { RegrasLogsMqttService } from './regras-logs-mqtt.service';
 import { CreateRegraLogDto } from './dto/create-regra-log.dto';
 import { UpdateRegraLogDto } from './dto/update-regra-log.dto';

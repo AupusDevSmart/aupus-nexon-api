@@ -1,4 +1,4 @@
-import { PrismaService } from '@aupus/api-shared';
+import { PrismaService } from '@/core';
 
 /**
  * REGISTRO DE TIPOS DE NOTIFICAÇÃO (em código, padrão do commandRegistry).

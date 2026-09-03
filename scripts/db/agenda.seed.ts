@@ -1,4 +1,4 @@
-import { PrismaClient, TipoFeriado } from '@aupus/api-shared';
+import { PrismaClient, TipoFeriado } from '@/core';
 
 const prisma = new PrismaClient();
 

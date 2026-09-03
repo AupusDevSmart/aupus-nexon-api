@@ -1,5 +1,5 @@
 import { Controller, Get, Param, Query, Logger, Post, Put, Body } from '@nestjs/common';
-import { CurrentUser, PermissionScopeService } from '@aupus/api-shared';
+import { CurrentUser, PermissionScopeService } from '@/core';
 import { EquipamentosDadosService, EquipamentoAgregacaoConfig } from './equipamentos-dados.service';
 
 interface GraficoMultiplosBody {

@@ -1,5 +1,5 @@
 import { Module } from '@nestjs/common';
-import { PrismaModule } from '@aupus/api-shared';
+import { PrismaModule } from '@/core';
 import { IotCatalogController } from './iot-catalog.controller';
 import { IotCatalogService } from './iot-catalog.service';
 

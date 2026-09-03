@@ -1,6 +1,6 @@
 import { Body, Controller, Delete, Get, Put, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
-import { JwtAuthGuard, CurrentUser, ScopedUser } from '@aupus/api-shared';
+import { JwtAuthGuard, CurrentUser, ScopedUser } from '@/core';
 import { GeracaoManualService, LinhaManual } from './geracao-manual.service';
 
 /**

@@ -1,5 +1,5 @@
 import { Module } from '@nestjs/common';
-import { PrismaModule } from '@aupus/api-shared';
+import { PrismaModule } from '@/core';
 import { NotificacaoController } from './notificacao/notificacao.controller';
 import { NotificacaoService } from './notificacao/notificacao.service';
 import { WhatsappService } from './notificacao/whatsapp.service';

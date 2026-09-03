@@ -1,6 +1,6 @@
 import { Body, Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
-import { JwtAuthGuard, PermissionScopeService, CurrentUser, ScopedUser } from '@aupus/api-shared';
+import { JwtAuthGuard, PermissionScopeService, CurrentUser, ScopedUser } from '@/core';
 import { ReleEventosService } from './rele-eventos.service';
 
 /**

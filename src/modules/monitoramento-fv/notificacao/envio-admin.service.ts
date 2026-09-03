@@ -1,6 +1,6 @@
 import { ForbiddenException, Injectable, BadRequestException } from '@nestjs/common';
 import { randomBytes } from 'crypto';
-import { PrismaService, ScopedUser } from '@aupus/api-shared';
+import { PrismaService, ScopedUser } from '@/core';
 
 const CFG_ID = 'cfgdefault0000000000000000';
 const PAPEIS_ADMIN = ['super_admin', 'admin'];

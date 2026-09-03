@@ -1,5 +1,5 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { PrismaService } from '@aupus/api-shared';
+import { PrismaService } from '@/core';
 
 const INTERVALOS_VALIDOS = [1, 5, 15, 30] as const;
 const DEFAULT_INTERVALO_MIN = 15;

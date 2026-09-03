@@ -2,7 +2,7 @@
 import { Controller, Get } from '@nestjs/common';
 import { AppService } from './app.service';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
-import { Public } from '@aupus/api-shared';
+import { Public } from '@/core';
 import * as Sentry from '@sentry/nestjs';
 
 @ApiTags('Sistema')

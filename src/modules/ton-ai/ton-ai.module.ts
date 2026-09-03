@@ -1,5 +1,5 @@
 import { Module } from '@nestjs/common';
-import { PrismaModule } from '@aupus/api-shared';
+import { PrismaModule } from '@/core';
 
 import { TonAiController } from './ton-ai.controller';
 import { TonAiService } from './ton-ai.service';

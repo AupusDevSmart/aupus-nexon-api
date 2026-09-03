@@ -1,6 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { DiagramasService } from './diagramas.service';
-import { PermissionScopeService, PrismaService } from '@aupus/api-shared';
+import { PermissionScopeService, PrismaService } from '@/core';
 import { NotFoundException } from '@nestjs/common';
 
 describe('DiagramasService', () => {

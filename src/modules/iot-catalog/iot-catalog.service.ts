@@ -6,7 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import * as crypto from 'crypto';
-import { PrismaService } from '@aupus/api-shared';
+import { PrismaService } from '@/core';
 import { formatMappingIssues, validateMapeamento } from './mapping-validation';
 import { CreateIotDeviceModeloDto } from './dto/create-iot-device-modelo.dto';
 import { CreateIotDeviceTipoDto } from './dto/create-iot-device-tipo.dto';

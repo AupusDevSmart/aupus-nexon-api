@@ -1,5 +1,5 @@
 import { Injectable, Logger, NotFoundException, ForbiddenException } from '@nestjs/common';
-import { PrismaService, PermissionScopeService, ScopedUser } from '@aupus/api-shared';
+import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
 
 /**
  * Monta o PAYLOAD do boletim semanal (contrato de bdo_semanal/dados_exemplo.json) a

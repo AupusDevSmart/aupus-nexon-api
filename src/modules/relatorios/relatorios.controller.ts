@@ -1,6 +1,6 @@
 import { Body, Controller, ForbiddenException, Get, Post, Put, Query, Res, UseGuards } from '@nestjs/common';
 import type { Response } from 'express';
-import { JwtAuthGuard, CurrentUser } from '@aupus/api-shared';
+import { JwtAuthGuard, CurrentUser } from '@/core';
 import { RelatoriosService } from './relatorios.service';
 import { BoletimSemanalService } from './boletim-semanal.service';
 import { BoletimSemanalEnvioService, BoletimSemanalConfig } from './boletim-semanal-envio.service';

@@ -10,7 +10,7 @@
  */
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
-import { PrismaService } from '@aupus/api-shared';
+import { PrismaService } from '@/core';
 import { CalculoCustosService } from './calculo-custos.service';
 import { ClassificacaoHorariosService } from './classificacao-horarios.service';
 import { ConfiguracaoCustoService } from './configuracao-custo.service';

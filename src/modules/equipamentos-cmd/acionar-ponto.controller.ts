@@ -14,7 +14,7 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
-import { JwtAuthGuard, Permissions, CurrentUser } from '@aupus/api-shared';
+import { JwtAuthGuard, Permissions, CurrentUser } from '@/core';
 
 import { EquipamentosCmdService } from './equipamentos-cmd.service';
 import { AcionarPontoResultDto } from './dto/acionar-ponto-result.dto';

@@ -7,7 +7,7 @@ import {
   InternalServerErrorException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { PrismaService } from '@aupus/api-shared';
+import { PrismaService } from '@/core';
 import { MqttService } from '../../shared/mqtt/mqtt.service';
 import {
   TriggerOtaDto,

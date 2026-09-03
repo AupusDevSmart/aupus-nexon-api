@@ -1,5 +1,5 @@
 // prisma/seeds/anomalias.seed.ts
-import { PrismaClient } from '@aupus/api-shared';
+import { PrismaClient } from '@/core';
 
 const prisma = new PrismaClient();
 

@@ -1,6 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConexoesDiagramaService } from './conexoes-diagrama.service';
-import { PrismaService } from '@aupus/api-shared';
+import { PrismaService } from '@/core';
 import { NotFoundException, BadRequestException } from '@nestjs/common';
 
 // Enums do DTO

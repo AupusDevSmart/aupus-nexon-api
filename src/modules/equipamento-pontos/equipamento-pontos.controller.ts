@@ -17,7 +17,7 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
-import { JwtAuthGuard, Permissions, CurrentUser } from '@aupus/api-shared';
+import { JwtAuthGuard, Permissions, CurrentUser } from '@/core';
 
 import { EquipamentoPontosService } from './equipamento-pontos.service';
 import {

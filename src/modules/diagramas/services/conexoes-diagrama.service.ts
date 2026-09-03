@@ -1,5 +1,5 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
-import { PrismaService } from '@aupus/api-shared';
+import { PrismaService } from '@/core';
 import { CreateConexaoDto, CreateConexoesBulkDto } from '../dto/create-conexao.dto';
 
 @Injectable()

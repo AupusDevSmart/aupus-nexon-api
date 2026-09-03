@@ -1,5 +1,5 @@
 import { Body, Controller, ForbiddenException, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
-import { JwtAuthGuard, CurrentUser, PrismaService, PermissionScopeService } from '@aupus/api-shared';
+import { JwtAuthGuard, CurrentUser, PrismaService, PermissionScopeService } from '@/core';
 import { OcppService } from './ocpp.service';
 
 /**

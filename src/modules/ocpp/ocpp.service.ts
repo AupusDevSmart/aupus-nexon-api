@@ -1,6 +1,6 @@
 import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import { HttpAdapterHost } from '@nestjs/core';
-import { PrismaService } from '@aupus/api-shared';
+import { PrismaService } from '@/core';
 import { WebSocketServer, WebSocket } from 'ws';
 import { randomBytes } from 'crypto';
 

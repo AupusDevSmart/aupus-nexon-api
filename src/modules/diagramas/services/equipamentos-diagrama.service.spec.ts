@@ -1,6 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { EquipamentosDiagramaService } from './equipamentos-diagrama.service';
-import { PrismaService } from '@aupus/api-shared';
+import { PrismaService } from '@/core';
 import {
   NotFoundException,
   BadRequestException,

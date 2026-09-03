@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { PrismaService, PermissionScopeService, ScopedUser } from '@aupus/api-shared';
-import { Prisma } from '@aupus/api-shared';
+import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
+import { Prisma } from '@/core';
 import { CalculoCustosService } from '../equipamentos-dados/services/calculo-custos.service';
 import { detectarOverflowUint, ehPotenciaGlitch, CAP_POTENCIA_GLITCH_KW } from '../../shared/util/inverter-overflow';
 import { CATEGORIA_SINAL_PAIRS } from '../../shared/util/categoria-fluxo.backend';

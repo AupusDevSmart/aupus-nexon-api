@@ -33,7 +33,7 @@ import {
   CreateConexoesBulkDto,
 } from './dto/create-conexao.dto';
 import { SaveLayoutDto } from './dto/save-layout.dto';
-import { UserProprietarioId, CurrentUser } from '@aupus/api-shared';
+import { UserProprietarioId, CurrentUser } from '@/core';
 
 @ApiTags('Diagramas Sinópticos')
 // @ApiBearerAuth() // TODO: Descomentar quando implementar autenticação
