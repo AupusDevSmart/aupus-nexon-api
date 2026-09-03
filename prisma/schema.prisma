@@ -3414,3 +3414,73 @@ model ton_bo {
   @@index([ativo])
   @@map("ton_bo")
 }
+
+/// O portao da sincronizacao entre Service e NexOn.
+///
+/// Nada atravessa a fronteira sem uma linha aqui, criada por um humano. Sem esse
+/// portao, um cadastro novo vazaria para o outro produto sem ninguem decidir.
+///
+/// `versao` e um contador proprio, e NAO um espelho de `updated_at`: os models
+/// `plantas` e `usuarios` nao tem `@updatedAt` (as 9 plantas de dev estao com
+/// `updated_at` NULL) e as 4 tabelas sao `Timestamp(0)`. Comparar relogio para
+/// decidir quem venceu seria comparar nulo com nulo.
+///
+/// Empate de versao desempata por `origem`, que e igual nos dois lados — assim os
+/// dois nos chegam sozinhos a mesma conclusao, sem precisar conversar.
+model sincronizacao_vinculos {
+  id            BigInt    @id @default(autoincrement())
+  recurso       String    @db.VarChar(30)
+  registro_id   String    @db.VarChar(26)
+  versao        BigInt    @default(0)
+  origem        String    @db.VarChar(20)
+  hash_conteudo String?   @db.VarChar(64)
+  ativo         Boolean   @default(true)
+  vinculado_em  DateTime  @default(now()) @db.Timestamp(3)
+  vinculado_por String?   @db.VarChar(26)
+  atualizado_em DateTime  @default(now()) @db.Timestamp(3)
+
+  @@unique([recurso, registro_id], map: "sincronizacao_vinculos_recurso_registro_key")
+}
+
+/// A garantia de entrega.
+///
+/// A linha e gravada NA MESMA TRANSACAO da escrita do dado. Se o processo morrer
+/// entre salvar a planta e avisar o outro lado, o evento ja esta commitado e o
+/// worker entrega depois. Publicar por fora da transacao perde evento em queda,
+/// e perde calado.
+model sincronizacao_outbox {
+  id          BigInt    @id @default(autoincrement())
+  recurso     String    @db.VarChar(30)
+  registro_id String    @db.VarChar(26)
+  operacao    String    @db.VarChar(10)
+  versao      BigInt
+  payload     Json
+  criado_em   DateTime  @default(now()) @db.Timestamp(3)
+  tentativas  Int       @default(0)
+  proxima_em  DateTime  @default(now()) @db.Timestamp(3)
+  entregue_em DateTime? @db.Timestamp(3)
+  erro        String?
+
+  /// O indice real e PARCIAL (WHERE entregue_em IS NULL) e vive no SQL — o
+  /// Prisma nao expressa indice parcial. Sem ele a fila ja entregue, que cresce
+  /// para sempre, pesaria na busca do que falta entregar.
+  @@index([proxima_em, id], map: "sincronizacao_outbox_pendentes_idx")
+}
+
+/// Sem isto ninguem responde "por que o NexOn tem essa planta" nem "quem
+/// sobrescreveu minha edicao". Registra tambem o que foi IGNORADO por versao
+/// menor, que e o unico rastro que sobra de uma edicao perdida.
+model sincronizacao_auditoria {
+  id          BigInt    @id @default(autoincrement())
+  direcao     String    @db.VarChar(10)
+  recurso     String    @db.VarChar(30)
+  registro_id String    @db.VarChar(26)
+  versao      BigInt?
+  origem      String?   @db.VarChar(20)
+  resultado   String    @db.VarChar(24)
+  detalhe     String?
+  ator        String?   @db.VarChar(255)
+  criado_em   DateTime  @default(now()) @db.Timestamp(3)
+
+  @@index([recurso, registro_id, criado_em(sort: Desc)], map: "sincronizacao_auditoria_registro_idx")
+}
