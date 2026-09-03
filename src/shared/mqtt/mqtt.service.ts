@@ -391,7 +391,7 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     const diagTopic = `${topic}/diagnostics`;
     if (!this.subscriptions.has(diagTopic)) {
       this.subscriptions.set(diagTopic, []);
-      this.client?.subscribe(diagTopic, (err) => {
+      this.client?.subscribe(diagTopic, { qos: 1 }, (err) => {
         if (err) console.warn(`⚠️ [MQTT] Falha ao subscrever ${diagTopic}: ${err.message}`);
       });
     }
