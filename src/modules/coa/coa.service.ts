@@ -17,6 +17,10 @@ export interface DashboardData {
     totalGeradores: number;
     totalCargas: number;
     custoTotalHoje?: number; // ✅ NOVO: Custo total agregado do dia
+    cargaTotal?: number;     // Carga real = Geração + líquido dos PMs (3 situações do A966/medidor)
+    totalReativo?: number;   // Σ Q (kVAr) dos Power Meters
+    totalAparente?: number;  // S_T = √(P_T² + Q_T²) dos Power Meters
+    totalNaoComissionados?: number; // pontos monitorados ainda sem comissionamento (gate suave)
   };
   plantas: PlantaResumo[];
   alertas: Alerta[];
@@ -41,6 +45,8 @@ export interface UnidadeResumo {
   status: 'ONLINE' | 'OFFLINE' | 'ALERTA';
   trip?: boolean; // TRIP real (SOE não reconhecido) — vermelho no COA, distinto de OFFLINE (sem info)
   nuvem?: boolean; // sem TON ao vivo, mas com geração de NUVEM recente (cor própria, não é offline)
+  tonViva?: boolean; // TON dá sinal de vida no broker (liveness). OFFLINE+tonViva = device/Modbus (âmbar), não internet (cinza)
+  naoComissionados?: string[]; // pontos monitorados desta unidade ainda sem comissionamento (dado não validado)
   equipamentosOffline?: string[]; // nomes de equipamentos sem comunicação (pior-caso do status)
   ultimaLeitura: Date | null;
   coordenadas?: {
@@ -480,6 +486,7 @@ export class CoaService {
     const alertas: Alerta[] = [];
     let totalGeracao = 0;
     let totalConsumo = 0;
+    let totalReativo = 0;   // Σ Q (kVAr) dos PMs — card de Reativo
     let unidadesOnline = 0;
     let totalUnidades = 0;
     let totalGeradores = 0;
@@ -554,6 +561,47 @@ export class CoaService {
       this.logger.warn(`[COA] consulta de nuvem recente falhou: ${e instanceof Error ? e.message : e}`);
     }
 
+    // Unidades cuja TON DÁ SINAL DE VIDA no broker (last_seen fresco em
+    // iot_dispositivos_online), mesmo sem dado de equipamento chegando. Distingue
+    // "device/Modbus com problema" (TON viva → âmbar) de "sem sinal" (internet/energia
+    // → cinza). Match por prefixo: equipamento.topico_mqtt começa com a base da TON.
+    // `starts_with` (não LIKE) porque os tópicos contêm '_'. Janela 15 min (a TON
+    // carimba last_seen a cada telemetria — ver MqttService.touchLiveness).
+    const tonVivaUnidades = new Set<string>();
+    try {
+      const vivaRows = await this.prisma.$queryRaw<Array<{ unidade_id: string }>>`
+        SELECT DISTINCT TRIM(e.unidade_id) AS unidade_id
+        FROM equipamentos e
+        JOIN iot_dispositivos_online d
+          ON (TRIM(e.topico_mqtt) = TRIM(d.topico_mqtt)
+              OR starts_with(TRIM(e.topico_mqtt), TRIM(d.topico_mqtt) || '/'))
+        WHERE e.deleted_at IS NULL AND e.unidade_id IS NOT NULL
+          -- viva = online=true (touchLiveness liga em telemetria VIVA; LWT desliga)
+          -- E last_seen fresco. online=true sozinho fica preso; last_seen sozinho pega
+          -- o carimbo do LWT (que grava now() com online=false). Os dois juntos = confiável.
+          AND d.online = true
+          AND d.last_seen > now() - interval '15 minutes'
+      `;
+      for (const r of vivaRows) if (r?.unidade_id) tonVivaUnidades.add(String(r.unidade_id).trim());
+    } catch (e) {
+      this.logger.warn(`[COA] consulta de TON viva (liveness) falhou: ${e instanceof Error ? e.message : e}`);
+    }
+
+    // Pontos COMISSIONADOS (aceite registrado) — para sinalizar no COA quais equipamentos
+    // ainda NÃO passaram por comissionamento (dado não validado na instalação). Gate SUAVE:
+    // só sinaliza (não esconde do COA). Ver docs/IOT-NEXON-CONFIABILIDADE.md §3.2.
+    const comissionadosIds = new Set<string>();
+    try {
+      const cRows = await this.prisma.$queryRaw<Array<{ equipamento_id: string }>>`
+        SELECT TRIM(equipamento_id) AS equipamento_id FROM iot_comissionamento
+        WHERE status IN ('comissionado', 'comissionado_com_ressalva')
+      `;
+      for (const r of cRows) if (r?.equipamento_id) comissionadosIds.add(String(r.equipamento_id).trim());
+    } catch (e) {
+      this.logger.warn(`[COA] consulta de comissionamento falhou: ${e instanceof Error ? e.message : e}`);
+    }
+    let totalNaoComissionados = 0;
+
     for (const planta of plantas) {
       const unidadesPlanta = unidadesPorPlanta.get(planta.id) || [];
       const unidadesProcessadas: UnidadeResumo[] = [];
@@ -591,8 +639,17 @@ export class CoaService {
           // Extrair potência - tentar coluna primeiro, depois JSON
           let potencia = Number(leitura.potencia_ativa_kw) || 0;
 
+          // A966 (gateway SSU): a potência do card é o LÍQUIDO do medidor de entrada,
+          // importação − exportação (import +), derivado na ingestão em P_direto/P_rev
+          // (phf/phr). Sobrepõe o potencia_ativa_kw (que é geração líquida, sinal oposto).
+          const _a966 = leitura.dados as any;
+          const ehGatewayA966 = !!(_a966 && (_a966.P_direto !== undefined || _a966.P_rev !== undefined || _a966.phf !== undefined));
+          if (ehGatewayA966) {
+            potencia = (Number(_a966.P_direto) || 0) - (Number(_a966.P_rev) || 0);
+          }
+
           // Se potência não estiver na coluna, extrair do JSON (inversores e M-160)
-          if (potencia === 0 && leitura.dados) {
+          if (!ehGatewayA966 && potencia === 0 && leitura.dados) {
             try {
               const dados = leitura.dados as any;
               // Formato inversores: power.active_total (em W, converter para kW)
@@ -614,6 +671,17 @@ export class CoaService {
               // Ignorar erro de parsing
             }
           }
+
+          // Reativo (Q, kVAr) — só dos Power Meters (não inversores). M160 flat: Qt
+          // (var→kVAr); inversor: power.reactive_total; M160 legado: Qa/Qb/Qc.
+          let reativo = 0;
+          try {
+            const dr = leitura.dados as any;
+            if (dr?.Q_liquido !== undefined) reativo = Number(dr.Q_liquido);   // A966 (já em kVAr)
+            else if (dr?.Qt !== undefined) reativo = Number(dr.Qt) / 1000;
+            else if (dr?.power?.reactive_total !== undefined) reativo = Number(dr.power.reactive_total) / 1000;
+            else if (dr?.Dados) { const Qa = Number(dr.Dados.Qa) || 0, Qb = Number(dr.Dados.Qb) || 0, Qc = Number(dr.Dados.Qc) || 0; reativo = (Qa + Qb + Qc) / 1000; }
+          } catch (e) { /* ignore */ }
 
           // 🛑 Frame com overflow UINT do Modbus (mesmo detector da ingestao):
           // potencia absurda (>= 1 GW) inflava o card de usinas. Nao soma o glitch
@@ -648,6 +716,8 @@ export class CoaService {
             const dados = leitura.dados as any;
             if (dados?.Dados?.fp) {
               fatorPotencia = Number(dados.Dados.fp);
+            } else if (dados?.FP_calc !== undefined) {
+              fatorPotencia = Number(dados.FP_calc);   // A966: FP derivado (|P|/√(P²+Q²))
             }
           } catch (e) {
             // Ignorar erro de parsing
@@ -673,6 +743,7 @@ export class CoaService {
           } else {
             consumoPlanta += potencia;
             totalConsumo += potencia;
+            totalReativo += reativo;
             // Contar carga apenas uma vez por equipamento
             if (!equipamentosContados.has(leitura.equipamento_id)) {
               totalCargas++;
@@ -688,6 +759,13 @@ export class CoaService {
           if (!reportingIds.has(eq.id)) offlineNomes.push(eq.nome || 'Equipamento');
         }
         const offlineUnicos = Array.from(new Set(offlineNomes));
+
+        // Pontos esperados (mqtt_habilitado + reportando) que ainda NÃO foram comissionados.
+        const naoComissionadosNomes = esperados
+          .filter((eq) => !comissionadosIds.has(eq.id))
+          .map((eq) => eq.nome || 'Equipamento');
+        const naoComissionadosUnicos = Array.from(new Set(naoComissionadosNomes));
+        totalNaoComissionados += naoComissionadosUnicos.length;
 
         // Status pior-caso: verde só quando NADA está off.
         let status: 'ONLINE' | 'OFFLINE' | 'ALERTA';
@@ -724,6 +802,12 @@ export class CoaService {
           status,
           trip: tripUnidades.has(unidade.id.trim()),
           nuvem: status === 'OFFLINE' && cloudRecentUnidades.has(unidade.id.trim()),
+          // TON viva no broker: dado fresco chegando OU liveness fresco (birth/telemetria
+          // recente). Usado pelo COA p/ pintar OFFLINE+tonViva de âmbar (device/Modbus,
+          // não internet) em vez de cinza. Ver docs/IOT-NEXON-CONFIABILIDADE.md.
+          tonViva: freshCount > 0 || tonVivaUnidades.has(unidade.id.trim()),
+          // Pontos monitorados desta unidade ainda sem comissionamento (dado não validado).
+          naoComissionados: naoComissionadosUnicos.length > 0 ? naoComissionadosUnicos : undefined,
           equipamentosOffline: offlineUnicos.length > 0 ? offlineUnicos : undefined,
           ultimaLeitura,
           coordenadas: unidade.latitude && unidade.longitude ? {
@@ -784,6 +868,12 @@ export class CoaService {
         totalGeradores,
         totalCargas,
         custoTotalHoje: custosPorUnidade.size > 0 ? Math.round(custoTotalHoje * 100) / 100 : undefined,
+        // Carga real (3 situações): Geração + líquido dos medidores (import +, export −).
+        cargaTotal: Math.round((totalGeracao + totalConsumo) * 100) / 100,
+        totalReativo: Math.round(totalReativo * 100) / 100,
+        // Aparente total dos PMs: S_T = √(P_T² + Q_T²), P_T = Σ PM ativo, Q_T = Σ PM reativo.
+        totalAparente: Math.round(Math.sqrt(totalConsumo * totalConsumo + totalReativo * totalReativo) * 100) / 100,
+        totalNaoComissionados, // pontos monitorados ainda sem comissionamento (gate suave)
       },
       plantas: plantasProcessadas,
       alertas: alertas.slice(0, 10), // Limitar a 10 alertas mais recentes

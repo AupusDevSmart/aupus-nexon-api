@@ -218,12 +218,14 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       });
     });
 
-    this.client.on('message', (topic, payload) => {
+    this.client.on('message', (topic, payload, packet?: any) => {
       // 🔍 LOG TEMPORÁRIO: Logar TODAS as mensagens recebidas
       if (this.logLevel === 'verbose') {
         console.log(`📥 [MQTT] Mensagem recebida | Tópico: ${topic} | Tamanho: ${payload.length} bytes`);
       }
-      this.handleMessage(topic, payload);
+      // packet.retain=true → mensagem retida reentregue na (re)conexão (dado ANTIGO,
+      // não sinal de vida). Passa a flag adiante p/ o liveness não carimbar retained.
+      this.handleMessage(topic, payload, !!packet?.retain);
     });
 
     this.client.on('error', (error) => {
@@ -381,6 +383,21 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     const statusEquipamentos = this.subscriptions.get(statusTopic)!;
     if (!statusEquipamentos.includes(equipId)) {
       statusEquipamentos.push(equipId);
+    }
+
+    // 2b) Subscribe ao <base>/diagnostics — o firmware publica a cada 60s runtime stats
+    // ricos (modbus_ok/err, wifi_rssi, uptime, silence_sec, reset_reason...). Ingeridos em
+    // iot_dispositivos_online → COA/diagnóstico e liveness (TON viva mesmo sem telemetria).
+    const diagTopic = `${topic}/diagnostics`;
+    if (!this.subscriptions.has(diagTopic)) {
+      this.subscriptions.set(diagTopic, []);
+      this.client?.subscribe(diagTopic, (err) => {
+        if (err) console.warn(`⚠️ [MQTT] Falha ao subscrever ${diagTopic}: ${err.message}`);
+      });
+    }
+    const diagEquipamentos = this.subscriptions.get(diagTopic)!;
+    if (!diagEquipamentos.includes(equipId)) {
+      diagEquipamentos.push(equipId);
     }
 
     // 3) Subscribe ao tópico de ack de comandos: <base>/cmd/ack
@@ -660,7 +677,7 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
    *   - `<topic>/status` → processStatusAnnounce (auto-discovery de MAC)
    *   - `<topic>` exato  → processarDadosEquipamento (telemetria, fluxo legado)
    */
-  private async handleMessage(topic: string, payload: Buffer) {
+  private async handleMessage(topic: string, payload: Buffer, retained = false) {
     try {
       // Payload pode estar vazio (broker limpando retained); ignorar nesse caso.
       if (!payload || payload.length === 0) return;
@@ -697,6 +714,18 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
         return;
       }
 
+      // Sinal de vida da TON: QUALQUER telemetria carimba last_seen da base
+      // correspondente em iot_dispositivos_online. Antes só o birth `/status`
+      // carimbava → flag `online` ficava presa e o COA não distinguia "TON viva,
+      // equipamento mudo" (device/Modbus) de "sem sinal" (internet/energia).
+      // O `/status` continua a cargo do processStatusAnnounce/markDispositivoOffline
+      // (birth online=true / LWT online=false) — não carimbar aqui p/ não mascarar o LWT.
+      // `retained` = dado antigo reentregue na reconexão → NÃO é sinal de vida.
+      // /status e /diagnostics carimbam liveness pelo seu próprio handler (upsert).
+      if (!retained && !topic.endsWith('/status') && !topic.endsWith('/diagnostics')) {
+        this.touchLiveness(topic);
+      }
+
       // SOE: evento de relé (já carimbado na fonte). Append-only.
       if (topic.endsWith('/evt')) {
         for (const equipamentoId of equipamentoIds) {
@@ -724,6 +753,15 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       if (topic.endsWith('/status')) {
         for (const equipamentoId of equipamentoIds) {
           await this.processStatusAnnounce(equipamentoId, dados);
+        }
+        return;
+      }
+
+      // Diagnóstico periódico do firmware (<base>/diagnostics, ~60s): runtime stats ricos
+      // → iot_dispositivos_online. Também é sinal de vida (TON viva mesmo sem telemetria).
+      if (topic.endsWith('/diagnostics')) {
+        for (const equipamentoId of equipamentoIds) {
+          await this.processDiagnostics(equipamentoId, dados);
         }
         return;
       }
@@ -953,6 +991,30 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
   }
 
   /**
+   * Ingestão do diagnóstico periódico (`<base>/diagnostics`, ~60s). Reusa
+   * upsertDispositivoOnline — os campos batem 1:1 (wifi_rssi/free_heap/uptime_sec/
+   * modbus_ok/modbus_err/mqtt_pub/sd_writes). Marca online=true + last_seen (sinal de
+   * vida: TON viva mesmo quando não há telemetria). NÃO mexe no MAC (isso é do /status).
+   */
+  private async processDiagnostics(
+    equipamentoId: string,
+    dados: StatusAnnouncePayload,
+  ): Promise<void> {
+    try {
+      const equipamento = await this.prisma.equipamentos.findUnique({
+        where: { id: equipamentoId },
+        select: { id: true, nome: true, mac_address: true, topico_mqtt: true },
+      });
+      if (!equipamento) return;
+      const macRaw = typeof dados.mac === 'string' ? dados.mac.trim().toUpperCase() : '';
+      const isValidMac = /^([0-9A-F]{2}:){5}[0-9A-F]{2}$/.test(macRaw);
+      await this.upsertDispositivoOnline(equipamento, dados, isValidMac ? macRaw : null);
+    } catch (error) {
+      console.error(`❌ Erro processando diagnostics de ${equipamentoId}:`, error);
+    }
+  }
+
+  /**
    * Espelha o announce em iot_dispositivos_online por topico_mqtt UNIQUE.
    * Chave de upsert eh o topico (cada TON em campo tem topico unico).
    *
@@ -1041,6 +1103,36 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
         `❌ [MQTT] Falha upsert iot_dispositivos_online para topico ${topico}:`,
         e,
       );
+    }
+  }
+
+  /** Throttle do carimbo de liveness: no máx. 1 update / 30s por tópico. */
+  private readonly _livenessThrottle = new Map<string, number>();
+
+  /**
+   * Carimba `last_seen=now(), online=true` na TON cuja BASE (`topico_mqtt`) é o
+   * tópico exato OU prefixo (base + '/') do tópico da mensagem. Torna o "sinal de
+   * vida" confiável mesmo quando a TON publica só de outra unidade que ela serve.
+   * Best-effort (fire-and-forget) + throttle p/ não martelar o banco. Usa
+   * `starts_with` (não LIKE) porque os tópicos contêm '_' (coringa do LIKE).
+   */
+  private touchLiveness(topic: string): void {
+    try {
+      const now = Date.now();
+      const last = this._livenessThrottle.get(topic) || 0;
+      if (now - last < 30_000) return;
+      this._livenessThrottle.set(topic, now);
+      // Poda simples do mapa (evita crescer indefinidamente com tópicos raros).
+      if (this._livenessThrottle.size > 5000) this._livenessThrottle.clear();
+      void this.prisma.$executeRaw`
+        UPDATE iot_dispositivos_online
+        SET last_seen = now(), online = true
+        WHERE topico_mqtt = ${topic} OR starts_with(${topic}, topico_mqtt || '/')
+      `.catch((e) =>
+        console.error(`❌ [MQTT] touchLiveness falhou (${topic}):`, e?.message || e),
+      );
+    } catch {
+      /* liveness é best-effort — nunca deve quebrar o handler de mensagem */
     }
   }
 
@@ -1495,7 +1587,7 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     // subscribeTopic a partir do primário) não podem entrar aqui: se entrarem, o
     // reconcile os vê como primário "não desejado" e os desinscreve — foi o que
     // acontecia com /inputs e /evt (a ingestão parava após o 1º reconcile).
-    const DERIVADOS = ['/status', '/cmd/ack', '/inputs', '/evt'];
+    const DERIVADOS = ['/status', '/diagnostics', '/cmd/ack', '/inputs', '/evt'];
     const currentMap = new Map<string, Set<string>>();
     for (const [topic, equipIds] of this.subscriptions.entries()) {
       if (DERIVADOS.some((suf) => topic.endsWith(suf))) continue;
@@ -1765,6 +1857,27 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     }
     if (ehDumpPosBoot) {
       dadosProcessados._aupus_post_boot_dump = true;
+    }
+
+    // P_direto / P_rev separados (importação / exportação) pro COA (carga = geração +
+    // líquido do medidor). phf=forward (importada), phr=reverse (exportada); phf/phr já
+    // são pulsos do bucket → potência média (kW) = pulsos × KD / horas. Não altera o
+    // potencia_ativa_kw (net geração, usado no agregado de demanda) — só ADICIONA no JSON.
+    if (!ignorarParaAgregado) {
+      const _fpul = KD_A966_SSU / BUCKET_HORAS; // pulso do bucket → kW / kVAr
+      const _pDir = Number(phf) * _fpul;   // importada (kW)
+      const _pRev = Number(phr) * _fpul;   // exportada (kW)
+      // Reativo (kVAr): 4 quadrantes — indutivo(+) qhfi/qhri, capacitivo(−) qhfc/qhrc.
+      // Mesma KD do ativo (pulso→kVArh) — assumido; ajustar se o A966 usar constante própria.
+      const _qInd = (Number(payload?.qhfi ?? 0) + Number(payload?.qhri ?? 0));
+      const _qCap = (Number(payload?.qhfc ?? 0) + Number(payload?.qhrc ?? 0));
+      const _qLiq = (_qInd - _qCap) * _fpul;   // reativo líquido (indutivo +)
+      const _pNet = _pDir - _pRev;             // ativo líquido (import +)
+      const _sMag = Math.sqrt(_pNet * _pNet + _qLiq * _qLiq);
+      dadosProcessados.P_direto = Math.round(_pDir * 1000) / 1000;
+      dadosProcessados.P_rev = Math.round(_pRev * 1000) / 1000;
+      dadosProcessados.Q_liquido = Math.round(_qLiq * 1000) / 1000;   // kVAr (indutivo +)
+      dadosProcessados.FP_calc = _sMag > 0.001 ? Math.round((Math.abs(_pNet) / _sMag) * 1000) / 1000 : 1;
     }
 
     if (mqttMode === 'development') {

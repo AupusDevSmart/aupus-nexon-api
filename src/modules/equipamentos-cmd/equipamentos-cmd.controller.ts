@@ -19,6 +19,7 @@ import { JwtAuthGuard, Permissions, CurrentUser } from '@/core';
 import { EquipamentosCmdService } from './equipamentos-cmd.service';
 import { SendCommandDto } from './dto/send-command.dto';
 import { CommandResultDto } from './dto/command-result.dto';
+import { ConfigurarWifiDto } from './dto/configurar-wifi.dto';
 
 /**
  * Comandos MQTT para equipamentos (TONs IoT, dispositivos com firmware Aupus).
@@ -68,5 +69,30 @@ export class EquipamentosCmdController {
     @CurrentUser() user?: any,
   ): Promise<CommandResultDto> {
     return this.cmdService.sendCommand(id, dto, user);
+  }
+
+  @Post('wifi')
+  @HttpCode(HttpStatus.OK)
+  @Permissions('equipamentos.comandar')
+  @ApiOperation({
+    summary: 'Configura redes WiFi de um TON em runtime (sem reflash)',
+    description:
+      'Publica em <topico_mqtt>/cmd/wifi (fire-and-forget, nao retido) para o ' +
+      'firmware multi-WiFi adicionar/remover/listar redes no NVS (ate 4). O TON ' +
+      'precisa estar ONLINE quando o comando chega — use para pre-cadastrar a rede ' +
+      'nova A DISTANCIA antes de uma troca de WiFi. Nao aguarda ack.',
+  })
+  @ApiParam({ name: 'id', description: 'ID do equipamento (CUID/Char(26))' })
+  @ApiResponse({ status: 200, description: 'Comando WiFi publicado' })
+  @ApiResponse({ status: 400, description: 'Equipamento sem mqtt/topico, ou ssid ausente' })
+  @ApiResponse({ status: 403, description: 'Sem permission equipamentos.comandar' })
+  @ApiResponse({ status: 404, description: 'Equipamento nao encontrado' })
+  @ApiResponse({ status: 503, description: 'Broker MQTT desconectado' })
+  async configurarWifi(
+    @Param('id') id: string,
+    @Body() dto: ConfigurarWifiDto,
+    @CurrentUser() user?: any,
+  ): Promise<{ ok: boolean; topico: string; action: string; ssid?: string }> {
+    return this.cmdService.configurarWifi(id, dto.action, dto.ssid, dto.pass, user);
   }
 }

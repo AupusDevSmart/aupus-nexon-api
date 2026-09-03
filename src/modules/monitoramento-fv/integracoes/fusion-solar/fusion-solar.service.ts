@@ -31,6 +31,29 @@ export interface FusionDailyKpi {
   inverterPowerKwh: number; // geracao diaria em kWh (dataItemMap.inverter_power)
 }
 
+// Inversor (device) de uma planta — via getDevList (devTypeId=1 = string inverter).
+export interface FusionInverter {
+  devId: string;      // id numerico Huawei (usado no getDevRealKpi)
+  esn: string | null; // esnCode, ex: "ES2320059162"
+  name: string;       // devName, ex: "Inversor_1-3"
+  devTypeId: number;  // 1
+  model: string | null;
+}
+
+// Telemetria em tempo real de UM inversor — via getDevRealKpi.dataItemMap.
+export interface FusionInverterKpi {
+  devId: string;
+  sn: string | null;
+  activePowerKw: number | null;     // active_power (kW)
+  reactivePowerKvar: number | null; // reactive_power (kVar)
+  powerFactor: number | null;       // power_factor
+  frequencyHz: number | null;       // elec_freq (Hz)
+  temperatureC: number | null;      // temperature (°C interno)
+  dayEnergyKwh: number | null;      // day_cap (kWh do dia)
+  totalEnergyKwh: number | null;    // total_cap (kWh acumulado)
+  runState: number | null;          // run_state (1 = conectado à rede)
+}
+
 @Injectable()
 export class FusionSolarService {
   private readonly logger = new Logger(FusionSolarService.name);
@@ -155,5 +178,56 @@ export class FusionSolarService {
         return { date: iso, inverterPowerKwh: kwh };
       })
       .filter((x: FusionDailyKpi | null): x is FusionDailyKpi => x !== null);
+  }
+
+  private static num(v: unknown): number | null {
+    if (v === null || v === undefined || v === '') return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  /**
+   * Lista os inversores (string inverters, devTypeId=1) de uma planta via getDevList.
+   * Ignora medidores/EMI e outros devTypeId. `devId` é a chave do getDevRealKpi.
+   */
+  async listInverters(plantCode: string): Promise<FusionInverter[]> {
+    const body = await this.post<any>('/thirdData/getDevList', { stationCodes: plantCode });
+    return (body.data ?? [])
+      .filter((d: any) => Number(d.devTypeId) === 1)
+      .map((d: any) => ({
+        devId: String(d.id),
+        esn: d.esnCode ?? null,
+        name: d.devName ?? '',
+        devTypeId: Number(d.devTypeId),
+        model: d.invType ?? d.model ?? null,
+      }));
+  }
+
+  /**
+   * Telemetria em tempo real de N inversores (mesmo devTypeId) via getDevRealKpi.
+   * Uma chamada cobre vários devIds (vírgula) — barato p/ o limite Huawei.
+   */
+  async getInvertersRealKpi(devIds: string[], devTypeId = 1): Promise<FusionInverterKpi[]> {
+    if (!devIds.length) return [];
+    const body = await this.post<any>('/thirdData/getDevRealKpi', {
+      devIds: devIds.join(','),
+      devTypeId,
+    });
+    const N = FusionSolarService.num;
+    return (body.data ?? []).map((it: any) => {
+      const m = it.dataItemMap ?? {};
+      return {
+        devId: String(it.devId),
+        sn: it.sn ?? null,
+        activePowerKw: N(m.active_power),
+        reactivePowerKvar: N(m.reactive_power),
+        powerFactor: N(m.power_factor),
+        frequencyHz: N(m.elec_freq),
+        temperatureC: N(m.temperature),
+        dayEnergyKwh: N(m.day_cap),
+        totalEnergyKwh: N(m.total_cap),
+        runState: N(m.run_state),
+      };
+    });
   }
 }
