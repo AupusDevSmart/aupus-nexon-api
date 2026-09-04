@@ -4,6 +4,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { comoReplicacao } from './outbox.service';
 import { DEPENDENCIAS, Recurso, filtrarParaEsteBanco } from './recursos';
 import { aoReceber } from './transformacoes';
+import { resolverCadeia } from './cadeia-de-dependencias';
 
 export interface EventoRecebido {
   recurso: Recurso;
@@ -174,6 +175,18 @@ export class SincronizacaoService {
         ator: e.ator,
       },
     });
+  }
+
+  /**
+   * O que atravessa junto com este registro, para a tela confirmar antes.
+   *
+   * So LE — nao vincula nada. Quem vincula e o `OutboxService`, depois do
+   * usuario confirmar, e ele resolve a cadeia de novo por conta propria: entre
+   * a previa e o clique alguem pode ter compartilhado a planta por outro
+   * caminho, e a lista mostrada ficaria maior do que a realidade.
+   */
+  async previaDaCadeia(recurso: Recurso, registroId: string) {
+    return resolverCadeia(this.prisma, recurso, registroId);
   }
 
   /** Estado de sincronizacao de varios registros, para a tela mostrar em lote. */

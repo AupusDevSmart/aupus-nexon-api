@@ -106,6 +106,20 @@ export class VinculosController {
     return { ok: await this.comRecurso(recurso, r => this.outbox.desvincular(r, id)) };
   }
 
+  @Get(':recurso/:id/previa')
+  @Permissions('sincronizacao.gerenciar')
+  @ApiOperation({
+    summary: 'O que vai atravessar junto com este registro',
+    description:
+      'Sobe a hierarquia (equipamento → instalação → planta → proprietário) e devolve ' +
+      'o que ainda NÃO está compartilhado. A tela usa isto para pedir consentimento ' +
+      'sobre o conjunto inteiro antes de qualquer coisa sair — cascatear em silêncio ' +
+      'copiaria um usuário para o outro produto sem ninguém ver.',
+  })
+  async previa(@Param('recurso') recurso: string, @Param('id') id: string) {
+    return this.comRecurso(recurso, r => this.service.previaDaCadeia(r, id));
+  }
+
   @Get(':recurso')
   @ApiOperation({
     summary: 'Estado de sincronização de vários registros',

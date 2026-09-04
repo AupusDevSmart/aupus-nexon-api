@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { Recurso } from './recursos';
+import { resolverCadeia } from './cadeia-de-dependencias';
 
 type Tx = any;
 
@@ -38,30 +39,58 @@ export class OutboxService {
     if (!id) throw new BadRequestException('id vazio');
 
     await this.prisma.$transaction(async tx => {
-      const existe = await (tx as any)[recurso].findUnique({ where: { id }, select: { id: true } });
-      if (!existe) throw new BadRequestException(`${recurso} ${id} não existe`);
+      // A cadeia inteira numa transacao so: se vincular a planta e falhar no
+      // equipamento, metade compartilhada seria pior do que nada — o outro lado
+      // ficaria com um cadastro que ninguem pediu e sem o que motivou o pedido.
+      const cadeia = await resolverCadeia(tx, recurso, id);
 
-      const vinculo = await tx.sincronizacao_vinculos.upsert({
-        where: { recurso_registro_id: { recurso, registro_id: id } },
-        create: { recurso, registro_id: id, origem: await this.origem(tx), vinculado_por: porQuem?.trim(), ativo: true },
-        // Revincular NAO zera a versao. Se o outro lado ainda tem memoria deste
-        // registro, uma versao menor que a de la seria descartada por versao e o
-        // vinculo pareceria quebrado sem motivo visivel.
-        update: { ativo: true, vinculado_por: porQuem?.trim() },
-      });
+      // Do mais basico ao mais especifico. Ordem trocada faz o receptor recusar
+      // por dependencia ausente e reprocessar por backoff — funciona, mas gasta
+      // um ciclo a toa e suja a auditoria com uma recusa evitavel.
+      for (const elo of cadeia.faltando) {
+        await this.vincularUm(tx, elo.recurso, elo.registro_id, porQuem);
+      }
+      await this.vincularUm(tx, recurso, id, porQuem);
 
-      const versao = vinculo.versao + 1n;
-      await tx.sincronizacao_vinculos.update({ where: { id: vinculo.id }, data: { versao } });
+      if (cadeia.faltando.length) {
+        this.logger.log(
+          `vinculado: ${recurso}/${id} + ${cadeia.faltando.length} dependencia(s) — ` +
+          cadeia.faltando.map(e => `${e.recurso}/${e.registro_id}`).join(', '),
+        );
+      } else {
+        this.logger.log(`vinculado: ${recurso}/${id}`);
+      }
+    });
+  }
 
-      await tx.sincronizacao_outbox.create({
-        // Payload vazio de proposito: quem monta e o worker, na hora de enviar,
-        // lendo a linha atual. Assim a lista do que nunca viaja fica num lugar
-        // so e o envio leva o estado de agora, nao uma foto do clique.
-        data: { recurso, registro_id: id, operacao: 'upsert', versao, payload: {} },
-      });
+  /** Um elo da cadeia. Sempre dentro da transacao de `vincular`. */
+  private async vincularUm(
+    tx: Tx,
+    recurso: Recurso,
+    id: string,
+    porQuem?: string,
+  ): Promise<void> {
+    const existe = await (tx as any)[recurso].findUnique({ where: { id }, select: { id: true } });
+    if (!existe) throw new BadRequestException(`${recurso} ${id} não existe`);
+
+    const vinculo = await tx.sincronizacao_vinculos.upsert({
+      where: { recurso_registro_id: { recurso, registro_id: id } },
+      create: { recurso, registro_id: id, origem: await this.origem(tx), vinculado_por: porQuem?.trim(), ativo: true },
+      // Revincular NAO zera a versao. Se o outro lado ainda tem memoria deste
+      // registro, uma versao menor que a de la seria descartada por versao e o
+      // vinculo pareceria quebrado sem motivo visivel.
+      update: { ativo: true, vinculado_por: porQuem?.trim() },
     });
 
-    this.logger.log(`vinculado: ${recurso}/${id}`);
+    const versao = vinculo.versao + 1n;
+    await tx.sincronizacao_vinculos.update({ where: { id: vinculo.id }, data: { versao } });
+
+    await tx.sincronizacao_outbox.create({
+      // Payload vazio de proposito: quem monta e o worker, na hora de enviar,
+      // lendo a linha atual. Assim a lista do que nunca viaja fica num lugar
+      // so e o envio leva o estado de agora, nao uma foto do clique.
+      data: { recurso, registro_id: id, operacao: 'upsert', versao, payload: {} },
+    });
   }
 
   /**
