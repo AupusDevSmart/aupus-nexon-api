@@ -44,6 +44,58 @@ export class IotCatalogService {
   constructor(private readonly prisma: PrismaService) {}
 
   /**
+   * Agrupamento da paleta do diagrama IoT (labels + ordem). Referencia os
+   * palette_key. Estatico por ora (UI-only); pode migrar pro DB numa fase futura.
+   */
+  private static readonly PALETTE_CATEGORIES = [
+    { id: 'controller', label: 'Controladores TON', types: ['ton1', 'ton2', 'ton3', 'ton4', 'ton1v2', 'ton2v2', 'ton3v2', 'ton4v2'] },
+    { id: 'infra', label: 'Infraestrutura', types: ['wifi_router', 'mqtt_broker', 'meter_gateway', 'inverter_datalogger', 'conversor'] },
+    { id: 'device', label: 'Dispositivos', types: ['inversor', 'power_meter', 'medidor_comum', 'rele_protecao'] },
+    { id: 'irrigacao', label: 'Irrigação / Bomba', types: ['pivo', 'bomba'] },
+    { id: 'carregador', label: 'Carregador Elétrico', types: ['carregador'] },
+  ];
+
+  /**
+   * Paleta do diagrama IoT reconstruida do DB (tipos_equipamentos.propriedades_schema,
+   * populado da antiga iot-diagram.v2.js). Devolve o equivalente de COMPONENT_TYPES +
+   * TON_CAPS + CATEGORIES pro editor consumir (Fase 2). Serve os tipos com disp_iot=true.
+   */
+  async getPalette(): Promise<{
+    component_types: Record<string, any>;
+    ton_caps: Record<string, any>;
+    categories: typeof IotCatalogService.PALETTE_CATEGORIES;
+  }> {
+    // $queryRaw: as colunas disp_iot/device_tipo_id foram criadas por migração SQL
+    // (fora do schema Prisma) — raw evita regenerar o client.
+    const tipos = await this.prisma.$queryRaw<
+      Array<{ nome: string; codigo: string; propriedades_schema: any; device_tipo_id: string | null }>
+    >`SELECT nome, codigo, propriedades_schema, device_tipo_id
+        FROM tipos_equipamentos
+        WHERE disp_iot = true AND propriedades_schema IS NOT NULL`;
+    const component_types: Record<string, any> = {};
+    const ton_caps: Record<string, any> = {};
+    for (const t of tipos) {
+      const ps = typeof t.propriedades_schema === 'string'
+        ? JSON.parse(t.propriedades_schema)
+        : (t.propriedades_schema as any);
+      if (!ps || !ps.palette_key) continue;
+      if (ps.palette_key === 'ton' && ps.variantes) {
+        // TON: expande as 8 variantes de volta pras chaves ton1..ton4v2.
+        // Spread completo (menos `caps`) — preserva antennaIcon/relayIcon/has_lora/etc.
+        for (const [vk, v] of Object.entries<any>(ps.variantes)) {
+          const { caps, ...rest } = v;
+          component_types[vk] = { category: 'controller', generates_firmware: true, ...rest };
+          if (caps) ton_caps[vk] = caps;
+        }
+      } else {
+        const { palette_key, ...rest } = ps;
+        component_types[palette_key] = rest;
+      }
+    }
+    return { component_types, ton_caps, categories: IotCatalogService.PALETTE_CATEGORIES };
+  }
+
+  /**
    * Carrega o catalogo inteiro do banco e devolve em formato estruturado.
    * Esta eh a base pro endpoint REST JSON e tambem pro JS de compatibilidade.
    *

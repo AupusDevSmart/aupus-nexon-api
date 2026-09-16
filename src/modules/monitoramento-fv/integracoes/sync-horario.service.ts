@@ -119,6 +119,31 @@ export class MonitoramentoSyncHorarioService {
    * último snapshot do MESMO dia. Se o acumulado caiu (virada de dia/reset), delta = acumulado.
    */
   private async upsertSnapshot(unidadeId: string, hora: string, acumulado: number): Promise<void> {
+    // CARRYOVER DA NUVEM: até o provedor virar o dia, o `today_energy` ainda é o total de
+    // ONTEM. Visto na virada (00:00 do CF = 1690,9 kWh = total de 09/09) e, em algumas
+    // plantas, persistindo até 05h. Gravado como "hoje", punha o dia de ontem inteiro numa
+    // hora da madrugada e inflava "energia hoje". Duas regras:
+    //   1) madrugada (00h–05h): sem sol ⇒ qualquer acumulado é resíduo de ontem → 0;
+    //   2) manhã (até 11h): leitura IGUAL ao fechamento de ontem ⇒ ainda é ontem → 0.
+    // Sem a regra 2, zerar só a madrugada empurraria o delta de ontem para a 1ª hora
+    // em que o contador ainda não tivesse virado.
+    const hh = Number(/(\d{1,2}):\d{2}/.exec(hora)?.[1] ?? NaN);
+    if (!Number.isNaN(hh) && hh <= 5) {
+      acumulado = 0;
+    } else if (!Number.isNaN(hh) && hh < 12 && acumulado > 0) {
+      const ontem = await this.prisma.$queryRaw<Array<{ acum: number | null }>>`
+        SELECT kwh_acumulado::float8 AS acum
+        FROM geracao_horaria_plantas
+        WHERE TRIM(unidade_id) = ${unidadeId}
+          AND hora::date = ${hora}::timestamp::date - 1
+        ORDER BY hora DESC
+        LIMIT 1
+      `;
+      const fechamento = ontem[0]?.acum;
+      if (fechamento != null && fechamento > 0 && Math.abs(acumulado - fechamento) <= Math.max(0.05, fechamento * 0.001)) {
+        acumulado = 0;
+      }
+    }
     const prev = await this.prisma.$queryRaw<Array<{ kwh_acumulado: number | null }>>`
       SELECT kwh_acumulado::float8 AS kwh_acumulado
       FROM geracao_horaria_plantas

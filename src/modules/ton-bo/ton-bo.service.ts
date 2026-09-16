@@ -6,6 +6,7 @@ import {
   ForbiddenException,
   Logger,
 } from '@nestjs/common';
+import { VinculosMirrorService } from '../iot-vinculos/vinculos-mirror.service';
 import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
 import { tonBoMax } from '../../shared/util/ton-caps';
 import { Prisma } from '@/core';
@@ -39,6 +40,7 @@ export class TonBoService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly scopeService: PermissionScopeService,
+    private readonly mirror: VinculosMirrorService,
   ) {}
 
   /**
@@ -114,6 +116,7 @@ export class TonBoService {
           },
         },
       });
+      void this.mirror.resyncTonCanais(tId, 'ton_bo');
       return this.toResponse(row);
     } catch (err) {
       if (this.isUniqueViolation(err)) {
@@ -160,6 +163,7 @@ export class TonBoService {
           },
         },
       });
+      void this.mirror.resyncTonCanais(tId, 'ton_bo');
       return this.toResponse(row);
     } catch (err) {
       if (this.isUniqueViolation(err)) {
@@ -181,6 +185,7 @@ export class TonBoService {
       where: { id: bId },
       data: { deleted_at: new Date() },
     });
+    void this.mirror.resyncTonCanais(tId, 'ton_bo');
   }
 
   // ============================================================================
@@ -265,7 +270,9 @@ export class TonBoService {
     id: row.id,
     ton_id: row.ton_id,
     bo_numero: row.bo_numero,
-    equipamento_ponto_id: row.equipamento_ponto_id,
+    // char(26) vem padded do Prisma → TRIMAR: o frontend compara com o id do ponto
+    // (que outros endpoints devolvem trimado); sem isso "26 !== 25" e o vínculo some da tela.
+    equipamento_ponto_id: row.equipamento_ponto_id?.trim() ?? null,
     pulso_ms: row.pulso_ms,
     ativo: row.ativo,
     created_at: row.created_at,

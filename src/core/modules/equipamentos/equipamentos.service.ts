@@ -128,12 +128,34 @@ export class EquipamentosService {
     return pai?.unidade_id?.trim() ?? null;
   }
 
+  /**
+   * Sigla da TAG a partir do TIPO (ex.: DISJUNTOR -> "DJ"), coluna
+   * `tipos_equipamentos.sigla`. É SQL-cru (fora do schema Prisma, como
+   * disp_iot/device_tipo_id) -> lida por $queryRaw. Aceita id OU codigo do tipo.
+   * Preferida sobre a sigla derivada do nome livre; null se o tipo não tem sigla.
+   */
+  private async siglaDoTipo(
+    tipoEquipamentoId?: string | null,
+  ): Promise<string | null> {
+    const id = tipoEquipamentoId?.trim();
+    if (!id) return null;
+    const rows = await this.prisma.$queryRaw<Array<{ sigla: string | null }>>`
+      SELECT sigla FROM tipos_equipamentos
+      WHERE (TRIM(id) = ${id} OR codigo = ${id})
+        AND sigla IS NOT NULL AND TRIM(sigla) <> '' LIMIT 1`;
+    const s = rows[0]?.sigla?.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    return s || null;
+  }
+
   private async gerarTag(
     nome: string,
     unidadeId: string | null | undefined,
     usadas: Set<string> = new Set(),
+    siglaOverride?: string | null,
   ): Promise<string> {
-    const sigla = this.siglaDoNome(nome);
+    // Sigla do TIPO vence a derivada do nome (DJ-01 em vez de DISJ-001).
+    const siglaTipo = siglaOverride?.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const sigla = siglaTipo || this.siglaDoNome(nome);
     const unidade = unidadeId?.trim();
 
     const existentes = await this.prisma.equipamentos.findMany({
@@ -158,9 +180,206 @@ export class EquipamentosService {
     existentes.forEach((e) => considerar(e.tag));
     usadas.forEach(considerar);
 
-    const tag = `${sigla}-${String(maior + 1).padStart(3, '0')}`;
+    const tag = `${sigla}-${String(maior + 1).padStart(2, '0')}`;
     usadas.add(tag);
     return tag;
+  }
+
+  /**
+   * Cadastro simplificado do unifilar (Fase 7). O usuário marca "Possui medição"
+   * (monitoramento) e "Possui SCS" (automação → comando/status). Traduz esses
+   * checks nas colunas SQL-cruas de `equipamentos` (scs/scs_comando/scs_status/
+   * scs_medicao). `scs` (umbrella) = tem alguma supervisão — é o que coloca o
+   * elemento na lista de associação da TON. O tipo pm/ied da medição vem da
+   * associação no IoT; aqui só liga/desliga (default 'pm', preserva se já era ied).
+   */
+  private computeScs(f: {
+    possui_medicao?: boolean; possui_scs?: boolean;
+    scs_comando?: boolean; scs_status?: boolean; scs_medicao_atual?: string | null;
+  }): { scs: boolean; scs_comando: boolean; scs_status: boolean; scs_medicao: string } {
+    const med = !!f.possui_medicao;
+    const aut = !!f.possui_scs;
+    const atual = (f.scs_medicao_atual ?? '').trim();
+    const medicao = med ? (['pm', 'ied'].includes(atual) ? atual : 'pm') : 'nenhuma';
+    return { scs: med || aut, scs_comando: aut && !!f.scs_comando, scs_status: aut && !!f.scs_status, scs_medicao: medicao };
+  }
+
+  private async persistScs(
+    equipId: string,
+    s: { scs: boolean; scs_comando: boolean; scs_status: boolean; scs_medicao: string },
+  ): Promise<void> {
+    // `automacao` é o flag LEGADO equivalente a "possui SCS" — mantido em sincronia
+    // porque ainda governa o CRUD de equipamento_pontos e o modal de acionamento.
+    const automacao = s.scs_comando || s.scs_status;
+    await this.prisma.$executeRaw`
+      UPDATE equipamentos
+      SET scs = ${s.scs}, scs_comando = ${s.scs_comando}, scs_status = ${s.scs_status},
+          scs_medicao = ${s.scs_medicao}, automacao = ${automacao}
+      WHERE TRIM(id) = ${equipId.trim()}`;
+  }
+
+  /**
+   * Materializa os PONTOS do equipamento (equipamento_pontos) a partir da seleção
+   * do cadastro. Ter status não significa ter todos os pontos nativos — cada um é
+   * escolhido (e dá pra adicionar customizados). Os que saem da seleção viram
+   * soft-delete (o vínculo em ton_bo/bi/ai some das consultas, que filtram
+   * deleted_at IS NULL). `nome` é o rótulo, seguindo a convenção já gravada.
+   */
+  private async sincronizarPontos(
+    equipamentoId: string,
+    tipo: 'comando' | 'status',
+    nomes: string[],
+  ): Promise<void> {
+    const eqId = equipamentoId.trim();
+    const desejados = [...new Set((nomes ?? []).map((n) => String(n ?? '').trim()).filter(Boolean))];
+
+    const atuais = await this.prisma.equipamento_pontos.findMany({
+      where: { equipamento_id: eqId, tipo, deleted_at: null },
+      select: { id: true, nome: true },
+    });
+
+    const remover = atuais.filter((p) => !desejados.includes(p.nome.trim()));
+    if (remover.length) {
+      await this.prisma.equipamento_pontos.updateMany({
+        where: { id: { in: remover.map((p) => p.id) } },
+        data: { deleted_at: new Date() },
+      });
+    }
+
+    const jaAtivos = new Set(atuais.map((p) => p.nome.trim()));
+    let ordem = 0;
+    for (const nome of desejados) {
+      const pos = ordem++;
+      if (jaAtivos.has(nome)) continue;
+      // Reaproveita soft-deletado de mesmo nome (UNIQUE equipamento_id+nome).
+      const soft = await this.prisma.equipamento_pontos.findFirst({
+        where: { equipamento_id: eqId, nome, deleted_at: { not: null } },
+        select: { id: true },
+      });
+      if (soft) {
+        await this.prisma.equipamento_pontos.update({
+          where: { id: soft.id },
+          data: { tipo, deleted_at: null, ativo: true, ordem: pos },
+        });
+      } else {
+        await this.prisma.equipamento_pontos.create({
+          data: { equipamento_id: eqId, tipo, nome, ordem: pos, ativo: true },
+        });
+      }
+    }
+  }
+
+  /**
+   * Tipos oferecidos no cadastro do UNIFILAR (disp_unifilar=true), com sigla (semeia
+   * a TAG) e os PONTOS NATIVOS do tipo (o cadastro escolhe quais valem pro ativo).
+   */
+  async tiposUnifilar(): Promise<Array<{
+    id: string; codigo: string; nome: string; sigla: string | null;
+    pontos_nativos: { comando: string[]; status: string[] };
+  }>> {
+    const rows = await this.prisma.$queryRaw<Array<{
+      id: string; codigo: string; nome: string; sigla: string | null; propriedades_schema: any;
+    }>>`
+      SELECT TRIM(id) AS id, codigo, nome, sigla, propriedades_schema
+      FROM tipos_equipamentos
+      WHERE disp_unifilar = true
+      ORDER BY nome`;
+    const rotulos = (arr: any): string[] =>
+      (Array.isArray(arr) ? arr : []).map((p: any) => String(p?.label ?? p?.id ?? '').trim()).filter(Boolean);
+    return rows.map((r) => {
+      const n = (r.propriedades_schema as any)?.pontos_nativos ?? {};
+      return {
+        id: r.id, codigo: r.codigo, nome: r.nome, sigla: r.sigla,
+        pontos_nativos: { comando: rotulos(n.comando), status: rotulos(n.status) },
+      };
+    });
+  }
+
+  /** Prévia da próxima TAG (sigla do tipo + sequencial por unidade). Não persiste. */
+  async proximaTag(tipoEquipamentoId: string, unidadeId: string): Promise<{ sigla: string | null; tag: string }> {
+    const sigla = await this.siglaDoTipo(tipoEquipamentoId);
+    const tag = await this.gerarTag('', unidadeId, new Set(), sigla);
+    return { sigla, tag };
+  }
+
+  /** Lê os valores atuais pro modal de cadastro simplificado (edição). */
+  async getCadastroUnifilar(id: string) {
+    const eid = id?.trim();
+    const rows = await this.prisma.$queryRaw<Array<{
+      tag: string | null; localizacao_especifica: string | null;
+      scs: boolean | null; scs_comando: boolean | null; scs_status: boolean | null; scs_medicao: string | null;
+      tipo_nome: string | null; sigla: string | null; propriedades_schema: any;
+    }>>`
+      SELECT e.tag, e.localizacao_especifica, e.scs, e.scs_comando, e.scs_status, e.scs_medicao,
+             t.nome AS tipo_nome, t.sigla, t.propriedades_schema
+      FROM equipamentos e
+      LEFT JOIN tipos_equipamentos t ON TRIM(t.id) = TRIM(e.tipo_equipamento_id)
+      WHERE TRIM(e.id) = ${eid} AND e.deleted_at IS NULL LIMIT 1`;
+    const r = rows[0];
+    if (!r) throw new NotFoundException('Equipamento não encontrado');
+
+    // Pontos nativos declarados no TIPO (ex.: Disjuntor → Abrir/Fechar; Aberto/
+    // Fechado/Mola/Local/Remoto) — o cadastro escolhe QUAIS valem pra este ativo.
+    const nativos = (r.propriedades_schema as any)?.pontos_nativos ?? {};
+    const rotulos = (arr: any): string[] =>
+      (Array.isArray(arr) ? arr : []).map((p: any) => String(p?.label ?? p?.id ?? '').trim()).filter(Boolean);
+
+    const pontos = await this.prisma.equipamento_pontos.findMany({
+      where: { equipamento_id: eid, deleted_at: null },
+      select: { id: true, tipo: true, nome: true, ativo: true },
+      orderBy: [{ ordem: 'asc' }, { nome: 'asc' }],
+    });
+
+    return {
+      tag: r.tag?.trim() ?? '',
+      localizacao_especifica: r.localizacao_especifica ?? '',
+      possui_medicao: !!r.scs_medicao && r.scs_medicao !== 'nenhuma',
+      possui_scs: !!r.scs_comando || !!r.scs_status,
+      scs_comando: !!r.scs_comando,
+      scs_status: !!r.scs_status,
+      scs_medicao: r.scs_medicao ?? 'nenhuma',
+      tipo_nome: r.tipo_nome ?? null,
+      sigla: r.sigla ?? null,
+      pontos_nativos: { comando: rotulos(nativos.comando), status: rotulos(nativos.status) },
+      pontos_comando: pontos.filter((p) => p.tipo === 'comando').map((p) => p.nome.trim()),
+      pontos_status: pontos.filter((p) => p.tipo === 'status').map((p) => p.nome.trim()),
+    };
+  }
+
+  /** Edição do cadastro simplificado do unifilar: tag, localização e os checks SCS. */
+  async editarCadastroUnifilar(
+    id: string,
+    dto: {
+      tag?: string; localizacao_especifica?: string;
+      possui_medicao?: boolean; possui_scs?: boolean; scs_comando?: boolean; scs_status?: boolean;
+      pontos_comando?: string[]; pontos_status?: string[];
+    },
+  ) {
+    const eid = id?.trim();
+    const rows = await this.prisma.$queryRaw<Array<{ scs_medicao: string | null }>>`
+      SELECT scs_medicao FROM equipamentos WHERE TRIM(id) = ${eid} AND deleted_at IS NULL LIMIT 1`;
+    if (!rows[0]) throw new NotFoundException('Equipamento não encontrado');
+    const data: Record<string, unknown> = {};
+    if (dto.tag !== undefined) {
+      const t = dto.tag?.trim() || null;
+      data.tag = t;
+      if (t) data.nome = t; // nome unificado com a TAG (Fase 7)
+    }
+    if (dto.localizacao_especifica !== undefined) data.localizacao_especifica = dto.localizacao_especifica?.trim() || null;
+    if (Object.keys(data).length) {
+      await this.prisma.equipamentos.update({ where: { id: eid }, data: data as any });
+    }
+    const s = this.computeScs({ ...dto, scs_medicao_atual: rows[0].scs_medicao });
+    await this.persistScs(eid, s);
+
+    // Pontos: só mexe no que veio no payload. Sem comando/status, zera o respectivo.
+    if (dto.pontos_comando !== undefined || !s.scs_comando) {
+      await this.sincronizarPontos(eid, 'comando', s.scs_comando ? (dto.pontos_comando ?? []) : []);
+    }
+    if (dto.pontos_status !== undefined || !s.scs_status) {
+      await this.sincronizarPontos(eid, 'status', s.scs_status ? (dto.pontos_status ?? []) : []);
+    }
+    return { ok: true, ...s };
   }
 
   async create(createDto: CreateEquipamentoDto) {
@@ -208,6 +427,8 @@ export class EquipamentosService {
         equipamentoData.nome,
         equipamentoData.unidade_id ??
           (await this.unidadeDoPai(equipamentoData.equipamento_pai_id)),
+        new Set(),
+        await this.siglaDoTipo((equipamentoData as any).tipo_equipamento_id),
       );
     }
 
@@ -436,6 +657,7 @@ export class EquipamentosService {
     // transação.
     const usadas = new Set<string>();
     const normalizados: Record<string, unknown>[] = [];
+    const siglaLote = await this.siglaDoTipo((comum as any).tipo_equipamento_id);
 
     for (const item of itens) {
       const nome = item.nome.trim();
@@ -444,7 +666,7 @@ export class EquipamentosService {
       normalizados.push({
         ...comum,
         nome,
-        tag: tag || (await this.gerarTag(nome, unidadeDoLote, usadas)),
+        tag: tag || (await this.gerarTag(nome, unidadeDoLote, usadas, siglaLote)),
         numero_serie: item.numero_serie?.trim() || null,
         localizacao_especifica: item.localizacao_especifica?.trim() || null,
       });
@@ -626,31 +848,19 @@ export class EquipamentosService {
       throw new NotFoundException('Tipo de equipamento não encontrado');
     }
 
-    // Gerar nome automático se não fornecido
-    let nome = dto.nome?.trim();
-    if (!nome) {
-      // Contar quantos equipamentos desse tipo já existem na unidade
-      const count = await this.prisma.equipamentos.count({
-        where: {
-          unidade_id: dto.unidade_id?.trim(),
-          tipo_equipamento_id: dto.tipo_equipamento_id?.trim(),
-          deleted_at: null
-        }
-      });
-
-      nome = `${tipoEquipamento.nome} ${count + 1}`;
-    }
+    // Nome unificado com a TAG (Fase 7): a TAG (sigla do tipo + sequencial por
+    // unidade) é a identidade do equipamento. Nome explícito só se vier no dto.
+    const siglaTipo = await this.siglaDoTipo(dto.tipo_equipamento_id);
+    const tag =
+      dto.tag?.trim() ||
+      (await this.gerarTag('', dto.unidade_id?.trim(), new Set(), siglaTipo));
+    const nome = dto.nome?.trim() || tag;
 
     // Criar equipamento com dados mínimos
     const equipamento = await this.prisma.equipamentos.create({
       data: {
-        nome: nome.trim(),
-        // Aqui a TAG automática pesa mais do que no cadastro completo: quem
-        // cria pelo diagrama não passa por formulário nenhum, e sem isso o
-        // equipamento nasceria sem etiqueta.
-        tag:
-          dto.tag?.trim() ||
-          (await this.gerarTag(nome.trim(), dto.unidade_id?.trim())),
+        nome,
+        tag,
         unidade_id: dto.unidade_id.trim(),
         classificacao: dto.classificacao || 'UC',
         tipo_equipamento_id: dto.tipo_equipamento_id.trim(),
@@ -661,6 +871,7 @@ export class EquipamentosService {
         modelo: null,
         numero_serie: null,
         localizacao: 'A definir',
+        localizacao_especifica: dto.localizacao_especifica?.trim() || null,
       },
       include: {
         tipo_equipamento_rel: {
@@ -690,6 +901,24 @@ export class EquipamentosService {
         }
       }
     });
+
+    // Persiste os checks do cadastro simplificado (colunas SQL-cruas scs_*) e
+    // materializa os pontos escolhidos (Abrir/Fechar, Aberto/Fechado, ...).
+    if (dto.possui_medicao || dto.possui_scs) {
+      const s = this.computeScs({
+        possui_medicao: dto.possui_medicao,
+        possui_scs: dto.possui_scs,
+        scs_comando: dto.scs_comando,
+        scs_status: dto.scs_status,
+      });
+      await this.persistScs(equipamento.id, s);
+      if (s.scs_comando && dto.pontos_comando?.length) {
+        await this.sincronizarPontos(equipamento.id, 'comando', dto.pontos_comando);
+      }
+      if (s.scs_status && dto.pontos_status?.length) {
+        await this.sincronizarPontos(equipamento.id, 'status', dto.pontos_status);
+      }
+    }
 
     return {
       success: true,

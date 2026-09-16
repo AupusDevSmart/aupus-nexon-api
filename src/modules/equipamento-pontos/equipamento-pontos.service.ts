@@ -189,11 +189,16 @@ export class EquipamentoPontosService {
 
   private async assertEquipamentoAutomatizado(equipamentoId: string) {
     const eq = await this.assertEquipamentoExists(equipamentoId);
-    if (!eq.automacao) {
-      throw new ConflictException(
-        'Equipamento esta com automacao=false. Marque o check de automacao no cadastro antes de adicionar pontos.',
-      );
-    }
+    if (eq.automacao) return;
+    // Modelo novo (Fase 7): quem manda é "Possui SCS" (colunas scs_comando/
+    // scs_status). `automacao` é o flag legado — aceito os dois enquanto convivem.
+    const rows = await this.prisma.$queryRaw<Array<{ ok: boolean }>>`
+      SELECT (COALESCE(scs_comando, false) OR COALESCE(scs_status, false)) AS ok
+      FROM equipamentos WHERE TRIM(id) = ${equipamentoId.trim()} LIMIT 1`;
+    if (rows[0]?.ok) return;
+    throw new ConflictException(
+      'Equipamento sem SCS. Marque "Possui SCS" (comando/status) no cadastro antes de adicionar pontos.',
+    );
   }
 
   private async assertPontoExists(equipamentoId: string, pontoId: string) {

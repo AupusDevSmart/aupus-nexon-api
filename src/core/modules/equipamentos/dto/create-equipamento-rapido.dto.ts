@@ -1,4 +1,4 @@
-import { IsString, IsOptional, IsNotEmpty, IsEnum } from 'class-validator';
+import { IsString, IsOptional, IsNotEmpty, IsEnum, IsBoolean, IsArray } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export enum ClassificacaoEquipamento {
@@ -52,4 +52,42 @@ export class CreateEquipamentoRapidoDto {
   @IsOptional()
   @IsEnum(ClassificacaoEquipamento)
   classificacao?: ClassificacaoEquipamento;
+
+  // --- Cadastro simplificado do unifilar (Fase 7) ---
+  @ApiPropertyOptional({ description: 'Localização específica (ex.: Painel A)' })
+  @IsOptional()
+  @IsString()
+  localizacao_especifica?: string;
+
+  @ApiPropertyOptional({ description: 'Possui medição (monitoramento). Tipo pm/ied vem da associação no IoT.' })
+  @IsOptional()
+  @IsBoolean()
+  possui_medicao?: boolean;
+
+  @ApiPropertyOptional({ description: 'Possui SCS (automação): habilita comando/status' })
+  @IsOptional()
+  @IsBoolean()
+  possui_scs?: boolean;
+
+  @ApiPropertyOptional({ description: 'SCS com comando (abrir/fechar/ligar/desligar)' })
+  @IsOptional()
+  @IsBoolean()
+  scs_comando?: boolean;
+
+  @ApiPropertyOptional({ description: 'SCS com status (aberto/fechado etc.)' })
+  @IsOptional()
+  @IsBoolean()
+  scs_status?: boolean;
+
+  @ApiPropertyOptional({ description: 'Pontos de comando escolhidos (rótulos), ex.: ["Abrir","Fechar"]' })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  pontos_comando?: string[];
+
+  @ApiPropertyOptional({ description: 'Pontos de status escolhidos (rótulos), ex.: ["Aberto","Fechado"]' })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  pontos_status?: string[];
 }

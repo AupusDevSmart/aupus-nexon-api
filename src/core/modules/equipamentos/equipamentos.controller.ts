@@ -136,6 +136,23 @@ export class EquipamentosController {
     return this.equipamentosService.proximoSequencial(dto);
   }
 
+  @Get('tipos-unifilar')
+  @Permissions('equipamentos.view')
+  @ApiOperation({ summary: 'Tipos disponíveis no cadastro do unifilar (disp_unifilar), com sigla' })
+  tiposUnifilar() {
+    return this.equipamentosService.tiposUnifilar();
+  }
+
+  @Get('proxima-tag')
+  @Permissions('equipamentos.view')
+  @ApiOperation({ summary: 'Prévia da próxima TAG (sigla do tipo + sequencial por unidade)' })
+  proximaTag(
+    @Query('tipo_equipamento_id') tipoEquipamentoId: string,
+    @Query('unidade_id') unidadeId: string,
+  ) {
+    return this.equipamentosService.proximaTag(tipoEquipamentoId, unidadeId);
+  }
+
   @Get('ucs-disponiveis')
   @Permissions('equipamentos.view')
   @ApiOperation({ summary: 'Listar equipamentos UC disponíveis para serem pais de UAR' })
@@ -230,6 +247,27 @@ export class EquipamentosController {
   @ApiResponse({ status: 404, description: 'Equipamento não encontrado' })
   findComponentes(@Param('id') id: string) {
     return this.equipamentosService.findComponentesByEquipamento(id);
+  }
+
+  @Get(':id/cadastro-unifilar')
+  @Permissions('equipamentos.view')
+  @ApiOperation({ summary: 'Valores atuais do cadastro simplificado do unifilar (pra edição)' })
+  getCadastroUnifilar(@Param('id') id: string) {
+    return this.equipamentosService.getCadastroUnifilar(id);
+  }
+
+  @Patch(':id/cadastro-unifilar')
+  @Permissions('equipamentos.manage')
+  @ApiOperation({ summary: 'Editar cadastro simplificado do unifilar (tag, localização, checks SCS)' })
+  editarCadastroUnifilar(
+    @Param('id') id: string,
+    @Body() dto: {
+      tag?: string; localizacao_especifica?: string;
+      possui_medicao?: boolean; possui_scs?: boolean; scs_comando?: boolean; scs_status?: boolean;
+      pontos_comando?: string[]; pontos_status?: string[];
+    },
+  ) {
+    return this.equipamentosService.editarCadastroUnifilar(id, dto ?? {});
   }
 
   @Patch(':id')

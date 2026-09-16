@@ -16,6 +16,7 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiTags, ApiOperation, ApiResponse, ApiConsumes, ApiBody } from '@nestjs/swagger';
+import { Permissions } from '../auth/decorators/permissions.decorator';
 import { ConcessionariasService } from './concessionarias.service';
 import { AnexosConcessionariasService } from './anexos-concessionarias.service';
 import {
@@ -37,6 +38,7 @@ export class ConcessionariasController {
   ) {}
 
   @Post()
+  @Permissions('concessionarias.manage')
   @ApiOperation({ summary: 'Criar nova concessionária' })
   @ApiResponse({
     status: HttpStatus.CREATED,
@@ -63,6 +65,7 @@ export class ConcessionariasController {
   }
 
   @Patch(':id')
+  @Permissions('concessionarias.manage')
   @ApiOperation({ summary: 'Atualizar concessionária' })
   @ApiResponse({ status: 200, description: 'Concessionária atualizada' })
   @ApiResponse({ status: 404, description: 'Concessionária não encontrada' })
@@ -71,6 +74,7 @@ export class ConcessionariasController {
   }
 
   @Delete(':id')
+  @Permissions('concessionarias.manage')
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Remover concessionária (soft delete)' })
   @ApiResponse({ status: 204, description: 'Concessionária removida' })
@@ -82,6 +86,7 @@ export class ConcessionariasController {
   // ==================== ENDPOINTS DE ANEXOS ====================
 
   @Post(':id/anexos')
+  @Permissions('concessionarias.manage')
   @UseInterceptors(FileInterceptor('file'))
   @ApiOperation({ summary: 'Fazer upload de anexo para concessionária' })
   @ApiConsumes('multipart/form-data')
@@ -172,6 +177,7 @@ export class ConcessionariasController {
   }
 
   @Delete('anexos/:anexoId')
+  @Permissions('concessionarias.manage')
   @ApiOperation({ summary: 'Remover anexo' })
   @ApiResponse({
     status: HttpStatus.OK,
@@ -189,6 +195,7 @@ export class ConcessionariasController {
   // ==================== ENDPOINTS DE CÁLCULO DE TARIFAS ====================
 
   @Post(':id/calcular/a4-verde')
+  @Permissions('concessionarias.manage')
   @ApiOperation({ summary: 'Calcular custo usando tarifas A4 Verde' })
   @ApiResponse({ status: 200, description: 'Cálculo realizado com sucesso' })
   async calcularA4Verde(
@@ -206,6 +213,7 @@ export class ConcessionariasController {
   }
 
   @Post(':id/calcular/a3a-verde')
+  @Permissions('concessionarias.manage')
   @ApiOperation({ summary: 'Calcular custo usando tarifas A3a Verde' })
   @ApiResponse({ status: 200, description: 'Cálculo realizado com sucesso' })
   async calcularA3aVerde(
@@ -223,6 +231,7 @@ export class ConcessionariasController {
   }
 
   @Post(':id/calcular/b')
+  @Permissions('concessionarias.manage')
   @ApiOperation({ summary: 'Calcular custo usando tarifas Grupo B' })
   @ApiResponse({ status: 200, description: 'Cálculo realizado com sucesso' })
   async calcularB(

@@ -88,6 +88,19 @@ export class IotCatalogController {
     res.status(HttpStatus.OK).send(content);
   }
 
+  /**
+   * Paleta do diagrama IoT (component_types + ton_caps + categories) reconstruida
+   * do DB. Base pra Fase 2 (editor IoT ler a paleta do banco em vez do
+   * iot-diagram.v2.js estatico). Publico — o editor carrega sem auth.
+   */
+  @Get('palette')
+  @Public()
+  @ApiOperation({ summary: 'Paleta do diagrama IoT (component types + ton_caps + categorias) do DB' })
+  @ApiResponse({ status: HttpStatus.OK })
+  async getPalette() {
+    return this.service.getPalette();
+  }
+
   // ==========================================================================
   // CRUD de tipos (autenticado)
   // ==========================================================================

@@ -497,6 +497,29 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
   }
 
   /**
+   * Bancada: resolve o equipamento da BOMBA a partir do NOME da TON (tópico SIM
+   * `TESTE/<nome>/...`). A bomba é o equipamento dono dos pontos mapeados no ton_bo
+   * daquela TON. Sem cadastro de tópico — funciona só com o firmware 🧪 no ar.
+   */
+  private async resolverBombaPorNomeTon(tonNome: string): Promise<string | null> {
+    const nome = (tonNome ?? '').trim();
+    if (!nome) return null;
+    try {
+      const rows = await this.prisma.$queryRaw<Array<{ bomba_id: string }>>`
+        SELECT DISTINCT TRIM(p.equipamento_id) AS bomba_id
+        FROM equipamentos t
+        JOIN ton_bo tb ON TRIM(tb.ton_id) = TRIM(t.id) AND tb.deleted_at IS NULL
+        JOIN equipamento_pontos p ON p.id = tb.equipamento_ponto_id
+        WHERE TRIM(t.nome) = ${nome} AND t.deleted_at IS NULL
+        LIMIT 1`;
+      return rows[0]?.bomba_id ? rows[0].bomba_id.trim() : null;
+    } catch (e) {
+      console.warn(`[bomba] resolver bomba por nome da TON "${nome}" falhou: ${e instanceof Error ? e.message : e}`);
+      return null;
+    }
+  }
+
+  /**
    * Carregador elétrico: telemetria/energia em `<base>/carregador`.
    * Espera { kwh?, estado?, conectado?, evento? }. Atualiza kWh acumulado, o kWh
    * corrente da sessão ativa, e ao DESCONECTAR encerra a sessão (kwh_total + ocioso).
@@ -688,7 +711,22 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       // TESTE/.../satellite/<MAC>/... e captura o "sim":"<nome da TON>" do heartbeat
       // (auto-casa board↔TON no painel). Independente do subscriptions map; o ack do
       // TESTE/ ainda roteia abaixo.
-      if (topic.startsWith('TESTE/')) this.trackBenchSatellite(topic, dados);
+      if (topic.startsWith('TESTE/')) {
+        this.trackBenchSatellite(topic, dados);
+        // Bancada (SIM): a transação/estado da bomba chega em TESTE/<nome da TON>/{abastecimento,bomba}.
+        // Não está no subscriptions map (produção assina pelo tópico do equipamento, que aqui é vazio).
+        // Resolve a bomba pelo NOME da TON no tópico → ton_bo → equipamento da bomba, e ingere igual produção.
+        if (topic.endsWith('/abastecimento') || topic.endsWith('/bomba')) {
+          const suf = topic.endsWith('/abastecimento') ? '/abastecimento' : '/bomba';
+          const base = topic.slice('TESTE/'.length, topic.length - suf.length);
+          const bombaId = await this.resolverBombaPorNomeTon(base);
+          if (bombaId) {
+            if (suf === '/abastecimento') await this.ingerirAbastecimento(bombaId, dados);
+            else await this.atualizarBombaEstado(bombaId, dados);
+          }
+          return;
+        }
+      }
 
       // Acks de comando são roteados por cmd_id em pendingCommands,
       // não dependem de equipamentoIds — processar antes do lookup de subscription.

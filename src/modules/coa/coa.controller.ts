@@ -1,4 +1,4 @@
-import { Controller, Get, Query, UseGuards, HttpCode, HttpStatus, Logger } from '@nestjs/common';
+import { Controller, Get, Param, Query, UseGuards, HttpCode, HttpStatus, Logger } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import { CoaService, DashboardData } from './coa.service';
 import { JwtAuthGuard } from '@/core';
@@ -63,5 +63,20 @@ export class CoaController {
   ): Promise<DashboardData> {
     const effectiveClienteId = autoProprietarioId || clienteId;
     return this.coaService.refreshCache(effectiveClienteId, user);
+  }
+
+  @Get('unidades/:unidadeId/geracao')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Histórico de geração da unidade (dia/mês/ano/total)',
+    description: 'Série para o gráfico estilo portal do provedor. Fonte: snapshots de nuvem (horário) e fechamento diário. Escopado por dono.',
+  })
+  async historicoGeracao(
+    @Param('unidadeId') unidadeId: string,
+    @Query('periodo') periodo?: string,
+    @Query('data') data?: string,
+    @CurrentUser() user?: any,
+  ) {
+    return this.coaService.historicoGeracao(unidadeId, periodo, data, user);
   }
 }

@@ -6,6 +6,7 @@ import {
   HttpCode,
   HttpStatus,
   Param,
+  Patch,
   Post,
   Put,
   Query,
@@ -91,6 +92,29 @@ export class IoTController {
     return { data };
   }
 
+  @Get('projetos/:id/vinculos-bo')
+  @ApiOperation({ summary: 'Projeção iot_vinculos(modbus_bo)→io_config.bo dos relés do projeto (Fase 6)' })
+  @ApiResponse({ status: 200, description: 'Mapa { relayEquipId: { sinal: {...params, ponto_id} } }' })
+  async projetarVinculosBo(
+    @Param('id') id: string,
+    @CurrentUser() user?: any,
+  ): Promise<{ data: Record<string, Record<string, unknown>> }> {
+    const data = await this.iotService.projetarVinculosBo(id, user);
+    return { data };
+  }
+
+  @Put('equipamentos/:id/vinculos-bo')
+  @ApiOperation({ summary: 'Grava o comando de relé (modbus_bo) direto no vínculo — fonte da verdade (Fase 6)' })
+  @ApiResponse({ status: 200, description: '{ escritos: n }' })
+  async escreverVinculosBo(
+    @Param('id') id: string,
+    @Body() body: { bo?: Record<string, unknown> },
+    @CurrentUser() user?: any,
+  ): Promise<{ data: { escritos: number } }> {
+    const data = await this.iotService.escreverVinculosBo(id, body?.bo ?? {}, user);
+    return { data };
+  }
+
   @Post('projetos')
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({ summary: 'Cria novo projeto IoT vinculado a uma unidade' })
@@ -149,6 +173,65 @@ export class IoTController {
   }> {
     const data = await this.iotService.statusFonteDoDisjuntor(disjuntorId, user);
     return { data };
+  }
+
+  @Get('disjuntor/:disjuntorId/scs-bundle')
+  @ApiOperation({ summary: 'Bundle do sheet do DJ: SCS + PM + fonte de status + comandos' })
+  @ApiResponse({ status: 200, description: 'Tudo que o sheet do DJ precisa (escopado por dono)' })
+  async disjuntorScsBundle(
+    @Param('disjuntorId') disjuntorId: string,
+    @CurrentUser() user?: any,
+  ) {
+    return { data: await this.iotService.disjuntorScsBundle(disjuntorId, user) };
+  }
+
+  @Patch('disjuntor/:disjuntorId/scs')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Habilita/configura o SCS de um elemento do unifilar (declaração)' })
+  async setDisjuntorScs(
+    @Param('disjuntorId') disjuntorId: string,
+    @Body() body: { scs?: boolean; scs_comando?: boolean; scs_status?: boolean; scs_medicao?: string },
+    @CurrentUser() user?: any,
+  ) {
+    return { data: await this.iotService.setDisjuntorScs(disjuntorId, body ?? {}, user) };
+  }
+
+  @Get('ton/:tonId/elementos-scs')
+  @ApiOperation({ summary: 'Elementos do unifilar com comando/status/medição + seus pontos lógicos' })
+  async elementosScs(@Param('tonId') tonId: string, @CurrentUser() user?: any) {
+    return { data: await this.iotService.elementosScs(tonId, user) };
+  }
+
+  @Get('unidade/:unidadeId/elementos-scs')
+  @ApiOperation({ summary: 'Elementos com SCS da unidade + última telemetria (cards da Visão Geral)' })
+  async elementosScsVisaoGeral(@Param('unidadeId') unidadeId: string, @CurrentUser() user?: any) {
+    return { data: await this.iotService.elementosScsVisaoGeral(unidadeId, user) };
+  }
+
+  @Get('ton/:tonId/scs-config')
+  @ApiOperation({ summary: 'Configurações SCS da TON: dispositivos conectados + associação + elementos SCS' })
+  async tonScsConfig(@Param('tonId') tonId: string, @CurrentUser() user?: any) {
+    return { data: await this.iotService.tonScsConfig(tonId, user) };
+  }
+
+  @Post('scs/vinculo')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Associa/desassocia um device da TON a um elemento SCS do unifilar' })
+  async associarScs(
+    @Body() body: { comp_id: string; elemento_equipamento_id: string | null },
+    @CurrentUser() user?: any,
+  ) {
+    return { data: await this.iotService.associarScs(body.comp_id, body.elemento_equipamento_id ?? null, user) };
+  }
+
+  @Post('scs/pontos')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Salva a correspondência editada (título ↔ campo JSON) de um device' })
+  async savePontosOverride(
+    @Body() body: { comp_id: string; overrides: Record<string, string> },
+    @CurrentUser() user?: any,
+  ) {
+    return { data: await this.iotService.savePontosOverride(body.comp_id, body.overrides ?? {}, user) };
   }
 
   @Delete('projetos/:id')

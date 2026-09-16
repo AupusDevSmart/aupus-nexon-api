@@ -5,6 +5,7 @@ import {
   BadRequestException,
   Logger,
 } from '@nestjs/common';
+import { VinculosMirrorService } from '../iot-vinculos/vinculos-mirror.service';
 import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
 import { tonBiCount } from '../../shared/util/ton-caps';
 import { Prisma } from '@/core';
@@ -52,6 +53,7 @@ export class TonBiService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly scopeService: PermissionScopeService,
+    private readonly mirror: VinculosMirrorService,
   ) {}
 
   // ============================================================================
@@ -175,6 +177,7 @@ export class TonBiService {
       }
       throw err;
     }
+    void this.mirror.resyncTonCanais(tId, 'ton_bi');
     return this.getById(tId, id);
   }
 
@@ -214,6 +217,7 @@ export class TonBiService {
       }
       throw err;
     }
+    void this.mirror.resyncTonCanais(tId, 'ton_bi');
     return this.getById(tId, bId);
   }
 
@@ -227,6 +231,7 @@ export class TonBiService {
       UPDATE ton_bi SET deleted_at = now()
       WHERE id = ${bId} AND ton_id = ${tId} AND deleted_at IS NULL
     `;
+    void this.mirror.resyncTonCanais(tId, 'ton_bi');
   }
 
   // ============================================================================
@@ -322,7 +327,8 @@ export class TonBiService {
       id: row.id,
       ton_id: row.ton_id,
       bi_numero: Number(row.bi_numero),
-      equipamento_ponto_id: row.equipamento_ponto_id,
+      // char(26) padded do banco → TRIMAR p/ casar com o id do ponto (trimado) no frontend.
+      equipamento_ponto_id: row.equipamento_ponto_id?.trim() ?? null,
       invertido: !!row.invertido,
       ativo: !!row.ativo,
       created_at: row.created_at,

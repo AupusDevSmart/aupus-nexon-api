@@ -11,6 +11,7 @@ import {
 import { randomUUID } from 'node:crypto';
 import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
 import { MqttService } from '../../shared/mqtt/mqtt.service';
+import { VinculosMirrorService } from '../iot-vinculos/vinculos-mirror.service';
 import { SendCommandDto } from './dto/send-command.dto';
 import { CommandResultDto } from './dto/command-result.dto';
 import { AcionarPontoResultDto } from './dto/acionar-ponto-result.dto';
@@ -38,6 +39,7 @@ export class EquipamentosCmdService {
     private readonly prisma: PrismaService,
     private readonly mqtt: MqttService,
     private readonly scopeService: PermissionScopeService,
+    private readonly mirror: VinculosMirrorService,
   ) {}
 
   /**
@@ -347,10 +349,22 @@ export class EquipamentosCmdService {
     }
 
     // 2. Mapeamento ton_bo ativo
-    const bo = await this.prisma.ton_bo.findFirst({
+    // Fase 5 (FLIP): iot_vinculos é a fonte primária do vínculo ponto→BO. O ton_bo
+    // vira FALLBACK (se o espelho estiver vazio) + fonte do id pro audit. Loga
+    // divergência. Reversível: preferir `boOld` a `vin` volta ao comportamento antigo.
+    const boOld = await this.prisma.ton_bo.findFirst({
       where: { equipamento_ponto_id: pId, ativo: true, deleted_at: null },
       select: { id: true, ton_id: true, bo_numero: true, pulso_ms: true },
     });
+    const vin = await this.mirror.lookupTonBo(pId);
+    if (vin && boOld && (vin.ton_id !== boOld.ton_id.trim() || vin.canal !== boOld.bo_numero)) {
+      this.mirror.divergiu('flip/ton_bo', { ton: boOld.ton_id.trim(), canal: boOld.bo_numero }, vin);
+    }
+    const bo = vin
+      ? { id: boOld?.id ?? null, ton_id: vin.ton_id, bo_numero: vin.canal, pulso_ms: vin.pulso_ms ?? boOld?.pulso_ms ?? 500 }
+      : boOld
+        ? { id: boOld.id, ton_id: boOld.ton_id.trim(), bo_numero: boOld.bo_numero, pulso_ms: boOld.pulso_ms }
+        : null;
     if (!bo) {
       throw new BadRequestException(
         `Ponto "${ponto.nome}" nao esta mapeado em nenhum BO ativo de TON. ` +
@@ -373,14 +387,19 @@ export class EquipamentosCmdService {
         `TON do mapeamento (${bo.ton_id}) nao encontrada ou foi removida.`,
       );
     }
-    if (!ton.mqtt_habilitado) {
+    // SIM/bancada NÃO depende do tópico de PRODUÇÃO nem de mqtt_habilitado — o pulso vai
+    // pra TESTE/<base>/cmd (firmware de simulação). Esse flag/tópico de produção é resquício
+    // de quando criar TON no unifilar exigia tópico; ele só faz sentido pro comando REAL.
+    if (!sim && !ton.mqtt_habilitado) {
       throw new BadRequestException(`TON "${ton.nome}" com mqtt_habilitado=false.`);
     }
-    const baseTopico = ton.topico_mqtt?.trim();
+    // Base do tópico: em produção usa o topico_mqtt; em SIM, se não houver tópico, usa o
+    // NOME da TON — que é o que o firmware 🧪 escuta (gerador: `TESTE/${topicBase||name}`).
+    const baseTopico = ton.topico_mqtt?.trim() || (sim ? ton.nome?.trim() : '');
     if (!baseTopico) {
       throw new BadRequestException(`TON "${ton.nome}" sem topico_mqtt configurado.`);
     }
-    // Modo SIMULAÇÃO/LAB: o pulso ON->OFF vai pra TESTE/<topico>/cmd (firmware de
+    // Modo SIMULAÇÃO/LAB: o pulso ON->OFF vai pra TESTE/<base>/cmd (firmware de
     // simulação), não pro tópico real — testa o pipeline sem tocar produção.
     // Com testMac (remap de bancada), reescreve o segmento .../satellite/<MAC> pro
     // MAC do board de bancada antes do prefixo TESTE/ — roteia pro board físico de
@@ -503,7 +522,14 @@ export class EquipamentosCmdService {
     tonTopico: string;
     tonNome: string;
   } | null> {
-    // 1. Componente de relé cujo props.io_config.bo mapeia este ponto.
+    // 1. Componente de relé cujo mapa ponto→(relé, coil) atende este ponto.
+    // FASE 5.5 FLIP: `iot_vinculos` (modbus_bo) é a fonte PRIMÁRIA do mapeamento;
+    // o `io_config.bo` do componente fica de FALLBACK se o espelho vier vazio.
+    // Reversível (preferir o antigo volta atrás). Divergência é logada, nunca altera
+    // o comando. O NOME do relé e a TOPOLOGIA seguem lidos do diagrama.
+    const vin = await this.mirror.lookupModbusBo(pontoId);
+
+    // Fonte antiga (io_config.bo direto no componente) — fallback + testemunha.
     const rows = await this.prisma.$queryRaw<
       Array<{ id: string; projeto_id: string; nome: string | null; cmd_id: string }>
     >`
@@ -513,19 +539,43 @@ export class EquipamentosCmdService {
       WHERE TRIM(k.value->>'ponto_id') = ${pontoId}
       LIMIT 1
     `;
-    if (!rows?.length) return null;
-    const relay = rows[0];
-    const relayName = (relay.nome ?? '').trim();
+    const old = rows?.[0] ?? null;
+
+    // Escolhe a fonte: vínculo primeiro, antigo como fallback.
+    let relayName: string;
+    let cmdId: string;
+    let compId: string;
+    let projetoId: string;
+    if (vin) {
+      relayName = vin.relay_name;
+      cmdId = vin.sinal;
+      compId = vin.comp_id;
+      projetoId = vin.projeto_id;
+      if (old && ((old.nome ?? '').trim() !== relayName || old.cmd_id !== cmdId)) {
+        this.mirror.divergiu(
+          'flip/resolveReleBo',
+          { relayName: (old.nome ?? '').trim(), cmdId: old.cmd_id, comp: old.id, proj: old.projeto_id },
+          vin,
+        );
+      }
+    } else if (old) {
+      relayName = (old.nome ?? '').trim();
+      cmdId = old.cmd_id;
+      compId = old.id;
+      projetoId = old.projeto_id;
+    } else {
+      return null;
+    }
     if (!relayName) return null;
 
     // 2. TON gateway: BFS nas conexões do projeto até a TON (com equipamento) mais próxima.
     const [comps, conns] = await Promise.all([
       this.prisma.iot_componentes.findMany({
-        where: { projeto_id: relay.projeto_id },
+        where: { projeto_id: projetoId },
         select: { id: true, tipo: true, equipamento_id: true },
       }),
       this.prisma.iot_conexoes.findMany({
-        where: { projeto_id: relay.projeto_id },
+        where: { projeto_id: projetoId },
         select: { from_comp_id: true, to_comp_id: true },
       }),
     ]);
@@ -541,13 +591,13 @@ export class EquipamentosCmdService {
     }
     const byId = new Map(comps.map((c) => [c.id, c]));
     const isTon = (t?: string | null) => String(t ?? '').toLowerCase().startsWith('ton');
-    const visited = new Set<string>([relay.id]);
-    const queue: string[] = [relay.id];
+    const visited = new Set<string>([compId]);
+    const queue: string[] = [compId];
     let tonEquipId: string | null = null;
     while (queue.length) {
       const id = queue.shift() as string;
       const comp = byId.get(id);
-      if (id !== relay.id && comp && isTon(comp.tipo) && comp.equipamento_id) {
+      if (id !== compId && comp && isTon(comp.tipo) && comp.equipamento_id) {
         tonEquipId = comp.equipamento_id.trim();
         break;
       }
@@ -567,7 +617,7 @@ export class EquipamentosCmdService {
     const topico = ton?.topico_mqtt?.trim();
     if (!topico || !ton?.mqtt_habilitado) return null;
 
-    return { relayName, cmdId: relay.cmd_id, tonTopico: topico, tonNome: ton.nome };
+    return { relayName, cmdId, tonTopico: topico, tonNome: ton.nome };
   }
 
   /**

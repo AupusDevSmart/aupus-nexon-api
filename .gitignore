@@ -2,6 +2,7 @@ node_modules/
 dist/
 dist.previous/
 dist.new/
+db/backups/
 coverage/
 *.log
 .DS_Store

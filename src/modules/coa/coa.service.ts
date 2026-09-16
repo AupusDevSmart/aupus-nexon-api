@@ -13,6 +13,7 @@ export interface DashboardData {
     balancoRede: number;
     totalUnidades: number;
     unidadesOnline: number;
+    unidadesMonitoradas?: number; // ONLINE + monitoradas pela nuvem (card "Instalações Monitoradas")
     alertasAtivos: number;
     totalGeradores: number;
     totalCargas: number;
@@ -46,6 +47,8 @@ export interface UnidadeResumo {
   trip?: boolean; // TRIP real (SOE não reconhecido) — vermelho no COA, distinto de OFFLINE (sem info)
   nuvem?: boolean; // sem TON ao vivo, mas com geração de NUVEM recente (cor própria, não é offline)
   tonViva?: boolean; // TON dá sinal de vida no broker (liveness). OFFLINE+tonViva = device/Modbus (âmbar), não internet (cinza)
+  fonteDados?: 'ton' | 'nuvem'; // origem de potência/energia (nuvem = fallback: sem TON ao vivo, dado do portal do provedor)
+  nuvemAtualizadoEm?: string | null; // horário local (SP) do snapshot de nuvem usado no fallback
   naoComissionados?: string[]; // pontos monitorados desta unidade ainda sem comissionamento (dado não validado)
   equipamentosOffline?: string[]; // nomes de equipamentos sem comunicação (pior-caso do status)
   ultimaLeitura: Date | null;
@@ -561,6 +564,45 @@ export class CoaService {
       this.logger.warn(`[COA] consulta de nuvem recente falhou: ${e instanceof Error ? e.message : e}`);
     }
 
+    // FALLBACK DE NUVEM (Fase 2 do fallback horário): snapshot de HOJE por unidade.
+    //   energia  = kwh_acumulado do último snapshot do dia (acumulado diário do provedor);
+    //   potência = kwh_hora do último snapshot (kWh em 1h ≈ média em kW naquela hora).
+    // A MADRUGADA (00h–05h) é IGNORADA: até o provedor virar o dia a nuvem ainda devolve
+    // o total de ONTEM (visto até 05h em algumas plantas) — incluí-la inflaria "energia hoje".
+    // `hora` é timestamp local de SP (sem fuso) → a idade é calculada no próprio SQL.
+    // Geração que veio da NUVEM entra em "Potência de Geração", mas NÃO em "Potência de
+    // Carga": sem medidor, a carga da unidade é desconhecida (não é igual à geração).
+    let totalGeracaoNuvem = 0;
+    let unidadesMonitoradasNuvem = 0;
+    const nuvemHojePorUnidade = new Map<string, { energiaKwh: number; potenciaKw: number; horaLocal: string; idadeMin: number }>();
+    try {
+      const nRows = await this.prisma.$queryRaw<Array<{
+        unidade_id: string; kwh_acumulado: number | null; kwh_hora: number | null; hora_local: string; idade_min: number;
+      }>>`
+        SELECT DISTINCT ON (TRIM(unidade_id))
+               TRIM(unidade_id) AS unidade_id,
+               kwh_acumulado::float8 AS kwh_acumulado,
+               kwh_hora::float8 AS kwh_hora,
+               to_char(hora, 'YYYY-MM-DD"T"HH24:MI:SS') AS hora_local,
+               (EXTRACT(EPOCH FROM ((now() AT TIME ZONE 'America/Sao_Paulo') - hora)) / 60)::float8 AS idade_min
+        FROM geracao_horaria_plantas
+        WHERE hora::date = (now() AT TIME ZONE 'America/Sao_Paulo')::date
+          AND EXTRACT(HOUR FROM hora) > 5
+        ORDER BY TRIM(unidade_id), hora DESC
+      `;
+      for (const r of nRows) {
+        if (!r?.unidade_id) continue;
+        nuvemHojePorUnidade.set(String(r.unidade_id).trim(), {
+          energiaKwh: Number(r.kwh_acumulado) || 0,
+          potenciaKw: Number(r.kwh_hora) || 0,
+          horaLocal: r.hora_local,
+          idadeMin: Number(r.idade_min) || 0,
+        });
+      }
+    } catch (e) {
+      this.logger.warn(`[COA] consulta de nuvem horária (fallback) falhou: ${e instanceof Error ? e.message : e}`);
+    }
+
     // Unidades cuja TON DÁ SINAL DE VIDA no broker (last_seen fresco em
     // iot_dispositivos_online), mesmo sem dado de equipamento chegando. Distingue
     // "device/Modbus com problema" (TON viva → âmbar) de "sem sinal" (internet/energia
@@ -792,6 +834,30 @@ export class CoaService {
           });
         }
 
+        // FALLBACK DE NUVEM: nenhuma telemetria ao vivo (freshCount = 0), mas a nuvem do
+        // provedor fotografou a geração de hoje. Mostra o dado da nuvem em vez de zero:
+        // potência = média da última hora (estimada), energia = acumulado do dia.
+        let fonteDados: 'ton' | 'nuvem' = 'ton';
+        let nuvemAtualizadoEm: string | null = null;
+        let potenciaNuvem = 0;
+        let energiaNuvem = 0;
+        const nuvemHoje = nuvemHojePorUnidade.get(unidade.id.trim());
+        if (freshCount === 0 && nuvemHoje) {
+          fonteDados = 'nuvem';
+          nuvemAtualizadoEm = nuvemHoje.horaLocal;
+          energiaNuvem = nuvemHoje.energiaKwh;
+          // Snapshot com mais de 2h = coleta parada: não finge potência atual.
+          potenciaNuvem = nuvemHoje.idadeMin <= 120 ? nuvemHoje.potenciaKw : 0;
+          geracaoPlanta += potenciaNuvem;
+          totalGeracao += potenciaNuvem;
+          totalGeracaoNuvem += potenciaNuvem;
+        }
+        // Monitorada pela nuvem (hoje ou nos últimos 2 dias): conta como instalação
+        // monitorada no card do COA mesmo sem telemetria ao vivo — de dia e à noite.
+        if (status !== 'ONLINE' && (fonteDados === 'nuvem' || cloudRecentUnidades.has(unidade.id.trim()))) {
+          unidadesMonitoradasNuvem++;
+        }
+
         // Buscar custo desta unidade (se calculado)
         const custoUnidade = custosPorUnidade.get(unidade.id);
 
@@ -801,7 +867,9 @@ export class CoaService {
           tipo: unidade.tipo,
           status,
           trip: tripUnidades.has(unidade.id.trim()),
-          nuvem: status === 'OFFLINE' && cloudRecentUnidades.has(unidade.id.trim()),
+          nuvem: status === 'OFFLINE' && (cloudRecentUnidades.has(unidade.id.trim()) || fonteDados === 'nuvem'),
+          fonteDados,
+          nuvemAtualizadoEm,
           // TON viva no broker: dado fresco chegando OU liveness fresco (birth/telemetria
           // recente). Usado pelo COA p/ pintar OFFLINE+tonViva de âmbar (device/Modbus,
           // não internet) em vez de cinza. Ver docs/IOT-NEXON-CONFIABILIDADE.md.
@@ -818,8 +886,8 @@ export class CoaService {
           estado: unidade.estado || undefined,
           potenciaInstalada: Number(unidade.potencia) || 0, // ✅ Potência instalada em kW
           metricas: {
-            potenciaAtual: Math.round(potenciaTotal * 100) / 100,
-            energiaHoje: Math.round(energiaTotal * 100) / 100,
+            potenciaAtual: Math.round((fonteDados === 'nuvem' ? potenciaNuvem : potenciaTotal) * 100) / 100,
+            energiaHoje: Math.round((fonteDados === 'nuvem' ? energiaNuvem : energiaTotal) * 100) / 100,
             fatorPotencia: Math.round(fatorPotencia * 100) / 100,
             custoEnergiaHoje: custoUnidade !== undefined ? Math.round(custoUnidade * 100) / 100 : undefined,
           },
@@ -864,12 +932,13 @@ export class CoaService {
         balancoRede: Math.round((totalConsumo - totalGeracao) * 100) / 100,
         totalUnidades,
         unidadesOnline,
+        unidadesMonitoradas: unidadesOnline + unidadesMonitoradasNuvem, // ONLINE + monitoradas pela nuvem
         alertasAtivos: alertas.length,
         totalGeradores,
         totalCargas,
         custoTotalHoje: custosPorUnidade.size > 0 ? Math.round(custoTotalHoje * 100) / 100 : undefined,
         // Carga real (3 situações): Geração + líquido dos medidores (import +, export −).
-        cargaTotal: Math.round((totalGeracao + totalConsumo) * 100) / 100,
+        cargaTotal: Math.round((totalGeracao - totalGeracaoNuvem + totalConsumo) * 100) / 100,
         totalReativo: Math.round(totalReativo * 100) / 100,
         // Aparente total dos PMs: S_T = √(P_T² + Q_T²), P_T = Σ PM ativo, Q_T = Σ PM reativo.
         totalAparente: Math.round(Math.sqrt(totalConsumo * totalConsumo + totalReativo * totalReativo) * 100) / 100,
@@ -878,6 +947,116 @@ export class CoaService {
       plantas: plantasProcessadas,
       alertas: alertas.slice(0, 10), // Limitar a 10 alertas mais recentes
     };
+  }
+
+  /**
+   * Série histórica de geração de uma unidade — alimenta o gráfico no estilo do
+   * portal do provedor (Dia / Mês / Ano / Total). Fontes:
+   *   dia   → geracao_horaria_plantas: kWh por hora (madrugada 00h–05h = 0 — até o
+   *           provedor virar o dia a nuvem ainda devolve o total de ONTEM);
+   *   mês   → geracao_diaria_plantas: kWh por dia (o dia corrente vem do horário,
+   *           mais fresco que o fechamento diário das 21h);
+   *   ano   → soma mensal do diário;  total → soma anual do diário.
+   * Escopado por dono (assertEntityInScope na unidade).
+   */
+  async historicoGeracao(unidadeId: string, periodo?: string, data?: string, user?: ScopedUser) {
+    const uid = (unidadeId ?? '').trim();
+    const r2 = (v: number) => Math.round(v * 100) / 100;
+    if (!uid) return { periodo: 'dia', referencia: null, total_kwh: 0, pontos: [] as any[] };
+    if (user) await this.scopeService.assertEntityInScope('unidade', uid, user);
+
+    const p = ['dia', 'mes', 'ano', 'total'].includes(String(periodo)) ? String(periodo) : 'dia';
+    const hojeRow = await this.prisma.$queryRaw<Array<{ hoje: string }>>`
+      SELECT to_char((now() AT TIME ZONE 'America/Sao_Paulo')::date, 'YYYY-MM-DD') AS hoje`;
+    const hoje = hojeRow[0]?.hoje ?? new Date().toISOString().slice(0, 10);
+    const ref = data && /^\d{4}-\d{2}-\d{2}$/.test(data) ? data : hoje;
+
+    // Acumulado de HOJE pelo snapshot horário (último do dia, ignorando a hora 00).
+    const acumHoje = async (): Promise<number | null> => {
+      const r = await this.prisma.$queryRaw<Array<{ acum: number | null }>>`
+        SELECT kwh_acumulado::float8 AS acum FROM geracao_horaria_plantas
+        WHERE TRIM(unidade_id) = ${uid} AND hora::date = ${hoje}::date AND EXTRACT(HOUR FROM hora) > 5
+        ORDER BY hora DESC LIMIT 1`;
+      return r[0]?.acum ?? null;
+    };
+    // Hoje só entra pelo horário se o diário ainda não fechou o dia (não conta 2x).
+    const hojeSeFaltarNoDiario = async (): Promise<number> => {
+      const t = await this.prisma.$queryRaw<Array<{ n: number }>>`
+        SELECT count(*)::int AS n FROM geracao_diaria_plantas
+        WHERE TRIM(unidade_id) = ${uid} AND data = ${hoje}::date`;
+      if ((t[0]?.n ?? 0) > 0) return 0;
+      return (await acumHoje()) ?? 0;
+    };
+
+    if (p === 'dia') {
+      const rows = await this.prisma.$queryRaw<Array<{ h: number; kwh: number | null; acum: number | null }>>`
+        SELECT EXTRACT(HOUR FROM hora)::int AS h, kwh_hora::float8 AS kwh, kwh_acumulado::float8 AS acum
+        FROM geracao_horaria_plantas
+        WHERE TRIM(unidade_id) = ${uid} AND hora::date = ${ref}::date AND EXTRACT(HOUR FROM hora) > 0
+        ORDER BY hora`;
+      const porHora = new Map<number, (typeof rows)[number]>(rows.map((r) => [Number(r.h), r] as [number, (typeof rows)[number]]));
+      const pontos = Array.from({ length: 24 }, (_, h) => {
+        const r = porHora.get(h);
+        return {
+          rotulo: `${String(h).padStart(2, '0')}:00`,
+          // Madrugada (00h–05h) = 0: sem sol; o que houver ali é resíduo de ontem na nuvem.
+          kwh: r ? (h <= 5 ? 0 : r2(Number(r.kwh) || 0)) : null,
+          acumulado: r ? (h <= 5 ? 0 : r2(Number(r.acum) || 0)) : null,
+        };
+      });
+      const diurnas = rows.filter((r) => Number(r.h) > 5);
+      const total = diurnas.length ? Number(diurnas[diurnas.length - 1].acum) || 0 : 0;
+      return { periodo: p, referencia: ref, total_kwh: r2(total), pontos };
+    }
+
+    if (p === 'mes') {
+      const rows = await this.prisma.$queryRaw<Array<{ d: number; kwh: number | null }>>`
+        SELECT EXTRACT(DAY FROM data)::int AS d, kwh_realizado::float8 AS kwh
+        FROM geracao_diaria_plantas
+        WHERE TRIM(unidade_id) = ${uid} AND date_trunc('month', data) = date_trunc('month', ${ref}::date)
+        ORDER BY data`;
+      const porDia = new Map<number, number>(rows.map((r) => [Number(r.d), Number(r.kwh) || 0] as [number, number]));
+      if (ref.slice(0, 7) === hoje.slice(0, 7)) {
+        const a = await acumHoje();
+        if (a != null) porDia.set(Number(hoje.slice(8, 10)), a);
+      }
+      const nDias = new Date(Number(ref.slice(0, 4)), Number(ref.slice(5, 7)), 0).getDate();
+      const pontos = Array.from({ length: nDias }, (_, i) => ({
+        rotulo: String(i + 1).padStart(2, '0'),
+        kwh: porDia.has(i + 1) ? r2(porDia.get(i + 1) as number) : null,
+      }));
+      const total = Array.from(porDia.values()).reduce((acc, v) => acc + v, 0);
+      return { periodo: p, referencia: ref, total_kwh: r2(total), pontos };
+    }
+
+    if (p === 'ano') {
+      const rows = await this.prisma.$queryRaw<Array<{ m: number; kwh: number | null }>>`
+        SELECT EXTRACT(MONTH FROM data)::int AS m, SUM(kwh_realizado)::float8 AS kwh
+        FROM geracao_diaria_plantas
+        WHERE TRIM(unidade_id) = ${uid} AND EXTRACT(YEAR FROM data) = EXTRACT(YEAR FROM ${ref}::date)
+        GROUP BY 1 ORDER BY 1`;
+      const porMes = new Map<number, number>(rows.map((r) => [Number(r.m), Number(r.kwh) || 0] as [number, number]));
+      if (ref.slice(0, 4) === hoje.slice(0, 4)) {
+        const extra = await hojeSeFaltarNoDiario();
+        if (extra > 0) { const m = Number(hoje.slice(5, 7)); porMes.set(m, (porMes.get(m) ?? 0) + extra); }
+      }
+      const MESES = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+      const pontos = MESES.map((rot, i) => ({ rotulo: rot, kwh: porMes.has(i + 1) ? r2(porMes.get(i + 1) as number) : null }));
+      const total = Array.from(porMes.values()).reduce((acc, v) => acc + v, 0);
+      return { periodo: p, referencia: ref, total_kwh: r2(total), pontos };
+    }
+
+    // total — soma anual
+    const rows = await this.prisma.$queryRaw<Array<{ a: number; kwh: number | null }>>`
+      SELECT EXTRACT(YEAR FROM data)::int AS a, SUM(kwh_realizado)::float8 AS kwh
+      FROM geracao_diaria_plantas WHERE TRIM(unidade_id) = ${uid}
+      GROUP BY 1 ORDER BY 1`;
+    const porAno = new Map<number, number>(rows.map((r) => [Number(r.a), Number(r.kwh) || 0] as [number, number]));
+    const extra = await hojeSeFaltarNoDiario();
+    if (extra > 0) { const a = Number(hoje.slice(0, 4)); porAno.set(a, (porAno.get(a) ?? 0) + extra); }
+    const pontos = Array.from(porAno.entries()).sort((x, y) => x[0] - y[0]).map(([a, v]) => ({ rotulo: String(a), kwh: r2(v) }));
+    const total = Array.from(porAno.values()).reduce((acc, v) => acc + v, 0);
+    return { periodo: p, referencia: ref, total_kwh: r2(total), pontos };
   }
 
   /**

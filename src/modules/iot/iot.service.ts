@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
 import { Prisma } from '@/core';
 import { tonCapsForTipo } from '../../shared/util/ton-caps';
+import { VinculosMirrorService } from '../iot-vinculos/vinculos-mirror.service';
 import type {
   IotDiagrama,
   IotDiagramaComponent,
@@ -47,6 +48,7 @@ export class IoTService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly scopeService: PermissionScopeService,
+    private readonly mirror: VinculosMirrorService,
   ) {}
 
   /** Gera um ID hex de 26 chars compativel com CHAR(26) — preserva o formato dos registros existentes. */
@@ -81,6 +83,352 @@ export class IoTService {
     if (!row) return null;
     if (user) await this.scopeService.assertEntityInScope('unidade', row.unidade_id.trim(), user);
     return this.toProjetoRow(row);
+  }
+
+  /**
+   * FASE 6 — projeção `iot_vinculos`(modbus_bo) → io_config.bo dos relés DESTE projeto.
+   * Forma: { [relayEquipId]: { [sinal]: { ...params, ponto_id } } } — a MESMA que o gerador
+   * consome em props.io_config.bo, mas vinda da tabela unificada. O frontend hidrata o
+   * props.io_config.bo antes de gerar o firmware (merge: vínculo sobrescreve por comando,
+   * props preenche lacuna) — o gerador fica INTOCADO. Escopado por projeto + dono da unidade.
+   * (Byte-idêntico ao props validado no harness tools/fw-regress --from-vinculos.)
+   */
+  async projetarVinculosBo(
+    projetoId: string,
+    user?: ScopedUser,
+  ): Promise<Record<string, Record<string, unknown>>> {
+    const id = (projetoId ?? '').trim();
+    if (!id) return {};
+    const proj = await this.prisma.iot_projetos.findFirst({
+      where: { id, deleted_at: null },
+      select: { unidade_id: true },
+    });
+    if (!proj) return {};
+    if (user) await this.scopeService.assertEntityInScope('unidade', proj.unidade_id.trim(), user);
+
+    const rows = await this.prisma.$queryRaw<
+      Array<{ relay: string; sinal: string; ponto_id: string; equip_dono: string | null; params: Record<string, unknown> | null }>
+    >`
+      SELECT TRIM(v.fonte_equipamento_id) AS relay, v.sinal AS sinal,
+             TRIM(v.equipamento_ponto_id) AS ponto_id, TRIM(p.equipamento_id) AS equip_dono, v.params AS params
+      FROM iot_vinculos v
+      JOIN equipamento_pontos p ON p.id = v.equipamento_ponto_id
+      WHERE v.fonte_tipo = 'modbus_bo' AND v.ativo = true AND v.deleted_at IS NULL
+        AND TRIM(v.fonte_equipamento_id) IN (
+          SELECT DISTINCT COALESCE(NULLIF(TRIM(c.equipamento_id), ''), c.props->>'equipamento_id')
+          FROM iot_componentes c WHERE TRIM(c.projeto_id) = ${id}
+        )
+      ORDER BY TRIM(v.fonte_equipamento_id), v.sinal`;
+
+    // equipamento_id (dono do ponto) é re-derivado aqui — o vínculo não o guarda em params,
+    // mas o DeviceIoConfigModal PRECISA dele (buildConfig descarta bo sem equipamento_id).
+    const out: Record<string, Record<string, unknown>> = {};
+    for (const r of rows) {
+      (out[r.relay] ||= {})[r.sinal] = {
+        ...(r.params || {}),
+        ponto_id: r.ponto_id,
+        ...(r.equip_dono ? { equipamento_id: r.equip_dono } : {}),
+      };
+    }
+    return out;
+  }
+
+  /**
+   * FASE 6 (inversão da escrita) — grava o comando de relé (modbus_bo) DIRETO no vínculo,
+   * como fonte da verdade. `boMap` = { [sinal]: { coil, func, ..., ponto_id } } (a forma do
+   * io_config.bo). Substitui todos os modbus_bo do relé (origem='ui'). Escopado pelo dono do
+   * equipamento-relé. O props.io_config.bo continua sendo escrito pela UI como FALLBACK — o
+   * resync não reconstrói mais o modbus_bo, então esta escrita é autoritativa.
+   */
+  async escreverVinculosBo(
+    relayEquipId: string,
+    boMap: Record<string, unknown>,
+    user?: ScopedUser,
+  ): Promise<{ escritos: number }> {
+    const id = (relayEquipId ?? '').trim();
+    if (!id) return { escritos: 0 };
+    if (user) await this.scopeService.assertEntityInScope('equipamento', id, user);
+    const escritos = await this.mirror.escreverModbusBo(id, (boMap ?? {}) as Record<string, any>);
+    return { escritos };
+  }
+
+  /**
+   * Bundle do sheet do DJ (Fase 6): declaração SCS + PM associado + fonte de status
+   * (relé) + comandos (ton_bo). O front monta a tela (Estado/Controles/Status/Medição)
+   * e assina a telemetria ao vivo do PM/relé. Escopado por dono.
+   */
+  async disjuntorScsBundle(disjuntorId: string, user?: ScopedUser) {
+    const id = (disjuntorId ?? '').trim();
+    if (!id) return null;
+    const eqRows = await this.prisma.$queryRaw<Array<{
+      id: string; nome: string | null; scs: boolean; scs_comando: boolean; scs_status: boolean; scs_medicao: string;
+    }>>`
+      SELECT TRIM(id) AS id, TRIM(nome) AS nome, scs, scs_comando, scs_status, scs_medicao
+      FROM equipamentos WHERE TRIM(id) = ${id} AND deleted_at IS NULL LIMIT 1`;
+    const eq = eqRows[0];
+    if (!eq) return null;
+    if (user) await this.scopeService.assertEntityInScope('equipamento', id, user);
+    const [pm, statusFonte, comandos] = await Promise.all([
+      this.powerMeterByDisjuntor(id),
+      this.statusFonteDoDisjuntor(id, user),
+      this.prisma.$queryRaw<Array<{ ponto: string; ponto_id: string; bo_numero: number; pulso_ms: number; ton_id: string }>>`
+        SELECT ep.nome AS ponto, TRIM(ep.id) AS ponto_id, tb.bo_numero, tb.pulso_ms, TRIM(tb.ton_id) AS ton_id
+        FROM equipamento_pontos ep
+        JOIN ton_bo tb ON TRIM(tb.equipamento_ponto_id) = TRIM(ep.id) AND tb.ativo = true AND tb.deleted_at IS NULL
+        WHERE TRIM(ep.equipamento_id) = ${id} AND ep.tipo = 'comando' AND ep.ativo = true AND ep.deleted_at IS NULL`,
+    ]);
+    return {
+      equipamento: { id: eq.id, nome: eq.nome },
+      scs: { habilitado: eq.scs, comando: eq.scs_comando, status: eq.scs_status, medicao: eq.scs_medicao },
+      pm, status_fonte: statusFonte, comandos,
+    };
+  }
+
+  /**
+   * Habilita/configura o SCS de um elemento do unifilar (ex.: disjuntor). Grava as
+   * colunas de DECLARAÇÃO (`equipamentos.scs`/`scs_comando`/`scs_status`/`scs_medicao`)
+   * — são colunas SQL-cruas (fora do schema Prisma), por isso `$executeRaw`. É o que
+   * liga os blocos do sheet e coloca o DJ na lista de elementos SCS da TON. Escopado.
+   */
+  async setDisjuntorScs(
+    disjuntorId: string,
+    cfg: { scs?: boolean; scs_comando?: boolean; scs_status?: boolean; scs_medicao?: string },
+    user?: ScopedUser,
+  ) {
+    const id = (disjuntorId ?? '').trim();
+    if (!id) throw new NotFoundException('Equipamento não informado');
+    const exists = await this.prisma.$queryRaw<Array<{ id: string }>>`
+      SELECT TRIM(id) AS id FROM equipamentos WHERE TRIM(id) = ${id} AND deleted_at IS NULL LIMIT 1`;
+    if (!exists[0]) throw new NotFoundException('Equipamento não encontrado');
+    if (user) await this.scopeService.assertEntityInScope('equipamento', id, user);
+    // Desligar o SCS zera comando/status/medição (não deixa órfão declarado sem SCS).
+    const on = cfg.scs === true;
+    const cmd = on ? cfg.scs_comando === true : false;
+    const sts = on ? cfg.scs_status === true : false;
+    const med = on && ['pm', 'ied'].includes(String(cfg.scs_medicao)) ? String(cfg.scs_medicao) : 'nenhuma';
+    await this.prisma.$executeRaw`
+      UPDATE equipamentos
+      SET scs = ${on}, scs_comando = ${cmd}, scs_status = ${sts}, scs_medicao = ${med}
+      WHERE TRIM(id) = ${id}`;
+    return { scs: on, scs_comando: cmd, scs_status: sts, scs_medicao: med };
+  }
+
+  /**
+   * "Configurações SCS" da TON: lista os dispositivos conectados à TON no diagrama
+   * IoT + a associação atual de cada um a um elemento do unifilar com SCS habilitado.
+   * v1 foca no PM (associação por `props.disjuntor_equipamento_id`, que o sheet do DJ
+   * consome na Medição). Escopado por dono (unidade da TON).
+   */
+  async tonScsConfig(tonEquipId: string, user?: ScopedUser) {
+    const id = (tonEquipId ?? '').trim();
+    if (!id) return { devices: [], elementos_scs: [] };
+    const tonRows = await this.prisma.$queryRaw<Array<{ comp_id: string; projeto_id: string; unidade_id: string | null }>>`
+      SELECT TRIM(c.id) AS comp_id, TRIM(c.projeto_id) AS projeto_id, TRIM(e.unidade_id) AS unidade_id
+      FROM iot_componentes c
+      LEFT JOIN equipamentos e ON TRIM(e.id) = COALESCE(NULLIF(TRIM(c.equipamento_id), ''), c.props->>'equipamento_id')
+      WHERE (TRIM(c.equipamento_id) = ${id} OR c.props->>'equipamento_id' = ${id}) AND c.tipo LIKE 'ton%'
+      LIMIT 1`;
+    const ton = tonRows[0];
+    if (!ton) return { devices: [], elementos_scs: [] };
+    if (user && ton.unidade_id) await this.scopeService.assertEntityInScope('unidade', ton.unidade_id, user);
+    const devices = await this.prisma.$queryRaw<Array<{ comp_id: string; tipo: string; nome: string; equipamento_id: string | null; assoc_dj_id: string | null; pontos_override: any }>>`
+      SELECT TRIM(d.id) AS comp_id, d.tipo, COALESCE(d.props->>'name', '') AS nome,
+             COALESCE(NULLIF(TRIM(d.equipamento_id), ''), d.props->>'equipamento_id') AS equipamento_id,
+             NULLIF(TRIM(d.props->>'disjuntor_equipamento_id'), '') AS assoc_dj_id,
+             d.props->'pontos_override' AS pontos_override
+      FROM iot_conexoes x
+      JOIN iot_componentes d ON TRIM(d.id) = CASE WHEN TRIM(x.from_comp_id) = ${ton.comp_id} THEN TRIM(x.to_comp_id) ELSE TRIM(x.from_comp_id) END
+      WHERE TRIM(x.projeto_id) = ${ton.projeto_id}
+        AND (TRIM(x.from_comp_id) = ${ton.comp_id} OR TRIM(x.to_comp_id) = ${ton.comp_id})
+        AND d.tipo IN ('inversor', 'power_meter', 'medidor_comum', 'rele_protecao')`;
+    const elementos = ton.unidade_id
+      ? await this.prisma.$queryRaw<Array<{ id: string; nome: string }>>`
+          SELECT TRIM(id) AS id, TRIM(nome) AS nome FROM equipamentos
+          WHERE scs = true AND TRIM(unidade_id) = ${ton.unidade_id} AND deleted_at IS NULL ORDER BY nome`
+      : [];
+    const elMap = new Map(elementos.map((e) => [e.id, e.nome]));
+
+    // Correspondência de pontos (título ↔ campo JSON) do catálogo: vive na FAMÍLIA
+    // (iot_device_tipos.pontos = {ai,bi,bo}). node-type do diagrama → família.
+    // ai = medições (Tensão Fase A↔Va), bi = estados, bo = comandos. json cai no id
+    // quando o catálogo não define (ex.: relé — só tem label). Editável = lapidação.
+    const NODE_FAMILIA: Record<string, string> = {
+      power_meter: 'medidor_energia', medidor_comum: 'medidor_energia',
+      inversor: 'inversor_solar', rele_protecao: 'rele_protecao',
+    };
+    const familias = [...new Set(devices.map((d) => NODE_FAMILIA[d.tipo]).filter(Boolean))];
+    const tipoRows = familias.length
+      ? await this.prisma.iot_device_tipos.findMany({ where: { codigo: { in: familias } }, select: { codigo: true, pontos: true } })
+      : [];
+    // json_default = do catálogo (cai no id quando vazio); json = efetivo (override por-equip vence).
+    const pick = (arr: any): Array<{ id: string; label: string; json_default: string }> =>
+      (Array.isArray(arr) ? arr : []).map((p: any) => ({ id: p?.id ?? '', label: p?.label ?? p?.id ?? '', json_default: (p?.json && String(p.json).trim()) || p?.id || '' }));
+    const pontosPorFamilia = new Map<string, { ai: any[]; bi: any[]; bo: any[] }>();
+    for (const t of tipoRows) {
+      const pt = (t.pontos as any) ?? {};
+      pontosPorFamilia.set(t.codigo, { ai: pick(pt.ai), bi: pick(pt.bi), bo: pick(pt.bo) });
+    }
+
+    return {
+      devices: devices.map((d) => {
+        const base = pontosPorFamilia.get(NODE_FAMILIA[d.tipo]) ?? { ai: [], bi: [], bo: [] };
+        const ov = (d.pontos_override && typeof d.pontos_override === 'object') ? d.pontos_override : {};
+        const applyOv = (arr: any[]) => arr.map((p) => ({ ...p, json: (ov[p.id] != null && String(ov[p.id]).trim()) ? String(ov[p.id]).trim() : p.json_default }));
+        return {
+          comp_id: d.comp_id, tipo: d.tipo, nome: d.nome, equipamento_id: d.equipamento_id,
+          associado: d.assoc_dj_id ? { equipamento_id: d.assoc_dj_id, nome: elMap.get(d.assoc_dj_id) ?? null } : null,
+          pontos: { ai: applyOv(base.ai), bi: applyOv(base.bi), bo: applyOv(base.bo) },
+        };
+      }),
+      elementos_scs: elementos,
+    };
+  }
+
+  /**
+   * Elementos do unifilar (da unidade desta TON) que DECLARARAM comando/status/
+   * medição, com seus pontos lógicos. É a lista que as telas de vínculo percorrem:
+   * o cadastro diz O QUE o elemento tem; aqui se escolhe DE ONDE vem cada dado.
+   * Escopado por dono (unidade da TON).
+   */
+  async elementosScs(tonEquipId: string, user?: ScopedUser) {
+    const id = (tonEquipId ?? '').trim();
+    if (!id) return { unidade_id: null, elementos: [] };
+
+    const tonRows = await this.prisma.$queryRaw<Array<{ unidade_id: string | null }>>`
+      SELECT TRIM(unidade_id) AS unidade_id FROM equipamentos
+      WHERE TRIM(id) = ${id} AND deleted_at IS NULL LIMIT 1`;
+    const unidadeId = tonRows[0]?.unidade_id ?? null;
+    if (!unidadeId) return { unidade_id: null, elementos: [] };
+    if (user) await this.scopeService.assertEntityInScope('unidade', unidadeId, user);
+
+    const elementos = await this.prisma.$queryRaw<Array<{
+      equipamento_id: string; tag: string | null; nome: string | null;
+      scs_comando: boolean | null; scs_status: boolean | null; scs_medicao: string | null;
+    }>>`
+      SELECT TRIM(id) AS equipamento_id, tag, nome, scs_comando, scs_status, scs_medicao
+      FROM equipamentos
+      WHERE scs = true AND TRIM(unidade_id) = ${unidadeId} AND deleted_at IS NULL
+      ORDER BY COALESCE(NULLIF(TRIM(tag), ''), nome)`;
+    if (!elementos.length) return { unidade_id: unidadeId, elementos: [] };
+
+    const pontos = await this.prisma.equipamento_pontos.findMany({
+      where: { equipamento_id: { in: elementos.map((e) => e.equipamento_id) }, deleted_at: null, ativo: true },
+      select: { id: true, equipamento_id: true, tipo: true, nome: true },
+      orderBy: [{ ordem: 'asc' }, { nome: 'asc' }],
+    });
+    const porEquip = new Map<string, Array<{ id: string; tipo: string; nome: string }>>();
+    for (const p of pontos) {
+      const k = p.equipamento_id.trim();
+      if (!porEquip.has(k)) porEquip.set(k, []);
+      porEquip.get(k)!.push({ id: p.id.trim(), tipo: p.tipo, nome: p.nome.trim() });
+    }
+
+    return {
+      unidade_id: unidadeId,
+      elementos: elementos.map((e) => ({
+        equipamento_id: e.equipamento_id,
+        rotulo: e.tag?.trim() || e.nome?.trim() || e.equipamento_id,
+        scs_comando: !!e.scs_comando,
+        scs_status: !!e.scs_status,
+        scs_medicao: e.scs_medicao ?? 'nenhuma',
+        pontos: porEquip.get(e.equipamento_id) ?? [],
+      })),
+    };
+  }
+
+  /**
+   * Elementos com SCS de uma UNIDADE (não de uma TON) + a última telemetria de cada um.
+   * Alimenta os cards-ícone da Visão Geral (equipamentos do unifilar com SCS habilitado).
+   * Escopado por dono (cliente só vê a própria usina).
+   */
+  async elementosScsVisaoGeral(unidadeId: string, user?: ScopedUser) {
+    const uid = (unidadeId ?? '').trim();
+    if (!uid) return { unidade_id: null, elementos: [] };
+    if (user) await this.scopeService.assertEntityInScope('unidade', uid, user);
+
+    const elementos = await this.prisma.$queryRaw<Array<{
+      equipamento_id: string; tag: string | null; nome: string | null;
+      scs_comando: boolean | null; scs_status: boolean | null; scs_medicao: string | null;
+      tipo: string | null;
+    }>>`
+      SELECT TRIM(e.id) AS equipamento_id, e.tag, e.nome, e.scs_comando, e.scs_status, e.scs_medicao,
+             te.nome AS tipo
+      FROM equipamentos e
+      LEFT JOIN tipos_equipamentos te ON TRIM(te.id) = TRIM(e.tipo_equipamento_id)
+      WHERE e.scs = true AND TRIM(e.unidade_id) = ${uid} AND e.deleted_at IS NULL
+      ORDER BY COALESCE(NULLIF(TRIM(e.tag), ''), e.nome)`;
+    if (!elementos.length) return { unidade_id: uid, elementos: [] };
+
+    const ids = elementos.map((e) => e.equipamento_id);
+    const dados = await this.prisma.$queryRaw<Array<{ eid: string; dados: any; created_at: Date }>>`
+      SELECT DISTINCT ON (TRIM(ed.equipamento_id)) TRIM(ed.equipamento_id) AS eid, ed.dados, ed.created_at
+      FROM equipamentos_dados ed
+      WHERE TRIM(ed.equipamento_id) IN (${Prisma.join(ids)})
+      ORDER BY TRIM(ed.equipamento_id), ed.created_at DESC`;
+    const porId = new Map(dados.map((d) => [d.eid, d]));
+
+    return {
+      unidade_id: uid,
+      elementos: elementos.map((e) => {
+        const d = porId.get(e.equipamento_id);
+        return {
+          equipamento_id: e.equipamento_id,
+          rotulo: e.tag?.trim() || e.nome?.trim() || e.equipamento_id,
+          tipo: e.tipo ?? null,
+          comando: !!e.scs_comando,
+          status: !!e.scs_status,
+          medicao: !!(e.scs_medicao && e.scs_medicao !== 'nenhuma'),
+          dados: d?.dados ?? null,
+          ts: d?.created_at ?? null,
+        };
+      }),
+    };
+  }
+
+  /**
+   * Salva a correspondência editada (título ↔ campo JSON) de um device da TON.
+   * `overrides` = { <ponto_id>: <json_key> } — só os que DIFEREM do catálogo (o front
+   * já filtra). Substitui o mapa inteiro em `iot_componentes.props.pontos_override`
+   * (mandar {} limpa tudo, voltando ao catálogo). Escopado por dono.
+   */
+  async savePontosOverride(compId: string, overrides: Record<string, string>, user?: ScopedUser) {
+    const cid = (compId ?? '').trim();
+    if (!cid) throw new NotFoundException('Componente não informado');
+    const rows = await this.prisma.$queryRaw<Array<{ props: any; unidade_id: string | null }>>`
+      SELECT c.props, TRIM(e.unidade_id) AS unidade_id
+      FROM iot_componentes c
+      LEFT JOIN equipamentos e ON TRIM(e.id) = COALESCE(NULLIF(TRIM(c.equipamento_id), ''), c.props->>'equipamento_id')
+      WHERE TRIM(c.id) = ${cid} LIMIT 1`;
+    const row = rows[0];
+    if (!row) throw new NotFoundException('Componente não encontrado');
+    if (user && row.unidade_id) await this.scopeService.assertEntityInScope('unidade', row.unidade_id, user);
+    const clean: Record<string, string> = {};
+    for (const [k, v] of Object.entries(overrides ?? {})) {
+      if (k && v != null && String(v).trim()) clean[k] = String(v).trim();
+    }
+    const props = (row.props ?? {}) as Record<string, unknown>;
+    if (Object.keys(clean).length) props.pontos_override = clean;
+    else delete props.pontos_override;
+    await this.prisma.$executeRaw`UPDATE iot_componentes SET props = ${JSON.stringify(props)}::jsonb WHERE TRIM(id) = ${cid}`;
+    return { ok: true, count: Object.keys(clean).length };
+  }
+
+  /** Associa (ou desassocia, elementoEquipId=null) um device da TON a um elemento SCS do unifilar. */
+  async associarScs(compId: string, elementoEquipId: string | null, user?: ScopedUser) {
+    const cid = (compId ?? '').trim();
+    const rows = await this.prisma.$queryRaw<Array<{ props: any; unidade_id: string | null }>>`
+      SELECT c.props, TRIM(e.unidade_id) AS unidade_id
+      FROM iot_componentes c
+      LEFT JOIN equipamentos e ON TRIM(e.id) = COALESCE(NULLIF(TRIM(c.equipamento_id), ''), c.props->>'equipamento_id')
+      WHERE TRIM(c.id) = ${cid} LIMIT 1`;
+    const row = rows[0];
+    if (!row) throw new NotFoundException('Componente não encontrado');
+    if (user && row.unidade_id) await this.scopeService.assertEntityInScope('unidade', row.unidade_id, user);
+    const props = (row.props ?? {}) as Record<string, unknown>;
+    if (elementoEquipId && elementoEquipId.trim()) props.disjuntor_equipamento_id = elementoEquipId.trim();
+    else delete props.disjuntor_equipamento_id;
+    await this.prisma.$executeRaw`UPDATE iot_componentes SET props = ${JSON.stringify(props)}::jsonb WHERE TRIM(id) = ${cid}`;
+    return { ok: true };
   }
 
   /**
@@ -153,15 +501,31 @@ export class IoTService {
       WHERE TRIM(COALESCE(kv.value->>'equipamento_id', '')) = ${id}
         AND COALESCE(NULLIF(TRIM(c.equipamento_id), ''), c.props->>'equipamento_id', '') <> ''
     `;
-    if (rows.length === 0) return null;
-
     const campos = rows.map((r) => r.campo);
-    return {
+    const antigo = rows.length === 0 ? null : {
       rele_equipamento_id: rows[0].rele_equipamento_id,
       rele_nome: rows[0].rele_nome,
       campo_aberto: campos.find((c) => /aberto/i.test(c)) ?? null,
       campo_fechado: campos.find((c) => /fechado/i.test(c)) ?? null,
     };
+
+    // Fase 5 (FLIP): iot_vinculos é a fonte primária; o io_config.bi (antigo) vira
+    // FALLBACK quando o espelho não tem, e loga divergência. `rele_nome` vem do
+    // antigo (o vínculo guarda o equipamento, não o props.name). Reversível.
+    const v = await this.mirror.lookupStatusFonte(id);
+    if (v && antigo && (v.rele_equipamento_id !== antigo.rele_equipamento_id.trim()
+        || v.campo_aberto !== antigo.campo_aberto || v.campo_fechado !== antigo.campo_fechado)) {
+      this.mirror.divergiu('flip/statusFonteDoDisjuntor', antigo, v);
+    }
+    if (v) {
+      return {
+        rele_equipamento_id: v.rele_equipamento_id,
+        rele_nome: antigo?.rele_nome ?? null,
+        campo_aberto: v.campo_aberto,
+        campo_fechado: v.campo_fechado,
+      };
+    }
+    return antigo;
   }
 
   async createProjeto(unidadeId: string, nome: string, user?: ScopedUser): Promise<IotProjetoRow> {
@@ -189,7 +553,7 @@ export class IoTService {
       if (unidadeId) await this.scopeService.assertEntityInScope('unidade', unidadeId, user);
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    const _projetoRow = await this.prisma.$transaction(async (tx) => {
       const existing = await tx.iot_projetos.findFirst({
         where: { id: trimmedId, deleted_at: null },
         select: { id: true },
@@ -241,6 +605,11 @@ export class IoTService {
       }
       return this.toProjetoRow(updated);
     });
+
+    // Fase 3 (dual-write): espelha os vínculos Modbus (io_config) do projeto para
+    // iot_vinculos — DEPOIS do commit (mirror usa this.prisma, não a tx). Best-effort.
+    void this.mirror.resyncProjetoModbus(trimmedId);
+    return _projetoRow;
   }
 
   async deleteProjeto(id: string, user?: ScopedUser): Promise<void> {

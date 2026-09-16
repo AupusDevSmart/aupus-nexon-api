@@ -32,6 +32,7 @@ import { OtaModule } from './modules/ota/ota.module';
 import { EquipamentosCmdModule } from './modules/equipamentos-cmd/equipamentos-cmd.module';
 import { EquipamentoPontosModule } from './modules/equipamento-pontos/equipamento-pontos.module';
 import { TonBoModule } from './modules/ton-bo/ton-bo.module';
+import { VinculosMirrorModule } from './modules/iot-vinculos/vinculos-mirror.module';
 import { SinopticoModule } from './modules/sinoptico/sinoptico.module';
 import { TonBiModule } from './modules/ton-bi/ton-bi.module';
 import { TonAiModule } from './modules/ton-ai/ton-ai.module';
@@ -50,7 +51,6 @@ import {
   PlantaOperadoresModule,
   UnidadesModule,
   EquipamentosModule,
-  SincronizacaoModule,
   TiposEquipamentosModule,
   CategoriasEquipamentosModule,
   ConcessionariasModule,
@@ -83,7 +83,6 @@ import { IotCatalogModule } from './modules/iot-catalog/iot-catalog.module';
     PlantaOperadoresModule,
     UnidadesModule,
     EquipamentosModule,
-    SincronizacaoModule,
     TiposEquipamentosModule,
     CategoriasEquipamentosModule,
     ConcessionariasModule,
@@ -101,6 +100,7 @@ import { IotCatalogModule } from './modules/iot-catalog/iot-catalog.module';
     OtaModule,
     EquipamentosCmdModule,
     EquipamentoPontosModule,
+    VinculosMirrorModule,
     TonBoModule,
     SinopticoModule,
     TonBiModule,
