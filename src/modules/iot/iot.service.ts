@@ -239,7 +239,7 @@ export class IoTService {
       JOIN iot_componentes d ON TRIM(d.id) = CASE WHEN TRIM(x.from_comp_id) = ${ton.comp_id} THEN TRIM(x.to_comp_id) ELSE TRIM(x.from_comp_id) END
       WHERE TRIM(x.projeto_id) = ${ton.projeto_id}
         AND (TRIM(x.from_comp_id) = ${ton.comp_id} OR TRIM(x.to_comp_id) = ${ton.comp_id})
-        AND d.tipo IN ('inversor', 'power_meter', 'medidor_comum', 'rele_protecao')`;
+        AND d.tipo IN ('inversor', 'power_meter', 'medidor_comum', 'medidor_ssu', 'rele_protecao')`;
     const elementos = ton.unidade_id
       ? await this.prisma.$queryRaw<Array<{ id: string; nome: string }>>`
           SELECT TRIM(id) AS id, TRIM(nome) AS nome FROM equipamentos
@@ -253,6 +253,7 @@ export class IoTService {
     // quando o catálogo não define (ex.: relé — só tem label). Editável = lapidação.
     const NODE_FAMILIA: Record<string, string> = {
       power_meter: 'medidor_energia', medidor_comum: 'medidor_energia',
+      medidor_ssu: 'gateway_medidor',   // pontos phf/phr/qh*/sts (mesmos do A-966)
       inversor: 'inversor_solar', rele_protecao: 'rele_protecao',
     };
     const familias = [...new Set(devices.map((d) => NODE_FAMILIA[d.tipo]).filter(Boolean))];
@@ -1170,8 +1171,11 @@ export class IoTService {
     const comps = diagrama.components as Array<Record<string, any>>;
 
     // Device Modbus = tem endereco Modbus e modelo do catalogo (nao e' TON).
+    // Medidor SSU (NBR 14522, entrada SU+ da TON-V2) entra sempre: nao e' Modbus e o
+    // modelo do catalogo e' opcional (o parser e' generico da norma).
     const devices = comps.filter((c) => {
       if (isTon(c?.type)) return false;
+      if (String(c?.type ?? '') === 'medidor_ssu') return true;
       const p = (c?.props ?? {}) as Record<string, unknown>;
       return (
         String(p.modbus_address ?? '').trim() !== '' &&
@@ -1234,8 +1238,12 @@ export class IoTService {
 
       const nome =
         String(props.name ?? props.catalog_id ?? comp.type ?? 'Device').trim() || 'Device';
-      const addr = String(props.modbus_address ?? '').trim();
+      const addr = String(props.modbus_address ?? '').trim() || '1';
       const topico = `${base}/${nome}_${addr}/data`;
+      // Medidor SSU: tipo de equipamento da categoria "Gateway" (o mesmo do A-966) — e' a
+      // categoria que liga a ingestao de pulsos (salvarDadosGateway), o dashboard do
+      // gateway e o fluxo BIDIRECIONAL na demanda. A TON publica o mesmo JSON do A-966.
+      const tipoEquipamentoId = String(comp.type ?? '') === 'medidor_ssu' ? 'tipo-ims-a966-001' : undefined;
 
       let equipId: string;
       const existente = await tx.equipamentos.findFirst({
@@ -1252,6 +1260,7 @@ export class IoTService {
             classificacao: 'UC',
             criticidade: '3',
             tipo_equipamento: String(comp.type ?? '').toUpperCase(),
+            ...(tipoEquipamentoId ? { tipo_equipamento_id: tipoEquipamentoId } : {}),
             mqtt_habilitado: true,
             automacao: false,
             topico_mqtt: topico,

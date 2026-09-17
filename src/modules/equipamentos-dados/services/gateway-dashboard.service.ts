@@ -9,6 +9,16 @@ const KD_A966_SSU = 0.048;
 // 15min = 1/4 hora -> energia do bucket * 4 = potencia media (kW/kvar)
 const ENERGIA_PARA_POTENCIA = 4;
 
+/**
+ * Ke (kWh/pulso) da leitura: a TON-V2 (leitor SSU NBR 14522) publica `ke` do cadastro
+ * no envelope; o gateway A-966 nao publica -> padrao historico KD_A966_SSU. Mesma
+ * regra da ingestao (mqtt.service salvarDadosGateway).
+ */
+function kdDe(dados: any): number {
+  const v = Number(dados?.ke ?? dados?.data?.ke ?? NaN);
+  return Number.isFinite(v) && v > 0 ? v : KD_A966_SSU;
+}
+
 // 24h * 4 buckets/h = 96 leituras esperadas/dia se cadencia for 15min
 const LEITURAS_POR_HORA = 4;
 
@@ -39,11 +49,12 @@ function calcularBucket(
   qhfc: number,
   qhri: number,
   qhrc: number,
+  kd: number = KD_A966_SSU,
 ): BucketDerivado {
-  const phf_kwh = phf * KD_A966_SSU;
-  const phr_kwh = phr * KD_A966_SSU;
-  const q_ind_kvarh = (qhfi + qhri) * KD_A966_SSU;
-  const q_cap_kvarh = (qhfc + qhrc) * KD_A966_SSU;
+  const phf_kwh = phf * kd;
+  const phr_kwh = phr * kd;
+  const q_ind_kvarh = (qhfi + qhri) * kd;
+  const q_cap_kvarh = (qhfc + qhrc) * kd;
 
   const kW_consumo = phf_kwh * ENERGIA_PARA_POTENCIA;
   const kW_injecao = phr_kwh * ENERGIA_PARA_POTENCIA;
@@ -119,6 +130,8 @@ export class GatewayDashboardService {
       take: n,
       select: { timestamp_dados: true, dados: true },
     });
+    // Ke deste equipamento: da leitura mais recente (TON-V2 publica; A-966 cai no padrao)
+    const kd = kdDe(ultimasRaw[0]?.dados);
 
     const ultimas_leituras = ultimasRaw.map((r) => {
       const d = calcularBucket(
@@ -128,6 +141,7 @@ export class GatewayDashboardService {
         getNum(r.dados, 'qhfc'),
         getNum(r.dados, 'qhri'),
         getNum(r.dados, 'qhrc'),
+        kd,
       );
       return {
         timestamp: r.timestamp_dados,
@@ -151,6 +165,7 @@ export class GatewayDashboardService {
               getNum(ultimasRaw[0].dados, 'qhfc'),
               getNum(ultimasRaw[0].dados, 'qhri'),
               getNum(ultimasRaw[0].dados, 'qhrc'),
+              kd,
             ),
           }
         : null;
@@ -173,17 +188,17 @@ export class GatewayDashboardService {
     `;
 
     const r0 = resumoRow[0] ?? {};
-    const consumo_kwh = Number(r0.phf_sum) * KD_A966_SSU;
-    const injecao_kwh = Number(r0.phr_sum) * KD_A966_SSU;
-    const q_ind_kvarh = (Number(r0.qhfi_sum) + Number(r0.qhri_sum)) * KD_A966_SSU;
-    const q_cap_kvarh = (Number(r0.qhfc_sum) + Number(r0.qhrc_sum)) * KD_A966_SSU;
+    const consumo_kwh = Number(r0.phf_sum) * kd;
+    const injecao_kwh = Number(r0.phr_sum) * kd;
+    const q_ind_kvarh = (Number(r0.qhfi_sum) + Number(r0.qhri_sum)) * kd;
+    const q_cap_kvarh = (Number(r0.qhfc_sum) + Number(r0.qhrc_sum)) * kd;
     const num_leituras_hoje = Number(r0.num_leituras) || 0;
 
     // 3. Picos do dia: precisa do timestamp do bucket que teve o pico.
     // Calcula por bucket (no SQL) e usa argmax via DISTINCT ON.
     const picoConsumoRow: any[] = await this.prisma.$queryRaw`
       SELECT timestamp_dados,
-             COALESCE((dados->'data'->>'phf')::numeric, (dados->>'phf')::numeric) * ${KD_A966_SSU} * ${ENERGIA_PARA_POTENCIA} AS kw
+             COALESCE((dados->'data'->>'phf')::numeric, (dados->>'phf')::numeric) * ${kd} * ${ENERGIA_PARA_POTENCIA} AS kw
         FROM equipamentos_dados
        WHERE equipamento_id = ${id}
          AND timestamp_dados >= ${dataInicioDia}
@@ -194,7 +209,7 @@ export class GatewayDashboardService {
     `;
     const picoInjecaoRow: any[] = await this.prisma.$queryRaw`
       SELECT timestamp_dados,
-             COALESCE((dados->'data'->>'phr')::numeric, (dados->>'phr')::numeric) * ${KD_A966_SSU} * ${ENERGIA_PARA_POTENCIA} AS kw
+             COALESCE((dados->'data'->>'phr')::numeric, (dados->>'phr')::numeric) * ${kd} * ${ENERGIA_PARA_POTENCIA} AS kw
         FROM equipamentos_dados
        WHERE equipamento_id = ${id}
          AND timestamp_dados >= ${dataInicioDia}
@@ -217,7 +232,7 @@ export class GatewayDashboardService {
     // toggle "Atual / Mes" nos gauges de demanda do modal.
     const picoConsumoMesRow: any[] = await this.prisma.$queryRaw`
       SELECT timestamp_dados,
-             COALESCE((dados->'data'->>'phf')::numeric, (dados->>'phf')::numeric) * ${KD_A966_SSU} * ${ENERGIA_PARA_POTENCIA} AS kw
+             COALESCE((dados->'data'->>'phf')::numeric, (dados->>'phf')::numeric) * ${kd} * ${ENERGIA_PARA_POTENCIA} AS kw
         FROM equipamentos_dados
        WHERE equipamento_id = ${id}
          AND timestamp_dados >= ${dataInicioMes}
@@ -228,7 +243,7 @@ export class GatewayDashboardService {
     `;
     const picoInjecaoMesRow: any[] = await this.prisma.$queryRaw`
       SELECT timestamp_dados,
-             COALESCE((dados->'data'->>'phr')::numeric, (dados->>'phr')::numeric) * ${KD_A966_SSU} * ${ENERGIA_PARA_POTENCIA} AS kw
+             COALESCE((dados->'data'->>'phr')::numeric, (dados->>'phr')::numeric) * ${kd} * ${ENERGIA_PARA_POTENCIA} AS kw
         FROM equipamentos_dados
        WHERE equipamento_id = ${id}
          AND timestamp_dados >= ${dataInicioMes}
@@ -340,13 +355,21 @@ export class GatewayDashboardService {
       ORDER BY bucket ASC
     `;
 
+    // Ke deste equipamento (TON-V2 publica `ke`; A-966 cai no padrao)
+    const ultRow = await this.prisma.equipamentos_dados.findFirst({
+      where: { equipamento_id: id },
+      orderBy: { timestamp_dados: 'desc' },
+      select: { dados: true },
+    });
+    const kd = kdDe(ultRow?.dados);
+
     const dados = rows.map((r) => {
       const phf_avg = Number(r.phf_avg) || 0;
       const phr_avg = Number(r.phr_avg) || 0;
       return {
         timestamp: r.bucket,
-        kW_consumo: phf_avg * KD_A966_SSU * ENERGIA_PARA_POTENCIA,
-        kW_injecao: phr_avg * KD_A966_SSU * ENERGIA_PARA_POTENCIA,
+        kW_consumo: phf_avg * kd * ENERGIA_PARA_POTENCIA,
+        kW_injecao: phr_avg * kd * ENERGIA_PARA_POTENCIA,
         num_leituras: r.num_leituras,
       };
     });

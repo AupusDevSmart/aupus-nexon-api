@@ -1840,7 +1840,12 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     timestamp: Date,
     qualidadeOriginal: string,
   ) {
-    const KD_A966_SSU = 0.048;        // pulsos → kWh
+    // Ke (kWh/pulso): o gateway A-966 nao informa → padrao historico 0,048. A TON-V2
+    // (leitor SSU NBR 14522) publica `ke` do cadastro no envelope → prevalece quando
+    // vier valido. Mesma regra no gateway-dashboard.service (kdDe).
+    const KD_PADRAO_A966 = 0.048;
+    const keInformado = Number(dados?.ke ?? dados?.data?.ke ?? NaN);
+    const KD_A966_SSU = Number.isFinite(keInformado) && keInformado > 0 ? keInformado : KD_PADRAO_A966;
     const BUCKET_HORAS = 0.25;        // 15 min nominal
     const GLITCH_PHF_THRESHOLD = 100; // pulsos; ≈ 4.8 kWh em 15min
 
