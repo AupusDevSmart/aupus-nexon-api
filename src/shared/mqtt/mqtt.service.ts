@@ -451,7 +451,7 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     }
 
     // 6) Bomba de combustível + carregador: <base>/abastecimento, <base>/bomba, <base>/carregador.
-    for (const suf of ['abastecimento', 'bomba', 'carregador']) {
+    for (const suf of ['abastecimento', 'bomba', 'evento', 'auth/req', 'carregador']) {
       const t = `${topic}/${suf}`;
       if (!this.subscriptions.has(t)) {
         this.subscriptions.set(t, []);
@@ -464,42 +464,55 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     }
   }
 
-  /** Ingere uma transação de abastecimento publicada pela bomba em `<base>/abastecimento`. */
-  private async ingerirAbastecimento(equipamentoId: string, d: any): Promise<void> {
-    try {
-      const eid = equipamentoId.trim();
-      const pl = await this.prisma.$queryRaw<Array<{ planta_id: string; maquina_nome: string }>>`
-        SELECT TRIM(u.planta_id) AS planta_id,
-               (SELECT maquina_nome FROM rfid_autorizados r WHERE r.uid = ${String(d.uid ?? '')} LIMIT 1) AS maquina_nome
-        FROM equipamentos e JOIN unidades u ON TRIM(u.id) = TRIM(e.unidade_id)
-        WHERE TRIM(e.id) = ${eid} LIMIT 1`;
-      const id = randomBytes(13).toString('hex');
-      await this.prisma.$executeRaw`
-        INSERT INTO abastecimentos (id, equipamento_id, uid, maquina_nome, planta_id, litros, nivel_antes, nivel_depois, status, created_at)
-        VALUES (${id}, ${eid}, ${d.uid ?? null}, ${pl[0]?.maquina_nome ?? null}, ${pl[0]?.planta_id ?? null},
-                ${d.litros ?? null}, ${d.nivel_antes ?? null}, ${d.nivel_depois ?? null}, ${d.status ?? null}, now())`;
-    } catch (e) {
-      console.warn(`[bomba] ingerir abastecimento falhou: ${e instanceof Error ? e.message : e}`);
-    }
+  // ======================= POSTO DE COMBUSTÍVEL (bomba na TON) =======================
+  // Tópicos da TON: <base>/abastecimento (transação), <base>/bomba (telemetria), <base>/evento
+  // (negado/falha_partida/contator_colado/nao_autorizado/manual/rearme), <base>/auth/req
+  // (pedido de autorização online → respondemos em <base>/auth/resp). Doc: "Posto de
+  // Combustível na Fazenda — Como funciona" + lib firmware-libs/bomba_posto.
+  private sufixoPosto(topic: string): string | null {
+    for (const suf of ['/abastecimento', '/bomba', '/evento', '/auth/req']) if (topic.endsWith(suf)) return suf;
+    return null;
   }
 
-  /** Atualiza o estado da bomba (nível/estado) publicado em `<base>/bomba` — pro modal. */
-  private async atualizarBombaEstado(equipamentoId: string, d: any): Promise<void> {
+  private async rotearPosto(topic: string, base: string, bombaId: string, dados: any): Promise<void> {
+    if (topic.endsWith('/abastecimento')) return this.ingerirAbastecimento(bombaId, dados);
+    if (topic.endsWith('/bomba')) return this.atualizarBombaEstado(bombaId, dados);
+    if (topic.endsWith('/evento')) return this.ingerirEvento(bombaId, dados);
+    if (topic.endsWith('/auth/req')) return this.responderAuth(base, bombaId, dados);
+  }
+
+  private async ehBomba(equipamentoId: string): Promise<boolean> {
     try {
-      const eid = equipamentoId.trim();
-      await this.prisma.$executeRaw`
-        UPDATE bomba_combustivel_config
-        SET ultimo_estado = ${d.estado ?? null}, ultimo_nivel_pct = ${d.nivel_pct ?? null}, ultima_leitura = now(), updated_at = now()
-        WHERE TRIM(equipamento_id) = ${eid}`;
+      const r = await this.prisma.$queryRaw<Array<{ x: number }>>`
+        SELECT 1 AS x FROM equipamentos e LEFT JOIN tipos_equipamentos te ON TRIM(te.id) = TRIM(e.tipo_equipamento_id)
+        WHERE TRIM(e.id) = ${equipamentoId.trim()} AND (e.tipo_equipamento ILIKE '%bomba%' OR te.codigo ILIKE '%BOMBA%') LIMIT 1`;
+      return r.length > 0;
+    } catch { return false; }
+  }
+
+  /** TON → bomba que ela controla (equipamento do tipo bomba dono dos pontos amarrados nos BO da TON). */
+  private async resolverBombaPorTonId(tonId: string): Promise<string | null> {
+    try {
+      const rows = await this.prisma.$queryRaw<Array<{ bomba_id: string }>>`
+        SELECT DISTINCT TRIM(p.equipamento_id) AS bomba_id
+        FROM ton_bo tb
+        JOIN equipamento_pontos p ON p.id = tb.equipamento_ponto_id
+        JOIN equipamentos e ON TRIM(e.id) = TRIM(p.equipamento_id) AND e.deleted_at IS NULL
+        LEFT JOIN tipos_equipamentos te ON TRIM(te.id) = TRIM(e.tipo_equipamento_id)
+        WHERE TRIM(tb.ton_id) = ${tonId.trim()} AND tb.deleted_at IS NULL
+          AND (e.tipo_equipamento ILIKE '%bomba%' OR te.codigo ILIKE '%BOMBA%')
+        LIMIT 1`;
+      return rows[0]?.bomba_id ? rows[0].bomba_id.trim() : null;
     } catch (e) {
-      console.warn(`[bomba] atualizar estado falhou: ${e instanceof Error ? e.message : e}`);
+      console.warn(`[posto] resolver bomba pela TON ${tonId} falhou: ${e instanceof Error ? e.message : e}`);
+      return null;
     }
   }
 
   /**
-   * Bancada: resolve o equipamento da BOMBA a partir do NOME da TON (tópico SIM
-   * `TESTE/<nome>/...`). A bomba é o equipamento dono dos pontos mapeados no ton_bo
-   * daquela TON. Sem cadastro de tópico — funciona só com o firmware 🧪 no ar.
+   * Bancada: resolve a BOMBA a partir do NOME da TON (tópico 🧪 `TESTE/<nome>/...`, sem
+   * tópico cadastrado). A bomba é o equipamento (do tipo bomba) dono dos pontos mapeados
+   * no ton_bo daquela TON.
    */
   private async resolverBombaPorNomeTon(tonNome: string): Promise<string | null> {
     const nome = (tonNome ?? '').trim();
@@ -510,13 +523,145 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
         FROM equipamentos t
         JOIN ton_bo tb ON TRIM(tb.ton_id) = TRIM(t.id) AND tb.deleted_at IS NULL
         JOIN equipamento_pontos p ON p.id = tb.equipamento_ponto_id
+        JOIN equipamentos e ON TRIM(e.id) = TRIM(p.equipamento_id) AND e.deleted_at IS NULL
+        LEFT JOIN tipos_equipamentos te ON TRIM(te.id) = TRIM(e.tipo_equipamento_id)
         WHERE TRIM(t.nome) = ${nome} AND t.deleted_at IS NULL
+          AND (e.tipo_equipamento ILIKE '%bomba%' OR te.codigo ILIKE '%BOMBA%')
         LIMIT 1`;
       return rows[0]?.bomba_id ? rows[0].bomba_id.trim() : null;
     } catch (e) {
-      console.warn(`[bomba] resolver bomba por nome da TON "${nome}" falhou: ${e instanceof Error ? e.message : e}`);
+      console.warn(`[posto] resolver bomba por nome da TON "${nome}" falhou: ${e instanceof Error ? e.message : e}`);
       return null;
     }
+  }
+
+  private async plantaDaBomba(bombaId: string): Promise<string | null> {
+    const r = await this.prisma.$queryRaw<Array<{ planta_id: string }>>`
+      SELECT TRIM(u.planta_id) AS planta_id FROM equipamentos e JOIN unidades u ON TRIM(u.id) = TRIM(e.unidade_id)
+      WHERE TRIM(e.id) = ${bombaId.trim()} LIMIT 1`;
+    return r[0]?.planta_id ?? null;
+  }
+
+  /** Transação publicada pela TON em `<base>/abastecimento` (firmware novo: matricula/fim_motivo/validacao; legado: uid/litros/status). */
+  private async ingerirAbastecimento(bombaId: string, d: any): Promise<void> {
+    const eid = bombaId.trim();
+    const uid = String(d?.uid ?? '').trim().toUpperCase() || null;
+    const mat = String(d?.matricula ?? '').trim() || null;
+    const fimMotivo = String(d?.fim_motivo ?? d?.status ?? '').trim() || null;
+    const validacao = String(d?.validacao ?? '').trim() || null;
+    const inicio = Number(d?.inicio) > 1700000000 ? new Date(Number(d.inicio) * 1000) : null;
+    const fim = Number(d?.fim) > 1700000000 ? new Date(Number(d.fim) * 1000) : null;
+    const id = randomBytes(13).toString('hex');
+    try {
+      const plantaId = await this.plantaDaBomba(eid);
+      const nomes = await this.prisma.$queryRaw<Array<{ maquina_nome: string | null; operador_nome: string | null }>>`
+        SELECT (SELECT maquina_nome FROM rfid_autorizados r WHERE UPPER(r.uid) = ${uid ?? ''} ORDER BY (r.bomba_id = ${eid}) DESC LIMIT 1) AS maquina_nome,
+               (SELECT nome FROM bomba_operadores o WHERE o.matricula = ${mat ?? ''} AND (o.bomba_id = ${eid} OR o.bomba_id IS NULL) ORDER BY (o.bomba_id = ${eid}) DESC LIMIT 1) AS operador_nome`;
+      await this.prisma.$executeRaw`
+        INSERT INTO abastecimentos (id, equipamento_id, uid, maquina_nome, matricula, operador_nome, planta_id, litros, nivel_antes, nivel_depois,
+                                    status, fim_motivo, validacao, inicio, fim, created_at)
+        VALUES (${id}, ${eid}, ${uid}, ${nomes[0]?.maquina_nome ?? null}, ${mat}, ${nomes[0]?.operador_nome ?? null}, ${plantaId},
+                ${d?.litros ?? null}, ${d?.nivel_antes ?? null}, ${d?.nivel_depois ?? null}, ${fimMotivo}, ${fimMotivo}, ${validacao}, ${inicio}, ${fim}, now())`;
+    } catch (e) {
+      // Colunas novas ausentes (migração 2026-09-21 ainda não aplicada) → grava o mínimo legado.
+      console.warn(`[posto] ingerir abastecimento (completo) falhou, tentando legado: ${e instanceof Error ? e.message : e}`);
+      try {
+        await this.prisma.$executeRaw`
+          INSERT INTO abastecimentos (id, equipamento_id, uid, litros, nivel_antes, nivel_depois, status, created_at)
+          VALUES (${id}, ${eid}, ${uid}, ${d?.litros ?? null}, ${d?.nivel_antes ?? null}, ${d?.nivel_depois ?? null}, ${fimMotivo}, now())`;
+      } catch (e2) {
+        console.warn(`[posto] ingerir abastecimento falhou: ${e2 instanceof Error ? e2.message : e2}`);
+      }
+    }
+  }
+
+  /** Telemetria da bomba em `<base>/bomba` (30 s + mudança de estado) — pro modal. */
+  private async atualizarBombaEstado(bombaId: string, d: any): Promise<void> {
+    const eid = bombaId.trim();
+    const estado = d?.estado != null ? String(d.estado).slice(0, 16) : null;
+    const nivel = d?.nivel_pct != null && Number(d.nivel_pct) >= 0 ? Number(d.nivel_pct) : null;
+    try {
+      const json = JSON.stringify(d ?? {});
+      const n = await this.prisma.$executeRaw`
+        UPDATE bomba_combustivel_config
+        SET ultimo_estado = ${estado}, ultimo_nivel_pct = ${nivel}, ultimo_json = ${json}::jsonb,
+            lista_versao = ${d?.lista_versao != null ? Number(d.lista_versao) : null}, ultima_leitura = now(), updated_at = now()
+        WHERE TRIM(equipamento_id) = ${eid}`;
+      if (n === 0) {
+        await this.prisma.$executeRaw`
+          INSERT INTO bomba_combustivel_config (id, equipamento_id, ultimo_estado, ultimo_nivel_pct, ultimo_json, lista_versao, ultima_leitura)
+          VALUES (${randomBytes(13).toString('hex')}, ${eid}, ${estado}, ${nivel}, ${json}::jsonb, ${d?.lista_versao != null ? Number(d.lista_versao) : null}, now())`;
+      }
+    } catch (e) {
+      try {
+        await this.prisma.$executeRaw`
+          UPDATE bomba_combustivel_config
+          SET ultimo_estado = ${estado}, ultimo_nivel_pct = ${nivel}, ultima_leitura = now(), updated_at = now()
+          WHERE TRIM(equipamento_id) = ${eid}`;
+      } catch (e2) {
+        console.warn(`[posto] atualizar estado falhou: ${e2 instanceof Error ? e2.message : e2}`);
+      }
+    }
+  }
+
+  /** Evento da TON em `<base>/evento` → bomba_eventos (negado, falha_partida, contator_colado, nao_autorizado, manual, rearme...). */
+  private async ingerirEvento(bombaId: string, d: any): Promise<void> {
+    try {
+      const ts = Number(d?.ts) > 1700000000 ? new Date(Number(d.ts) * 1000) : null;
+      await this.prisma.$executeRaw`
+        INSERT INTO bomba_eventos (id, equipamento_id, tipo, motivo, uid, matricula, seq, ts, created_at)
+        VALUES (${randomBytes(13).toString('hex')}, ${bombaId.trim()}, ${String(d?.tipo ?? '').slice(0, 24)}, ${String(d?.motivo ?? '').slice(0, 32)},
+                ${String(d?.uid ?? '').trim().toUpperCase() || null}, ${String(d?.matricula ?? '').trim() || null}, ${Number(d?.seq) || null}, ${ts}, now())`;
+    } catch (e) {
+      console.warn(`[posto] ingerir evento falhou (migração aplicada?): ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
+  /**
+   * Validação ONLINE: a TON pergunta em `<base>/auth/req` {req_id, uid, matricula} e espera
+   * `<base>/auth/resp` {req_id, ok, motivo, limite_litros} em até 3 s (senão valida pela
+   * lista local). Regras: tag ativa da bomba/planta; matrícula cadastrada (se houver
+   * operadores); par tag↔matrícula (se a tag restringe); limite diário de litros da tag.
+   */
+  private async responderAuth(base: string, bombaId: string, d: any): Promise<void> {
+    const reqId = String(d?.req_id ?? '');
+    const uid = String(d?.uid ?? '').trim().toUpperCase();
+    const mat = String(d?.matricula ?? '').trim();
+    let ok = false, motivo = 'tag', limite = 0;
+    try {
+      const plantaId = await this.plantaDaBomba(bombaId);
+      const tags = await this.prisma.$queryRaw<any[]>`
+        SELECT uid, limite_litros_dia, COALESCE(matriculas, '[]'::jsonb) AS matriculas FROM rfid_autorizados
+        WHERE ativo = true AND UPPER(uid) = ${uid} AND (bomba_id = ${bombaId} OR (bomba_id IS NULL AND planta_id = ${plantaId}))
+        ORDER BY (bomba_id = ${bombaId}) DESC LIMIT 1`;
+      if (tags.length) {
+        const tag = tags[0];
+        const mats: string[] = Array.isArray(tag.matriculas) ? tag.matriculas.map((x: any) => String(x)) : [];
+        const ops = await this.prisma.$queryRaw<Array<{ matricula: string }>>`
+          SELECT matricula FROM bomba_operadores WHERE ativo = true AND (bomba_id = ${bombaId} OR (bomba_id IS NULL AND planta_id = ${plantaId}))`;
+        const cadastradas = new Set(ops.map((o) => String(o.matricula)));
+        if (mat) {
+          if ((cadastradas.size > 0 || mats.length > 0) && !cadastradas.has(mat) && !mats.includes(mat)) motivo = 'matricula';
+          else if (mats.length > 0 && !mats.includes(mat)) motivo = 'par';
+          else ok = true;
+        } else if (cadastradas.size > 0 || mats.length > 0) motivo = 'matricula';
+        else ok = true;
+        if (ok && Number(tag.limite_litros_dia) > 0) {
+          const hoje = await this.prisma.$queryRaw<Array<{ litros: number }>>`
+            SELECT COALESCE(SUM(litros), 0)::float AS litros FROM abastecimentos
+            WHERE UPPER(uid) = ${uid} AND created_at >= (date_trunc('day', now() AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'America/Sao_Paulo')`;
+          const usado = Number(hoje[0]?.litros ?? 0), lim = Number(tag.limite_litros_dia);
+          if (usado >= lim) { ok = false; motivo = 'limite_diario'; } else limite = Math.max(0, lim - usado);
+        }
+      }
+    } catch (e) {
+      console.warn(`[posto] auth/req falhou: ${e instanceof Error ? e.message : e}`);
+      ok = false; motivo = 'erro_nexon';
+    }
+    if (ok) motivo = '';
+    const payload = JSON.stringify({ req_id: reqId, ok, motivo, limite_litros: limite });
+    try { await this.publish(`${base}/auth/resp`, payload); } catch (e) { console.warn(`[posto] auth/resp falhou: ${e instanceof Error ? e.message : e}`); }
+    console.log(`[posto] auth ${reqId} uid=${uid} mat=${mat} → ${ok ? 'OK' : 'NEGADO ' + motivo}${limite ? ` (restam ${limite} L)` : ''}`);
   }
 
   /**
@@ -716,14 +861,11 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
         // Bancada (SIM): a transação/estado da bomba chega em TESTE/<nome da TON>/{abastecimento,bomba}.
         // Não está no subscriptions map (produção assina pelo tópico do equipamento, que aqui é vazio).
         // Resolve a bomba pelo NOME da TON no tópico → ton_bo → equipamento da bomba, e ingere igual produção.
-        if (topic.endsWith('/abastecimento') || topic.endsWith('/bomba')) {
-          const suf = topic.endsWith('/abastecimento') ? '/abastecimento' : '/bomba';
-          const base = topic.slice('TESTE/'.length, topic.length - suf.length);
-          const bombaId = await this.resolverBombaPorNomeTon(base);
-          if (bombaId) {
-            if (suf === '/abastecimento') await this.ingerirAbastecimento(bombaId, dados);
-            else await this.atualizarBombaEstado(bombaId, dados);
-          }
+        const sufPosto = this.sufixoPosto(topic);
+        if (sufPosto) {
+          const base = topic.slice(0, topic.length - sufPosto.length);          // TESTE/<nome da TON>
+          const bombaId = await this.resolverBombaPorNomeTon(base.slice('TESTE/'.length));
+          if (bombaId) await this.rotearPosto(topic, base, bombaId, dados);
           return;
         }
       }
@@ -772,14 +914,21 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
         return;
       }
 
-      // Bomba de combustível: transação de abastecimento / telemetria da bomba.
-      if (topic.endsWith('/abastecimento')) {
-        for (const equipamentoId of equipamentoIds) await this.ingerirAbastecimento(equipamentoId, dados);
-        return;
-      }
-      if (topic.endsWith('/bomba')) {
-        for (const equipamentoId of equipamentoIds) await this.atualizarBombaEstado(equipamentoId, dados);
-        return;
+      // Posto de combustível: transação / telemetria / evento / pedido de autorização.
+      // O tópico é da TON (equipamentoIds = TON dona do tópico): resolve a BOMBA que ela
+      // controla (ton_bo → pontos → equipamento). Se o próprio equipamento já for a bomba
+      // (tópico cadastrado nela), usa direto.
+      {
+        const sufPosto = this.sufixoPosto(topic);
+        if (sufPosto) {
+          const base = topic.slice(0, topic.length - sufPosto.length);
+          for (const equipamentoId of equipamentoIds) {
+            const bombaId = (await this.resolverBombaPorTonId(equipamentoId)) ?? ((await this.ehBomba(equipamentoId)) ? equipamentoId.trim() : null);
+            if (bombaId) await this.rotearPosto(topic, base, bombaId, dados);
+            else console.warn(`[posto] ${topic}: equipamento ${equipamentoId} não é bomba nem TON com bomba amarrada`);
+          }
+          return;
+        }
       }
       // Carregador elétrico: energia/estado + fim de sessão na desconexão.
       if (topic.endsWith('/carregador')) {

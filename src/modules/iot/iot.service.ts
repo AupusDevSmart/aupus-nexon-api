@@ -791,16 +791,23 @@ export class IoTService {
     // Pontos vêm do CATÁLOGO (iot_device_tipos.pontos da bomba) — configurável por
     // DADO, sem deploy: bo→comando, bi→status, ai→medicao. Adicionar/mudar um papel
     // = editar o catálogo. Fallback pro conjunto canônico se o catálogo vier vazio.
-    // Os NOMES batem com a resolução por papel do gerador (boRole/biRole/aiRole:
-    // "Ligar"→liga, "Desligar"→desliga, "Solenoide"→solenoide, "Cartão"→cartao,
-    // "Emergência"→estop, "Nível"→nivel).
+    // Os NOMES batem com a resolução por papel do gerador (boRole/biRole/aiRole em
+    // iot-diagram.tsx): "Ligar"→liga (pulso), "Permissão"→permissao (mantida),
+    // "Solenoide"→solenoide, "Sinaleiro"→sinaleiro; "Contator"→contator (aux do K1),
+    // "Auto/Manual"→automatico, "Emergência"→estop, "Bico"→bico, "Boia mínimo"→boia_min,
+    // "Boia alta"→boia_alta; "Nível"→nivel. Doc: "Posto de Combustível — Como funciona".
     type PontoDef = { tipo: string; nome: string; unidade: string | null; ordem: number };
     const FALLBACK_PONTOS: PontoDef[] = [
       { tipo: 'comando', nome: 'Ligar', unidade: null, ordem: 1 },
-      { tipo: 'comando', nome: 'Desligar', unidade: null, ordem: 2 },
+      { tipo: 'comando', nome: 'Permissão', unidade: null, ordem: 2 },
       { tipo: 'comando', nome: 'Solenoide', unidade: null, ordem: 3 },
-      { tipo: 'status', nome: 'Cartão', unidade: null, ordem: 1 },
-      { tipo: 'status', nome: 'Emergência', unidade: null, ordem: 2 },
+      { tipo: 'comando', nome: 'Sinaleiro', unidade: null, ordem: 4 },
+      { tipo: 'status', nome: 'Contator', unidade: null, ordem: 1 },
+      { tipo: 'status', nome: 'Auto/Manual', unidade: null, ordem: 2 },
+      { tipo: 'status', nome: 'Emergência', unidade: null, ordem: 3 },
+      { tipo: 'status', nome: 'Bico', unidade: null, ordem: 4 },
+      { tipo: 'status', nome: 'Boia mínimo', unidade: null, ordem: 5 },
+      { tipo: 'status', nome: 'Boia alta', unidade: null, ordem: 6 },
       { tipo: 'medicao', nome: 'Nível', unidade: '%', ordem: 1 },
     ];
     const catalogo = await tx.iot_device_tipos.findFirst({
