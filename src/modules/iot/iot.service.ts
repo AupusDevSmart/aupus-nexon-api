@@ -959,6 +959,8 @@ export class IoTService {
       const kFator = Number(props.k_fator ?? 450) || 450;
       const modoLeitor =
         String(props.modo_leitor ?? 'rs485').trim().slice(0, 12) || 'rs485';
+      const exigirMat = !(props.exigir_matricula === false || props.exigir_matricula === 'false');
+      const matLivre = props.matricula_livre === true || props.matricula_livre === 'true';
       const temCfg =
         (
           await tx.$queryRaw<Array<{ x: number }>>`
@@ -969,13 +971,14 @@ export class IoTService {
         await tx.$executeRaw`
           UPDATE bomba_combustivel_config
           SET nivel_min_pct = ${nivelMin}, timeout_s = ${timeoutS},
-              k_fator = ${kFator}, rfid_mode = ${modoLeitor}, updated_at = now()
+              k_fator = ${kFator}, rfid_mode = ${modoLeitor},
+              exigir_matricula = ${exigirMat}, matricula_livre = ${matLivre}, updated_at = now()
           WHERE TRIM(equipamento_id) = ${equipId}`;
       } else {
         await tx.$executeRaw`
           INSERT INTO bomba_combustivel_config
-            (id, equipamento_id, nivel_min_pct, timeout_s, k_fator, rfid_mode)
-          VALUES (${this.generateId()}, ${equipId}, ${nivelMin}, ${timeoutS}, ${kFator}, ${modoLeitor})`;
+            (id, equipamento_id, nivel_min_pct, timeout_s, k_fator, rfid_mode, exigir_matricula, matricula_livre)
+          VALUES (${this.generateId()}, ${equipId}, ${nivelMin}, ${timeoutS}, ${kFator}, ${modoLeitor}, ${exigirMat}, ${matLivre})`;
       }
     }
   }

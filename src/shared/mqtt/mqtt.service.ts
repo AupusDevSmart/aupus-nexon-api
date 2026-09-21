@@ -640,12 +640,25 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
         const ops = await this.prisma.$queryRaw<Array<{ matricula: string }>>`
           SELECT matricula FROM bomba_operadores WHERE ativo = true AND (bomba_id = ${bombaId} OR (bomba_id IS NULL AND planta_id = ${plantaId}))`;
         const cadastradas = new Set(ops.map((o) => String(o.matricula)));
-        if (mat) {
-          if ((cadastradas.size > 0 || mats.length > 0) && !cadastradas.has(mat) && !mats.includes(mat)) motivo = 'matricula';
-          else if (mats.length > 0 && !mats.includes(mat)) motivo = 'par';
-          else ok = true;
-        } else if (cadastradas.size > 0 || mats.length > 0) motivo = 'matricula';
-        else ok = true;
+        // Regra FAIL-CLOSED (espelha a lib bomba_posto): com "exigir matrícula", a matrícula tem
+        // que existir no cadastro (operadores ou matrículas da tag) — cadastro vazio NEGA, nunca
+        // "liberado para todos". "Matrícula livre" (opção explícita da bomba) só registra o que foi
+        // digitado (ainda respeita o par tag↔matrícula quando a tag restringe).
+        let exigir = true, livre = false;
+        try {
+          const cfg = await this.prisma.$queryRaw<Array<{ exigir_matricula: boolean | null; matricula_livre: boolean | null }>>`
+            SELECT exigir_matricula, matricula_livre FROM bomba_combustivel_config WHERE TRIM(equipamento_id) = ${bombaId} LIMIT 1`;
+          if (cfg[0]) { exigir = cfg[0].exigir_matricula !== false; livre = cfg[0].matricula_livre === true; }
+        } catch { /* colunas ausentes (migração pendente) → estrito */ }
+        if (!mat) {
+          if (exigir) motivo = 'matricula'; else ok = true;
+        } else if (livre) {
+          if (mats.length > 0 && !mats.includes(mat)) motivo = 'par'; else ok = true;
+        } else if (!cadastradas.has(mat) && !mats.includes(mat)) {
+          motivo = 'matricula';
+        } else if (mats.length > 0 && !mats.includes(mat)) {
+          motivo = 'par';
+        } else ok = true;
         if (ok && Number(tag.limite_litros_dia) > 0) {
           const hoje = await this.prisma.$queryRaw<Array<{ litros: number }>>`
             SELECT COALESCE(SUM(litros), 0)::float AS litros FROM abastecimentos
