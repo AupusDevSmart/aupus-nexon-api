@@ -1,5 +1,5 @@
 // src/modules/usuarios/dto/user-permissions-response.dto.ts - NOVO ARQUIVO  
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty } from '@nestjs/swagger';
 
 export class UserPermissionDto {
   @ApiProperty({ example: 1 })

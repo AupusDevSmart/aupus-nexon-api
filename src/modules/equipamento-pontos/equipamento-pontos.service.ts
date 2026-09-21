@@ -3,7 +3,6 @@ import {
   NotFoundException,
   BadRequestException,
   ConflictException,
-  ForbiddenException,
   Logger,
 } from '@nestjs/common';
 import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';

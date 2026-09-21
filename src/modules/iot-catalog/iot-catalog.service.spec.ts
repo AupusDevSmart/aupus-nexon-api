@@ -351,10 +351,14 @@ describe('IotCatalogService', () => {
       expect(typeof sandbox.getCatalogByType).toBe('function');
       expect(typeof sandbox.getResolvedPoints).toBe('function');
 
-      // Helpers retornam o esperado
-      const dev = (sandbox.getCatalogDevice as Function)('sungrow-sg250cx');
+      // Helpers retornam o esperado.
+      //
+      // A assinatura e escrita em vez de `Function`: aquele tipo aceita
+      // qualquer coisa chamavel e devolve `any`, entao um helper com outra
+      // aridade passaria batido justamente no teste que existe para conferi-lo.
+      const dev = (sandbox.getCatalogDevice as (id: string) => any)('sungrow-sg250cx');
       expect(dev.modelo).toBe('SG250CX');
-      const lista = (sandbox.getCatalogByType as Function)('inversor_solar');
+      const lista = (sandbox.getCatalogByType as (tipo: string) => any[])('inversor_solar');
       expect(lista).toHaveLength(1);
       expect(lista[0].id).toBe('sungrow-sg250cx');
     });

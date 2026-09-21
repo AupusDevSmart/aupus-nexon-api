@@ -1,14 +1,12 @@
 // src/modules/plantas/plantas.service.spec.ts - VERSÃO ATUALIZADA COM NOVOS TESTES
 import { Test, TestingModule } from '@nestjs/testing';
-import { NotFoundException, ConflictException, BadRequestException } from '@nestjs/common';
+import { NotFoundException, ConflictException } from '@nestjs/common';
 import { PlantasService } from './plantas.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PermissionScopeService } from '../auth/permission-scope.service';
 import { CreatePlantaDto } from './dto/create-planta.dto';
 import { UpdatePlantaDto } from './dto/update-planta.dto';
 import { FindAllPlantasDto } from './dto/find-all-plantas.dto';
-import { Prisma } from '@prisma/client';
-import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 
 // Mock do PrismaService
 const mockPrismaService = () => ({

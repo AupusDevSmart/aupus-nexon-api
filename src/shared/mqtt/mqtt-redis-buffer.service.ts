@@ -1,6 +1,11 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { Redis } from 'ioredis';
 import { PrismaService } from '@/core';
+// Builtins do Node, sem efeito colateral na carga: nao ha por que adia-los com
+// require() dentro da funcao, que alem de esconder a dependencia obriga o TS a
+// tratar o modulo como `any`.
+import * as arquivos from 'fs';
+import * as caminho from 'path';
 
 /**
  * Serviço de Buffer MQTT com Redis
@@ -162,20 +167,17 @@ export class MqttRedisBufferService implements OnModuleInit, OnModuleDestroy {
     dados: any,
   ): Promise<void> {
     try {
-      const fs = require('fs');
-      const path = require('path');
-
-      const fallbackDir = path.join(process.cwd(), 'mqtt-buffer-fallback');
-      if (!fs.existsSync(fallbackDir)) {
-        fs.mkdirSync(fallbackDir, { recursive: true });
+      const fallbackDir = caminho.join(process.cwd(), 'mqtt-buffer-fallback');
+      if (!arquivos.existsSync(fallbackDir)) {
+        arquivos.mkdirSync(fallbackDir, { recursive: true });
       }
 
-      const fallbackFile = path.join(
+      const fallbackFile = caminho.join(
         fallbackDir,
         `${equipamentoId}_${Date.now()}.json`,
       );
 
-      fs.writeFileSync(
+      arquivos.writeFileSync(
         fallbackFile,
         JSON.stringify(
           {

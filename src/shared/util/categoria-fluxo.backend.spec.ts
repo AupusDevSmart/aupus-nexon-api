@@ -68,7 +68,7 @@ describe('categoria-fluxo.backend', () => {
 
     it('CATEGORIA_FLUXO do backend == do front', () => {
       if (!fs.existsSync(frontPath)) {
-        // eslint-disable-next-line no-console
+         
         console.warn(`[paridade] front nao encontrado em ${frontPath} — pulando`);
         return;
       }

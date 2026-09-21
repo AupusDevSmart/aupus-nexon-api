@@ -6,6 +6,11 @@ import {
   BadRequestException,
   Logger
 } from '@nestjs/common';
+// Builtins do Node, sem efeito colateral na carga: nao ha por que adia-los com
+// require() dentro da funcao, que alem de esconder a dependencia obriga o TS a
+// tratar o modulo como `any`.
+import { promises as arquivos } from 'fs';
+import * as caminho from 'path';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RolesService } from '../roles/roles.service';
 import { PermissionsService } from '../permissions/permissions.service';
@@ -17,9 +22,6 @@ import {
   ResetPasswordDto,
   UsuarioStatus,
   UsuarioResponseDto,
-  AssignRoleDto,
-  AssignPermissionDto,
-  SyncPermissionsDto,
   UserPermissionsResponseDto,
   UserPermissionsSummaryDto,
   CategorizedPermissionsDto,
@@ -680,10 +682,8 @@ export class UsuariosService {
       // Se o usuário já tem um avatar, deletar o arquivo antigo
       if (usuario.avatar_url) {
         try {
-          const fs = require('fs').promises;
-          const path = require('path');
-          const oldFilePath = path.join(__dirname, '../../..', usuario.avatar_url);
-          await fs.unlink(oldFilePath).catch(err => {
+          const oldFilePath = caminho.join(__dirname, '../../..', usuario.avatar_url);
+          await arquivos.unlink(oldFilePath).catch(err => {
             console.log('Arquivo antigo não encontrado ou já removido:', err.message);
           });
         } catch (error) {

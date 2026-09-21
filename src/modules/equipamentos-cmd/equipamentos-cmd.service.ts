@@ -6,7 +6,6 @@ import {
   BadGatewayException,
   GatewayTimeoutException,
   ServiceUnavailableException,
-  ForbiddenException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';

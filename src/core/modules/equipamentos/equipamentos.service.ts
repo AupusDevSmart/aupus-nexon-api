@@ -1,12 +1,16 @@
-import { Injectable, NotFoundException, BadRequestException, ForbiddenException, Optional, Inject } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, Optional, Inject } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Prisma } from '@prisma/client';
+// Builtins do Node, sem efeito colateral na carga: nao ha por que adia-los com
+// require() dentro da funcao, que alem de esconder a dependencia obriga o TS a
+// tratar o modulo como `any`.
+import { promises as arquivos } from 'fs';
+import * as caminho from 'path';
 import { PrismaService } from '../../prisma/prisma.service';
 import { IMqttBroker, MQTT_BROKER } from '../../common/interfaces/mqtt-broker.interface';
 import { CreateEquipamentoDto } from './dto/create-equipamento.dto';
 import { UpdateEquipamentoDto } from './dto/update-equipamento.dto';
 import { EquipamentoQueryDto } from './dto/equipamento-query.dto';
-import { CreateComponenteUARDto } from './dto/componente-uar.dto';
 import { ConfigurarMqttDto } from './dto/configurar-mqtt.dto';
 import { CreateEquipamentoRapidoDto } from './dto/create-equipamento-rapido.dto';
 import {
@@ -2071,10 +2075,8 @@ export class EquipamentosService {
     // Deletar arquivo antigo se existir
     if (equipamento.foto_url) {
       try {
-        const fs = require('fs').promises;
-        const path = require('path');
-        const oldFilePath = path.join(process.cwd(), equipamento.foto_url);
-        await fs.unlink(oldFilePath).catch(() => { /* ignora se nao existir */ });
+        const oldFilePath = caminho.join(process.cwd(), equipamento.foto_url);
+        await arquivos.unlink(oldFilePath).catch(() => { /* ignora se nao existir */ });
       } catch {
         // nao bloqueia update se limpeza falhar
       }
@@ -2101,10 +2103,8 @@ export class EquipamentosService {
 
     if (equipamento.foto_url) {
       try {
-        const fs = require('fs').promises;
-        const path = require('path');
-        const oldFilePath = path.join(process.cwd(), equipamento.foto_url);
-        await fs.unlink(oldFilePath).catch(() => { /* ignora se nao existir */ });
+        const oldFilePath = caminho.join(process.cwd(), equipamento.foto_url);
+        await arquivos.unlink(oldFilePath).catch(() => { /* ignora se nao existir */ });
       } catch {
         // ignora
       }

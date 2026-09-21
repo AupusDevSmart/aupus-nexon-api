@@ -1,6 +1,6 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
-import { IsString, IsNotEmpty, IsEnum, IsNumber, IsOptional, IsJSON, Min, Max, Matches, IsBoolean } from 'class-validator';
+import { IsString, IsNotEmpty, IsEnum, IsNumber, IsOptional, Min, Max, Matches, IsBoolean } from 'class-validator';
 
 // Normaliza '' e null para undefined antes das demais validacoes. Necessario
 // porque @IsOptional() do class-validator so pula validacao se for null

@@ -26,12 +26,12 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
       return true;
     }
 
-    // Se não é pública, validar JWT
-    try {
-      const result = await super.canActivate(context);
-      return result as boolean;
-    } catch (error) {
-      throw error;
-    }
+    // Se não é pública, validar JWT.
+    //
+    // Sem try/catch: o bloco aqui apenas relançava o mesmo erro, o que é o
+    // mesmo que não o ter — e dava a impressão de que havia tratamento. Quem
+    // transforma a falha em 401 é o Passport, acima.
+    const result = await super.canActivate(context);
+    return result as boolean;
   }
 }

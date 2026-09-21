@@ -16,9 +16,6 @@ import {
   ChangePasswordDto,
   ResetPasswordDto,
   UsuarioStatus,
-  UserPermissionsResponseDto,
-  UserPermissionsSummaryDto,
-  CategorizedPermissionsDto,
   BulkAssignRolesDto,
   BulkAssignPermissionsDto
 } from './dto';

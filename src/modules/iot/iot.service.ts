@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { randomBytes } from 'node:crypto';
 import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
 import { Prisma } from '@/core';
@@ -7,7 +7,6 @@ import { VinculosMirrorService } from '../iot-vinculos/vinculos-mirror.service';
 import type {
   IotDiagrama,
   IotDiagramaComponent,
-  IotDiagramaConnection,
   IotProjetoRow,
 } from './interfaces/iot-diagrama.interface';
 

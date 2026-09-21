@@ -8,7 +8,7 @@
  *   3. Gap de leituras → delta-phf cobre por natureza, sem dupla contagem
  *   4. Reset de medidor (phf cai) → soma por segmento
  */
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { BadRequestException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { PrismaService } from '@/core';
 import { CalculoCustosService } from './calculo-custos.service';

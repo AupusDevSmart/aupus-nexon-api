@@ -12,8 +12,6 @@ import {
   HttpStatus,
   UploadedFile,
   UseInterceptors,
-  UseGuards,
-  Req,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -46,7 +44,6 @@ import {
 } from './dto';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { Permissions } from '../auth/decorators/permissions.decorator';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 
 @ApiTags('Usuários')
 @Controller('usuarios')

@@ -6,7 +6,6 @@ import {
   Delete,
   Body,
   Param,
-  UseGuards,
   Request,
   HttpCode,
   HttpStatus,
@@ -14,7 +13,7 @@ import {
 import { ConfiguracaoDemandaService } from './configuracao-demanda.service';
 import { CreateConfiguracaoDemandaDto } from './dto/create-configuracao-demanda.dto';
 import { UpdateConfiguracaoDemandaDto } from './dto/update-configuracao-demanda.dto';
-import { JwtAuthGuard, CurrentUser } from '@/core';
+import { CurrentUser } from '@/core';
 
 @Controller('configuracao-demanda')
 // @UseGuards(JwtAuthGuard) // Temporariamente desabilitado para testes

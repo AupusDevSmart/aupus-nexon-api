@@ -7,7 +7,6 @@ import {
   ConfiguracaoHorarios,
 } from '../interfaces/calculo-custos.interface';
 import { FeriadosNacionaisService } from './feriados-nacionais.service';
-import { toZonedTime } from 'date-fns-tz';
 
 /**
  * Serviço responsável por classificar horários em tipos tarifários

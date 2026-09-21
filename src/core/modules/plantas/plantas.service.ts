@@ -1,8 +1,7 @@
 // src/modules/plantas/plantas.service.ts - CORRIGIDO
 import { Injectable, NotFoundException, BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
-import { Planta, ProprietarioBasico } from './entities/planta.entity';
-import { Prisma } from '@prisma/client';
+import { Planta } from './entities/planta.entity';
 import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 import { CreatePlantaDto } from './dto/create-planta.dto';
 import { UpdatePlantaDto } from './dto/update-planta.dto';

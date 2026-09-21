@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
 import { CreateRegraLogDto } from './dto/create-regra-log.dto';
 import { UpdateRegraLogDto } from './dto/update-regra-log.dto';

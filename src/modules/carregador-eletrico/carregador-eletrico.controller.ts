@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, ForbiddenException, Get, Param, Post, Put, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, ForbiddenException, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard, CurrentUser } from '@/core';
 import { CarregadorEletricoService } from './carregador-eletrico.service';
 

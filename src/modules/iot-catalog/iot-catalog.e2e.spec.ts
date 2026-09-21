@@ -29,8 +29,8 @@ const E2E_PREFIX = 'e2e_test_';
 const E2E_FABRICANTE = 'E2E_TEST_VENDOR';
 
 let token: string;
-let createdTipoIds: string[] = [];
-let createdModeloIds: string[] = [];
+const createdTipoIds: string[] = [];
+const createdModeloIds: string[] = [];
 
 async function login(): Promise<string> {
   const res = await request(BASE_URL).post('/api/v1/auth/login').send({
