@@ -863,10 +863,12 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
         // Resolve a bomba pelo NOME da TON no tópico → ton_bo → equipamento da bomba, e ingere igual produção.
         const sufPosto = this.sufixoPosto(topic);
         if (sufPosto) {
-          const base = topic.slice(0, topic.length - sufPosto.length);          // TESTE/<nome da TON>
+          // Firmware 🧪 (Simular): base = TESTE/<nome da TON>, sem tópico cadastrado → resolve pelo nome.
+          // Bancada com tópico REAL começando por TESTE/ (ex.: TESTE/POSTO/BANCADA cadastrado na TON):
+          // não casa por nome → segue pro roteamento normal (subscriptions map) abaixo.
+          const base = topic.slice(0, topic.length - sufPosto.length);
           const bombaId = await this.resolverBombaPorNomeTon(base.slice('TESTE/'.length));
-          if (bombaId) await this.rotearPosto(topic, base, bombaId, dados);
-          return;
+          if (bombaId) { await this.rotearPosto(topic, base, bombaId, dados); return; }
         }
       }
 
