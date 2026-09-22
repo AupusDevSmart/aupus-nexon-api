@@ -1789,7 +1789,10 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     // subscribeTopic a partir do primário) não podem entrar aqui: se entrarem, o
     // reconcile os vê como primário "não desejado" e os desinscreve — foi o que
     // acontecia com /inputs e /evt (a ingestão parava após o 1º reconcile).
-    const DERIVADOS = ['/status', '/diagnostics', '/cmd/ack', '/inputs', '/evt'];
+    // + os do posto/carregador (subscribeToEquipamento item 6): sem eles aqui o reconcile
+    // desinscrevia /bomba, /evento, /auth/req, /abastecimento e /carregador a cada 5 min
+    // (ingestão da bancada parava logo após o 1º reconcile — visto em 22/09/2026).
+    const DERIVADOS = ['/status', '/diagnostics', '/cmd/ack', '/inputs', '/evt', '/abastecimento', '/bomba', '/evento', '/auth/req', '/carregador'];
     const currentMap = new Map<string, Set<string>>();
     for (const [topic, equipIds] of this.subscriptions.entries()) {
       if (DERIVADOS.some((suf) => topic.endsWith(suf))) continue;
