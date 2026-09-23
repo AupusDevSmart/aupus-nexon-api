@@ -400,6 +400,20 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       diagEquipamentos.push(equipId);
     }
 
+    // 2c) Subscribe ao <base>/log — caixa-preta da TON (eventos antes de falha/reinicio),
+    // publicada ao reconectar e pelo comando "log". Gravada em logs_mqtt (tipo evento).
+    const logTopic = `${topic}/log`;
+    if (!this.subscriptions.has(logTopic)) {
+      this.subscriptions.set(logTopic, []);
+      this.client?.subscribe(logTopic, { qos: 1 }, (err) => {
+        if (err) console.warn(`⚠️ [MQTT] Falha ao subscrever ${logTopic}: ${err.message}`);
+      });
+    }
+    const logEquipamentos = this.subscriptions.get(logTopic)!;
+    if (!logEquipamentos.includes(equipId)) {
+      logEquipamentos.push(equipId);
+    }
+
     // 3) Subscribe ao tópico de ack de comandos: <base>/cmd/ack
     // Usado por publishCommand() para resolver o Promise da chamada.
     const ackTopic = `${topic}/cmd/ack`;
@@ -952,6 +966,12 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       }
 
       // Roteamento por sub-path
+      // Caixa-preta da TON (<base>/log): eventos que antecederam falha/reinicio.
+      if (topic.endsWith('/log')) {
+        for (const equipamentoId of equipamentoIds) await this.registrarLogTon(equipamentoId, dados);
+        return;
+      }
+
       if (topic.endsWith('/status')) {
         for (const equipamentoId of equipamentoIds) {
           await this.processStatusAnnounce(equipamentoId, dados);
@@ -1114,6 +1134,28 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
    * watchdog, panic ou queda de tensao. Power-on comum (religou na tomada) e' registrado
    * como info. Firmwares antigos nao mandam `reset` -> nada e' registrado.
    */
+  /** Grava um lote da caixa-preta da TON como evento (INFO) com os eventos em dados_snapshot. */
+  private async registrarLogTon(equipamentoId: string, dados: any): Promise<void> {
+    try {
+      const ev = Array.isArray(dados?.ev) ? dados.ev : [];
+      if (!ev.length) return;
+      const etapa = dados?.etapa_no_reset && dados?.reset && ['Watchdog', 'Panic'].includes(dados.reset)
+        ? `, travou em ${dados.etapa_no_reset}` : '';
+      await this.prisma.logs_mqtt.create({
+        data: {
+          equipamento_id: equipamentoId,
+          tipo: 'evento',
+          mensagem: `Caixa-preta da TON: ${ev.length} evento(s) (boot ${dados?.boot ?? '?'}, ${dados?.reset ?? '?'}${etapa})`,
+          severidade: 'INFO',
+          dados_snapshot: { ton_log: true, boot: dados?.boot ?? null, reset: dados?.reset ?? null, etapa_no_reset: dados?.etapa_no_reset ?? null,
+            eventos: ev.map((e: any[]) => ({ seq: e?.[0], epoch: e?.[1] || null, uptime_s: e?.[2], msg: e?.[3] })) },
+        },
+      });
+    } catch (e: any) {
+      console.warn(`⚠️ [MQTT] falha ao gravar caixa-preta da TON ${equipamentoId}: ${e?.message ?? e}`);
+    }
+  }
+
   private async registrarReinicioTon(equipamentoId: string, dados: StatusAnnouncePayload): Promise<void> {
     try {
       if (dados.online === false) return;
@@ -1829,7 +1871,7 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     // + os do posto/carregador (subscribeToEquipamento item 6): sem eles aqui o reconcile
     // desinscrevia /bomba, /evento, /auth/req, /abastecimento e /carregador a cada 5 min
     // (ingestão da bancada parava logo após o 1º reconcile — visto em 22/09/2026).
-    const DERIVADOS = ['/status', '/diagnostics', '/cmd/ack', '/inputs', '/evt', '/abastecimento', '/bomba', '/evento', '/auth/req', '/carregador'];
+    const DERIVADOS = ['/status', '/diagnostics', '/log', '/cmd/ack', '/inputs', '/evt', '/abastecimento', '/bomba', '/evento', '/auth/req', '/carregador'];
     const currentMap = new Map<string, Set<string>>();
     for (const [topic, equipIds] of this.subscriptions.entries()) {
       if (DERIVADOS.some((suf) => topic.endsWith(suf))) continue;
