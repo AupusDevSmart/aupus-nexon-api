@@ -1162,6 +1162,9 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       const reset = typeof dados.reset === 'string' ? dados.reset : '';
       const causa = typeof dados.restart_cause === 'string' ? dados.restart_cause : '';
       if (!reset) return;
+      // O status e' reanunciado a cada RECONEXAO ao broker; so' e' reinicio se o boot for recente.
+      const up = typeof (dados as any).up === 'number' ? (dados as any).up : null;
+      if (up === null || up > 180) return;
       let mensagem: string; let severidade: string;
       if (causa === 'sem_broker') { mensagem = 'TON reiniciou sozinha: ficou sem conexao com o servidor (auto-recuperacao)'; severidade = 'MEDIA'; }
       else if (causa === 'comando') { mensagem = 'TON reiniciada por comando remoto'; severidade = 'BAIXA'; }
@@ -1169,6 +1172,7 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       else if (reset === 'Panic') { mensagem = 'TON reiniciou por erro interno (panic)'; severidade = 'ALTA'; }
       else if (reset === 'Brownout') { mensagem = 'TON reiniciou por queda de tensao na alimentacao'; severidade = 'MEDIA'; }
       else if (reset === 'Power-on') { mensagem = 'TON ligada (energia restabelecida ou religada no local)'; severidade = 'INFO'; }
+      else if (reset === 'Unknown') { mensagem = 'TON reiniciou (gravacao pela USB ou reset externo)'; severidade = 'INFO'; }
       else { mensagem = `TON reiniciou (${reset})`; severidade = 'BAIXA'; }
       await this.prisma.logs_mqtt.create({
         data: {
