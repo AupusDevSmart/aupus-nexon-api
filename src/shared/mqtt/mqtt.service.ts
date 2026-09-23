@@ -955,6 +955,8 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       if (topic.endsWith('/status')) {
         for (const equipamentoId of equipamentoIds) {
           await this.processStatusAnnounce(equipamentoId, dados);
+          // Boot AO VIVO (nao retido) com motivo relevante -> evento no historico da TON.
+          if (!retained) await this.registrarReinicioTon(equipamentoId, dados);
         }
         return;
       }
@@ -1106,6 +1108,41 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
    *
    * NÃO atualiza outras tabelas (telemetria continua indo só pelo fluxo legado).
    */
+  /**
+   * Registra o reinicio da TON (firmware >= auto-recuperacao) em logs_mqtt (tipo 'evento'),
+   * visivel no historico/alarmes: auto-reinicio por falta de broker, reinicio remoto,
+   * watchdog, panic ou queda de tensao. Power-on comum (religou na tomada) e' registrado
+   * como info. Firmwares antigos nao mandam `reset` -> nada e' registrado.
+   */
+  private async registrarReinicioTon(equipamentoId: string, dados: StatusAnnouncePayload): Promise<void> {
+    try {
+      if (dados.online === false) return;
+      const reset = typeof dados.reset === 'string' ? dados.reset : '';
+      const causa = typeof dados.restart_cause === 'string' ? dados.restart_cause : '';
+      if (!reset) return;
+      let mensagem: string; let severidade: string;
+      if (causa === 'sem_broker') { mensagem = 'TON reiniciou sozinha: ficou sem conexao com o servidor (auto-recuperacao)'; severidade = 'MEDIA'; }
+      else if (causa === 'comando') { mensagem = 'TON reiniciada por comando remoto'; severidade = 'BAIXA'; }
+      else if (reset === 'Watchdog') { mensagem = 'TON reiniciou por watchdog (travou e se recuperou)'; severidade = 'MEDIA'; }
+      else if (reset === 'Panic') { mensagem = 'TON reiniciou por erro interno (panic)'; severidade = 'ALTA'; }
+      else if (reset === 'Brownout') { mensagem = 'TON reiniciou por queda de tensao na alimentacao'; severidade = 'MEDIA'; }
+      else if (reset === 'Power-on') { mensagem = 'TON ligada (energia restabelecida ou religada no local)'; severidade = 'INFO'; }
+      else { mensagem = `TON reiniciou (${reset})`; severidade = 'BAIXA'; }
+      await this.prisma.logs_mqtt.create({
+        data: {
+          equipamento_id: equipamentoId,
+          tipo: 'evento',
+          mensagem,
+          severidade,
+          dados_snapshot: { ton_reinicio: true, reset, restart_cause: causa || null, version: dados.version ?? null, iface: (dados as any).iface ?? null },
+        },
+      });
+      console.log(`🔄 [MQTT] ${equipamentoId.trim()}: ${mensagem} (reset=${reset}${causa ? ', causa=' + causa : ''})`);
+    } catch (e: any) {
+      console.warn(`⚠️ [MQTT] falha ao registrar reinicio da TON ${equipamentoId}: ${e?.message ?? e}`);
+    }
+  }
+
   private async processStatusAnnounce(
     equipamentoId: string,
     dados: StatusAnnouncePayload,
