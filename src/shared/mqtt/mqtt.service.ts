@@ -1156,6 +1156,8 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     }
   }
 
+  private readonly ultimoReinicioSemUp = new Map<string, string>();
+
   private async registrarReinicioTon(equipamentoId: string, dados: StatusAnnouncePayload): Promise<void> {
     try {
       if (dados.online === false) return;
@@ -1164,7 +1166,13 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       if (!reset) return;
       // O status e' reanunciado a cada RECONEXAO ao broker; so' e' reinicio se o boot for recente.
       const up = typeof (dados as any).up === 'number' ? (dados as any).up : null;
-      if (up === null || up > 180) return;
+      if (up !== null && up > 180) return;
+      if (up === null) {
+        // firmware sem 'up' (build de 23/09 15:30): registra cada (reset, causa, versao) 1x por TON
+        const chave = `${reset}|${causa}|${dados.version ?? ''}`;
+        if (this.ultimoReinicioSemUp.get(equipamentoId) === chave) return;
+        this.ultimoReinicioSemUp.set(equipamentoId, chave);
+      }
       let mensagem: string; let severidade: string;
       if (causa === 'sem_broker') { mensagem = 'TON reiniciou sozinha: ficou sem conexao com o servidor (auto-recuperacao)'; severidade = 'MEDIA'; }
       else if (causa === 'comando') { mensagem = 'TON reiniciada por comando remoto'; severidade = 'BAIXA'; }
