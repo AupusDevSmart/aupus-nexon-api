@@ -1157,6 +1157,7 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
   }
 
   private readonly ultimoReinicioSemUp = new Map<string, string>();
+  private readonly ultimoBootRegistrado = new Map<string, number>();
 
   private async registrarReinicioTon(equipamentoId: string, dados: StatusAnnouncePayload): Promise<void> {
     try {
@@ -1166,8 +1167,23 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       if (!reset) return;
       // O status e' reanunciado a cada RECONEXAO ao broker; so' e' reinicio se o boot for recente.
       const up = typeof (dados as any).up === 'number' ? (dados as any).up : null;
-      if (up !== null && up > 180) return;
-      if (up === null) {
+      const boot = typeof (dados as any).boot === 'number' ? (dados as any).boot : null;
+      if (boot !== null) {
+        // firmware com contador de boot: registra cada boot novo 1x, mesmo que a TON so' reconecte
+        // muito depois de reiniciar (caso de reinicio sem internet). Estado sobrevive a restart do backend.
+        let ultimo = this.ultimoBootRegistrado.get(equipamentoId);
+        if (ultimo === undefined) {
+          const r: any[] = await this.prisma.$queryRaw`
+            SELECT (dados_snapshot->>'boot')::int AS boot FROM logs_mqtt
+            WHERE equipamento_id = ${equipamentoId} AND dados_snapshot->>'ton_reinicio' = 'true' AND dados_snapshot ? 'boot'
+            ORDER BY created_at DESC LIMIT 1`;
+          ultimo = r?.[0]?.boot ?? -1;
+        }
+        if (ultimo === boot) return;
+        this.ultimoBootRegistrado.set(equipamentoId, boot);
+      } else if (up !== null && up > 180) {
+        return;
+      } else if (up === null) {
         // firmware sem 'up' (build de 23/09 15:30): registra cada (reset, causa, versao) 1x por TON
         const chave = `${reset}|${causa}|${dados.version ?? ''}`;
         if (this.ultimoReinicioSemUp.get(equipamentoId) === chave) return;
@@ -1188,7 +1204,7 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
           tipo: 'evento',
           mensagem,
           severidade,
-          dados_snapshot: { ton_reinicio: true, reset, restart_cause: causa || null, version: dados.version ?? null, iface: (dados as any).iface ?? null },
+          dados_snapshot: { ton_reinicio: true, reset, restart_cause: causa || null, boot: typeof (dados as any).boot === 'number' ? (dados as any).boot : null, up: typeof (dados as any).up === 'number' ? (dados as any).up : null, version: dados.version ?? null, iface: (dados as any).iface ?? null },
         },
       });
       console.log(`🔄 [MQTT] ${equipamentoId.trim()}: ${mensagem} (reset=${reset}${causa ? ', causa=' + causa : ''})`);
