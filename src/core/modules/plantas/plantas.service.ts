@@ -47,14 +47,8 @@ export class PlantasService {
         throw new NotFoundException(`Proprietário com ID ${proprietarioId} não encontrado ou inativo`);
       }
 
-      // 2. Verificar se CNPJ já existe
-      const existingPlanta = await this.prisma.plantas.findUnique({
-        where: { cnpj }
-      });
-
-      if (existingPlanta) {
-        throw new ConflictException(`Já existe uma planta cadastrada com o CNPJ ${cnpj}`);
-      }
+      // 2. CNPJ duplicado é PERMITIDO (decisão do negócio): grupos econômicos têm várias
+      // plantas no mesmo CNPJ. Sem check de unicidade aqui (e a constraint do DB foi removida).
 
       // 3. Criar a planta
       const novaPlanta = await this.prisma.plantas.create({
@@ -300,20 +294,8 @@ export class PlantasService {
         }
       }
 
-      // 3. Se há mudança de CNPJ, verificar se não existe outro com mesmo CNPJ
-      if (cnpj && cnpj !== plantaExistente.cnpj) {
-        const outraPlantaComCnpj = await this.prisma.plantas.findFirst({
-          where: {
-            cnpj,
-            id: { not: id },
-            deleted_at: null
-          }
-        });
-
-        if (outraPlantaComCnpj) {
-          throw new ConflictException(`Já existe outra planta cadastrada com o CNPJ ${cnpj}`);
-        }
-      }
+      // 3. CNPJ/CPF repetido é PERMITIDO (mesma decisão do create): grupos econômicos têm
+      // várias plantas no mesmo CNPJ e muitas fazendas estão no CPF do produtor.
 
       // ✅ CORRIGIDO: Usando tipo genérico any para UPDATE
       const updateData: any = {};

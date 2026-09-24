@@ -82,9 +82,11 @@ export class CreatePlantaDto {
     description: 'CNPJ da planta',
     example: '12.345.678/0001-90'
   })
-  @IsString({ message: 'CNPJ deve ser uma string' })
-  @Matches(/^\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}$/, {
-    message: 'CNPJ deve estar no formato XX.XXX.XXX/XXXX-XX'
+  @IsString({ message: 'CNPJ/CPF deve ser uma string' })
+  // Aceita CNPJ (14) ou CPF (11) — muitas fazendas estão no CPF do produtor.
+  // Mascarado (XX.XXX.XXX/XXXX-XX ou XXX.XXX.XXX-XX) ou só dígitos (11/14).
+  @Matches(/^(\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}|\d{3}\.\d{3}\.\d{3}-\d{2}|\d{11}|\d{14})$/, {
+    message: 'Informe um CNPJ (14 dígitos) ou CPF (11 dígitos) válido'
   })
   cnpj: string;
 
