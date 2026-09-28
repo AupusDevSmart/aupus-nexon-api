@@ -1,4 +1,5 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { papelDoPonto, valorDoBit } from './status-pontos.util';
 import { randomBytes } from 'node:crypto';
 import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
 import { Prisma } from '@/core';
@@ -167,7 +168,7 @@ export class IoTService {
     const eq = eqRows[0];
     if (!eq) return null;
     if (user) await this.scopeService.assertEntityInScope('equipamento', id, user);
-    const [pm, statusFonte, comandos] = await Promise.all([
+    const [pm, statusFonte, comandos, statusPontos] = await Promise.all([
       this.powerMeterByDisjuntor(id),
       this.statusFonteDoDisjuntor(id, user),
       this.prisma.$queryRaw<Array<{ ponto: string; ponto_id: string; bo_numero: number; pulso_ms: number; ton_id: string }>>`
@@ -175,12 +176,61 @@ export class IoTService {
         FROM equipamento_pontos ep
         JOIN ton_bo tb ON TRIM(tb.equipamento_ponto_id) = TRIM(ep.id) AND tb.ativo = true AND tb.deleted_at IS NULL
         WHERE TRIM(ep.equipamento_id) = ${id} AND ep.tipo = 'comando' AND ep.ativo = true AND ep.deleted_at IS NULL`,
+      this.statusPontosDoDisjuntor(id),
     ]);
     return {
       equipamento: { id: eq.id, nome: eq.nome },
       scs: { habilitado: eq.scs, comando: eq.scs_comando, status: eq.scs_status, medicao: eq.scs_medicao },
       pm, status_fonte: statusFonte, comandos,
+      status_pontos: statusPontos,
     };
+  }
+
+  /**
+   * Pontos de status do DJ ligados a entradas digitais da TON (iot_vinculos
+   * fonte_tipo='ton_bi'): valor = bit d{canal} do último equipamento_io_estado
+   * da TON (o mesmo que GET /equipamentos/:tonId/bis/estado), com inversão NF
+   * (params.invertido). Papel do vínculo ou inferido pelo nome (aberto/fechado/
+   * mola/local/remoto). Espelho vazio → cai no ton_bi. Erro → [] (o sheet segue).
+   */
+  private async statusPontosDoDisjuntor(disjuntorId: string) {
+    type Row = {
+      ponto_id: string; nome: string; papel: string | null; invertido: unknown;
+      valor_raw: unknown; updated_at: Date | null;
+    };
+    try {
+      let rows = await this.prisma.$queryRaw<Row[]>`
+        SELECT TRIM(ep.id) AS ponto_id, TRIM(ep.nome) AS nome, v.papel,
+               v.params->>'invertido' AS invertido,
+               io.inputs ->> ('d' || v.canal) AS valor_raw, io.updated_at
+        FROM iot_vinculos v
+        JOIN equipamento_pontos ep ON ep.id = v.equipamento_ponto_id AND ep.deleted_at IS NULL AND ep.ativo = true
+        LEFT JOIN equipamento_io_estado io ON io.equipamento_id = v.fonte_equipamento_id
+        WHERE v.fonte_tipo = 'ton_bi' AND v.ativo = true AND v.deleted_at IS NULL
+          AND ep.equipamento_id = ${disjuntorId}::bpchar
+        ORDER BY ep.ordem NULLS LAST, ep.nome`;
+      if (rows.length === 0) {
+        rows = await this.prisma.$queryRaw<Row[]>`
+          SELECT TRIM(ep.id) AS ponto_id, TRIM(ep.nome) AS nome, NULL::text AS papel,
+                 b.invertido::text AS invertido,
+                 io.inputs ->> ('d' || b.bi_numero) AS valor_raw, io.updated_at
+          FROM ton_bi b
+          JOIN equipamento_pontos ep ON ep.id = b.equipamento_ponto_id AND ep.deleted_at IS NULL AND ep.ativo = true
+          LEFT JOIN equipamento_io_estado io ON io.equipamento_id = b.ton_id
+          WHERE b.ativo = true AND b.deleted_at IS NULL AND ep.equipamento_id = ${disjuntorId}::bpchar
+          ORDER BY ep.ordem NULLS LAST, ep.nome`;
+      }
+      return rows.map((r) => ({
+        ponto_id: r.ponto_id,
+        nome: r.nome,
+        papel: papelDoPonto(r.papel, r.nome),
+        valor: valorDoBit(r.valor_raw, r.invertido),
+        updated_at: r.updated_at ?? null,
+      }));
+    } catch (e) {
+      new Logger(IoTService.name).warn(`[scs-bundle] status_pontos indisponível: ${(e as Error).message}`);
+      return [];
+    }
   }
 
   /**

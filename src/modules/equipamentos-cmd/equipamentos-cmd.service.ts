@@ -6,6 +6,7 @@ import {
   BadGatewayException,
   GatewayTimeoutException,
   ServiceUnavailableException,
+  ForbiddenException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
@@ -14,6 +15,25 @@ import { VinculosMirrorService } from '../iot-vinculos/vinculos-mirror.service';
 import { SendCommandDto } from './dto/send-command.dto';
 import { CommandResultDto } from './dto/command-result.dto';
 import { AcionarPontoResultDto } from './dto/acionar-ponto-result.dto';
+import { ClienteInfo } from '../../core/common/cliente-info';
+import { momentoEmSaoPaulo } from '../../shared/util/janela-horario';
+import { avaliarRestricoes } from './restricoes-comando';
+
+/** Linha da trilha de comando (logs_mqtt tipo='comando'). */
+interface RegistroComando {
+  equipamentoId: string;
+  mensagem: string;
+  status: string;
+  severidade: 'INFO' | 'WARN' | 'ERROR';
+  cmdId?: string | null;
+  latencyMs?: number | null;
+  tonId?: string | null;
+  tonBoId?: string | null;
+  comandoTecnico?: string | null;
+  comandoSemantico?: string | null;
+}
+
+type Autor = ScopedUser & { nome?: string };
 
 /**
  * Service para envio de comandos MQTT a equipamentos.
@@ -101,7 +121,8 @@ export class EquipamentosCmdService {
   async sendCommand(
     equipamentoId: string,
     dto: SendCommandDto,
-    user?: ScopedUser,
+    user?: Autor,
+    cliente?: ClienteInfo,
   ): Promise<CommandResultDto> {
     const trimmedId = equipamentoId.trim();
     if (user) await this.scopeService.assertEntityInScope('equipamento', trimmedId, user);
@@ -146,6 +167,12 @@ export class EquipamentosCmdService {
       );
     }
 
+    const cmdTexto = (typeof dto.cmd === 'string' ? dto.cmd : JSON.stringify(dto.cmd)).slice(0, 200);
+    const trilha = {
+      equipamentoId: trimmedId,
+      comandoTecnico: `${dto.sim ? 'SIM ' : ''}${cmdTexto}`,
+      comandoSemantico: `${equipamento.nome} · ${cmdTexto}`,
+    };
     const startedAt = Date.now();
     let ack;
     try {
@@ -156,6 +183,11 @@ export class EquipamentosCmdService {
       const message = err instanceof Error ? err.message : 'Erro desconhecido';
       this.logger.warn(
         `[cmd] timeout/erro publish para equipamento ${equipamento.nome} (${trimmedId}): ${message}`,
+      );
+      await this.registrarComando(
+        { ...trilha, mensagem: `${trilha.comandoSemantico}: sem resposta da TON (${message})`, status: 'timeout', severidade: 'ERROR', latencyMs: Date.now() - startedAt },
+        user,
+        cliente,
       );
       throw new GatewayTimeoutException(
         `TON nao respondeu ao comando dentro do timeout (${message})`,
@@ -170,6 +202,11 @@ export class EquipamentosCmdService {
       this.logger.warn(
         `[cmd] equipamento ${equipamento.nome} (${trimmedId}) recusou comando: ${ack.msg} (latency=${latency_ms}ms)`,
       );
+      await this.registrarComando(
+        { ...trilha, mensagem: `${trilha.comandoSemantico}: TON recusou (${ack.msg})`, status: 'error', severidade: 'ERROR', cmdId: ack.cmd_id, latencyMs: latency_ms },
+        user,
+        cliente,
+      );
       throw new BadGatewayException({
         message: `TON recusou o comando: ${ack.msg}`,
         cmd_id: ack.cmd_id,
@@ -180,6 +217,11 @@ export class EquipamentosCmdService {
     // status 'ok' ou 'duplicate' — tratamos ambos como sucesso.
     this.logger.log(
       `[cmd] equipamento ${equipamento.nome} (${trimmedId}) ack=${ack.status} (latency=${latency_ms}ms)`,
+    );
+    await this.registrarComando(
+      { ...trilha, mensagem: trilha.comandoSemantico, status: ack.status, severidade: ack.status === 'ok' ? 'INFO' : 'WARN', cmdId: ack.cmd_id, latencyMs: latency_ms },
+      user,
+      cliente,
     );
 
     return {
@@ -214,9 +256,10 @@ export class EquipamentosCmdService {
   async acionarPonto(
     equipamentoId: string,
     pontoId: string,
-    user?: ScopedUser,
+    user?: Autor,
     sim = false,
     testMac?: string,
+    cliente?: ClienteInfo,
   ): Promise<AcionarPontoResultDto> {
     const eqId = equipamentoId.trim();
     const pId = pontoId.trim();
@@ -277,6 +320,28 @@ export class EquipamentosCmdService {
       throw new BadRequestException(`Ponto "${ponto.nome}" esta inativo.`);
     }
 
+    // 1b. Restrições do app NexON v2: permissão por instalação, janela do
+    // operador e bloqueio de ponta do pivô. Bancada (sim) não passa por aqui.
+    // Bloqueio → 403 com error.code e linha 'bloqueado' na trilha.
+    if (!sim) {
+      const bloqueio = await this.verificarRestricoes(eqId, ponto.nome, user);
+      if (bloqueio) {
+        await this.registrarComando(
+          {
+            equipamentoId: eqId,
+            mensagem: bloqueio.message,
+            status: 'bloqueado',
+            severidade: 'WARN',
+            comandoTecnico: bloqueio.code,
+            comandoSemantico: `${equipamento.nome} · ${ponto.nome}`,
+          },
+          user,
+          cliente,
+        );
+        throw new ForbiddenException({ message: bloqueio.message, code: bloqueio.code });
+      }
+    }
+
     // 2-relé. Se o ponto está mapeado como BO de um RELÉ (io_config nos props do
     // componente IoT), o comando vai por MODBUS: a TON gateway recebe
     // {"device":relé,"cmd":X} e escreve o coil (func 0x05, do catálogo). Write único
@@ -301,12 +366,22 @@ export class EquipamentosCmdService {
         this.logger.warn(
           `[acionar-ponto] timeout TON ${rele.tonNome} rele cmd=${cmdTecnicoR}: ${message}`,
         );
+        await this.registrarComando(
+          { equipamentoId: eqId, mensagem: `${comandoSemanticoR}: sem resposta da TON (${message})`, status: 'timeout', severidade: 'ERROR', latencyMs: Date.now() - startedAtR, comandoTecnico: cmdTecnicoR, comandoSemantico: comandoSemanticoR },
+          user,
+          cliente,
+        );
         throw new GatewayTimeoutException(
           `TON "${rele.tonNome}" nao respondeu ao comando ${cmdTecnicoR} dentro do timeout.`,
         );
       }
       const latencyR = Date.now() - startedAtR;
       if (ackR.status === 'error') {
+        await this.registrarComando(
+          { equipamentoId: eqId, mensagem: `${comandoSemanticoR}: relé recusou (${ackR.msg})`, status: 'error', severidade: 'ERROR', cmdId: ackR.cmd_id, latencyMs: latencyR, comandoTecnico: cmdTecnicoR, comandoSemantico: comandoSemanticoR },
+          user,
+          cliente,
+        );
         throw new BadGatewayException({
           message: `Relé recusou o comando: ${ackR.msg}`,
           cmd_id: ackR.cmd_id,
@@ -316,25 +391,20 @@ export class EquipamentosCmdService {
       this.logger.log(
         `[acionar-ponto] ${comandoSemanticoR} -> RELÉ ${rele.relayName}/${rele.cmdId} via TON ${rele.tonNome} status=${ackR.status} latency=${latencyR}ms`,
       );
-      try {
-        await this.prisma.logs_mqtt.create({
-          data: {
-            tipo: 'comando',
-            equipamento_id: eqId,
-            mensagem: `${comandoSemanticoR} (${cmdTecnicoR})`,
-            severidade: ackR.status === 'ok' ? 'INFO' : 'WARN',
-            cmd_id: ackR.cmd_id,
-            status: ackR.status,
-            latency_ms: latencyR,
-            comando_tecnico: cmdTecnicoR,
-            comando_semantico: comandoSemanticoR,
-          },
-        });
-      } catch (logErr) {
-        this.logger.warn(
-          `[acionar-ponto] falha ao persistir log (relé): ${(logErr as Error).message}`,
-        );
-      }
+      await this.registrarComando(
+        {
+          equipamentoId: eqId,
+          mensagem: `${comandoSemanticoR} (${cmdTecnicoR})`,
+          severidade: ackR.status === 'ok' ? 'INFO' : 'WARN',
+          cmdId: ackR.cmd_id,
+          status: ackR.status,
+          latencyMs: latencyR,
+          comandoTecnico: cmdTecnicoR,
+          comandoSemantico: comandoSemanticoR,
+        },
+        user,
+        cliente,
+      );
       return {
         cmd_id: ackR.cmd_id,
         status: ackR.status,
@@ -426,6 +496,11 @@ export class EquipamentosCmdService {
       this.logger.warn(
         `[acionar-ponto] timeout TON ${ton.nome} (${ton.id}) cmd=${cmdOn}: ${message}`,
       );
+      await this.registrarComando(
+        { equipamentoId: eqId, mensagem: `${comandoSemantico}: sem resposta da TON (${message})`, status: 'timeout', severidade: 'ERROR', latencyMs: Date.now() - startedAt, tonId: ton.id, tonBoId: bo.id, comandoTecnico: cmdOn, comandoSemantico },
+        user,
+        cliente,
+      );
       throw new GatewayTimeoutException(
         `TON "${ton.nome}" nao respondeu ao comando ${cmdOn} dentro do timeout.`,
       );
@@ -436,6 +511,11 @@ export class EquipamentosCmdService {
     if (ack.status === 'error') {
       this.logger.warn(
         `[acionar-ponto] TON ${ton.nome} recusou cmd=${cmdOn}: ${ack.msg} (latency=${latency_ms}ms)`,
+      );
+      await this.registrarComando(
+        { equipamentoId: eqId, mensagem: `${comandoSemantico}: TON recusou (${ack.msg})`, status: 'error', severidade: 'ERROR', cmdId: ack.cmd_id, latencyMs: latency_ms, tonId: ton.id, tonBoId: bo.id, comandoTecnico: cmdOn, comandoSemantico },
+        user,
+        cliente,
       );
       throw new BadGatewayException({
         message: `TON recusou o comando: ${ack.msg}`,
@@ -471,27 +551,22 @@ export class EquipamentosCmdService {
 
     // Audit log polivalente em logs_mqtt (tipo='comando').
     // Falha de log nao impacta o retorno — operacao ja foi executada.
-    try {
-      await this.prisma.logs_mqtt.create({
-        data: {
-          tipo: 'comando',
-          equipamento_id: eqId,
-          mensagem: `${comandoSemantico} (${cmdOn} -> ${bo.pulso_ms}ms -> ${cmdOff})`,
-          severidade: ack.status === 'ok' ? 'INFO' : 'WARN',
-          cmd_id: ack.cmd_id,
-          status: ack.status,
-          latency_ms,
-          ton_id: ton.id,
-          ton_bo_id: bo.id,
-          comando_tecnico: `${cmdOn} -> ${cmdOff}`,
-          comando_semantico: comandoSemantico,
-        },
-      });
-    } catch (logErr) {
-      this.logger.warn(
-        `[acionar-ponto] falha ao persistir log em logs_mqtt: ${(logErr as Error).message}`,
-      );
-    }
+    await this.registrarComando(
+      {
+        equipamentoId: eqId,
+        mensagem: `${comandoSemantico} (${cmdOn} -> ${bo.pulso_ms}ms -> ${cmdOff})`,
+        severidade: ack.status === 'ok' ? 'INFO' : 'WARN',
+        cmdId: ack.cmd_id,
+        status: ack.status,
+        latencyMs: latency_ms,
+        tonId: ton.id,
+        tonBoId: bo.id,
+        comandoTecnico: `${cmdOn} -> ${cmdOff}`,
+        comandoSemantico,
+      },
+      user,
+      cliente,
+    );
 
     return {
       cmd_id: ack.cmd_id,
@@ -503,6 +578,93 @@ export class EquipamentosCmdService {
       comando_semantico: comandoSemantico,
       bo_numero: bo.bo_numero,
     };
+  }
+
+  /**
+   * Grava a linha da trilha de comando (logs_mqtt tipo='comando') com autor
+   * (usuario_id) e aparelho (dispositivo, headers X-Client-*). dispositivo fica
+   * fora do schema Prisma → UPDATE raw à parte, tolerante à coluna ausente.
+   * Nunca lança: o comando já foi (ou não) executado.
+   */
+  private async registrarComando(r: RegistroComando, user?: Autor, cliente?: ClienteInfo): Promise<void> {
+    try {
+      const log = await this.prisma.logs_mqtt.create({
+        data: {
+          tipo: 'comando',
+          equipamento_id: r.equipamentoId,
+          mensagem: r.mensagem.slice(0, 500),
+          severidade: r.severidade,
+          status: r.status.slice(0, 20),
+          cmd_id: r.cmdId ?? null,
+          latency_ms: r.latencyMs ?? null,
+          usuario_id: user?.id?.trim() || null,
+          ton_id: r.tonId ?? null,
+          ton_bo_id: r.tonBoId ?? null,
+          comando_tecnico: r.comandoTecnico?.slice(0, 255) ?? null,
+          comando_semantico: r.comandoSemantico?.slice(0, 255) ?? null,
+        },
+        select: { id: true },
+      });
+      if (cliente?.dispositivo) {
+        await this.prisma.$executeRaw`
+          UPDATE logs_mqtt SET dispositivo = ${cliente.dispositivo} WHERE id = ${log.id}`.catch((e) =>
+          this.logger.warn(`[trilha] dispositivo não gravado (SQL da trilha aplicado?): ${(e as Error).message}`),
+        );
+      }
+    } catch (logErr) {
+      this.logger.warn(`[trilha] falha ao persistir comando em logs_mqtt: ${(logErr as Error).message}`);
+    }
+  }
+
+  /**
+   * Carrega o contexto e avalia as restrições do acionar. Tabelas/colunas do SQL
+   * v2 ausentes → sem restrição (comportamento v1).
+   */
+  private async verificarRestricoes(equipamentoId: string, nomePonto: string, user?: Autor) {
+    const userId = user?.id?.trim();
+    let comandarNaUnidade: boolean | null = null;
+    let janelaOperador: unknown = null;
+    let bloqueioPonta: any = null;
+
+    if (userId) {
+      try {
+        const rows = await this.prisma.$queryRaw<Array<{ linhas: number; comandar: boolean | null }>>`
+          SELECT
+            (SELECT COUNT(*) FROM usuario_unidade_permissoes WHERE usuario_id = ${userId}::bpchar)::int AS linhas,
+            (SELECT up.comandar FROM usuario_unidade_permissoes up
+               JOIN equipamentos e ON e.id = ${equipamentoId}::bpchar
+               LEFT JOIN equipamentos pai ON pai.id = e.equipamento_pai_id
+              WHERE up.usuario_id = ${userId}::bpchar
+                AND up.unidade_id = COALESCE(e.unidade_id, pai.unidade_id)
+              LIMIT 1) AS comandar`;
+        const r = rows[0];
+        if (r && Number(r.linhas) > 0) comandarNaUnidade = r.comandar === true;
+      } catch (e) {
+        this.logger.debug?.(`[restricoes] permissão por instalação indisponível: ${(e as Error).message}`);
+      }
+      try {
+        const rows = await this.prisma.$queryRaw<Array<{ cmd_janela: unknown }>>`
+          SELECT cmd_janela FROM usuarios WHERE id = ${userId}::bpchar LIMIT 1`;
+        janelaOperador = rows[0]?.cmd_janela ?? null;
+      } catch (e) {
+        this.logger.debug?.(`[restricoes] janela indisponível: ${(e as Error).message}`);
+      }
+    }
+    try {
+      const rows = await this.prisma.$queryRaw<Array<{ bloqueio_ponta: unknown }>>`
+        SELECT bloqueio_ponta FROM pivo_config WHERE equipamento_id = ${equipamentoId}::bpchar LIMIT 1`;
+      bloqueioPonta = rows[0]?.bloqueio_ponta ?? null;
+    } catch (e) {
+      this.logger.debug?.(`[restricoes] pivo_config indisponível: ${(e as Error).message}`);
+    }
+
+    return avaliarRestricoes({
+      comandarNaUnidade,
+      janelaOperador,
+      bloqueioPonta,
+      nomePonto,
+      agora: momentoEmSaoPaulo(),
+    });
   }
 
   /** Promisified sleep — usado pelo pulso. */

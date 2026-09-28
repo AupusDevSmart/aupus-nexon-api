@@ -4,6 +4,7 @@ import {
   NotFoundException,
   ConflictException,
   BadRequestException,
+  ForbiddenException,
   Logger
 } from '@nestjs/common';
 // Builtins do Node, sem efeito colateral na carga: nao ha por que adia-los com
@@ -586,8 +587,24 @@ export class UsuariosService {
     }
   }
 
-  async changePassword(id: string, data: ChangePasswordDto) {
+  /**
+   * Troca de senha pelo próprio usuário (exige a senha atual).
+   * Só o dono do id — ou quem tem usuarios.manage — pode chamar (antes qualquer
+   * autenticado trocava a senha de qualquer id sabendo a senha atual).
+   */
+  async changePassword(
+    id: string,
+    data: ChangePasswordDto,
+    requester?: { id?: string; permissions?: string[]; sid?: string | null },
+  ) {
     try {
+      if (requester) {
+        const proprio = requester.id?.trim() === id.trim();
+        if (!proprio && !(requester.permissions ?? []).includes('usuarios.manage')) {
+          throw new ForbiddenException('Você só pode alterar a sua própria senha');
+        }
+      }
+
       const usuario = await this.prisma.usuarios.findFirst({
         where: { 
           id, 
@@ -619,10 +636,17 @@ export class UsuariosService {
           updated_at: new Date(),
         },
       });
+      await this.marcarSenhaAlterada(id);
+      // Mantém a sessão de quem trocou; as outras param de renovar.
+      await this.revogarSessoes(id, requester?.id?.trim() === id.trim() ? requester?.sid ?? null : null);
 
       return { message: 'Senha alterada com sucesso' };
     } catch (error) {
-      if (error instanceof NotFoundException || error instanceof BadRequestException) {
+      if (
+        error instanceof NotFoundException ||
+        error instanceof BadRequestException ||
+        error instanceof ForbiddenException
+      ) {
         throw error;
       }
       console.error('Erro ao alterar senha:', error);
@@ -630,8 +654,21 @@ export class UsuariosService {
     }
   }
 
-  async resetPassword(id: string, data: ResetPasswordDto) {
+  /**
+   * Reset administrativo (define a senha de OUTRO usuário, sem a atual).
+   * Exige usuarios.manage (no controller) E escopo: proprietário só reseta quem
+   * ele criou; admin não reseta outro admin (só super_admin) — mesma regra do update.
+   */
+  async resetPassword(
+    id: string,
+    data: ResetPasswordDto,
+    requester?: { id?: string; role?: string | null },
+  ) {
     try {
+      if (data.confirmarSenha !== undefined && data.novaSenha !== data.confirmarSenha) {
+        throw new BadRequestException('As senhas não conferem');
+      }
+
       const usuario = await this.prisma.usuarios.findFirst({
         where: {
           id,
@@ -643,6 +680,20 @@ export class UsuariosService {
         throw new NotFoundException('Usuário não encontrado');
       }
 
+      if (requester) {
+        const requesterId = requester.id?.trim();
+        const role = requester.role ?? null;
+        if (role === 'proprietario' && usuario.created_by?.trim() !== requesterId && usuario.id.trim() !== requesterId) {
+          throw new ForbiddenException('Você só pode redefinir a senha de usuários que criou');
+        }
+        if (usuario.id.trim() !== requesterId && usuario.role === 'admin' && role !== 'super_admin') {
+          throw new ForbiddenException('Apenas super_admin pode redefinir a senha de outro admin');
+        }
+        if (usuario.role === 'super_admin' && role !== 'super_admin') {
+          throw new ForbiddenException('Apenas super_admin pode redefinir a senha de um super_admin');
+        }
+      }
+
       const novaSenhaHash = await bcrypt.hash(data.novaSenha, 12);
 
       await this.prisma.usuarios.update({
@@ -652,17 +703,58 @@ export class UsuariosService {
           updated_at: new Date(),
         },
       });
+      await this.marcarSenhaAlterada(id);
+      await this.revogarSessoes(id, null);
 
       return {
         message: 'Senha resetada com sucesso',
         senhaTemporaria: data.novaSenha
       };
     } catch (error) {
-      if (error instanceof NotFoundException) {
+      if (
+        error instanceof NotFoundException ||
+        error instanceof BadRequestException ||
+        error instanceof ForbiddenException
+      ) {
         throw error;
       }
       console.error('Erro ao resetar senha:', error);
       throw new BadRequestException('Erro ao resetar senha');
+    }
+  }
+
+  // ==========================================================================
+  // Colunas SQL-cruas de usuarios (fora do schema Prisma de propósito — a
+  // sincronização replica `usuarios` pelo DMMF). Tolerantes à coluna ausente.
+  // ==========================================================================
+
+  /** Carimba usuarios.senha_alterada_em = now(). */
+  async marcarSenhaAlterada(id: string): Promise<void> {
+    try {
+      await this.prisma.$executeRaw`UPDATE usuarios SET senha_alterada_em = now() WHERE TRIM(id) = ${id.trim()}`;
+    } catch (e) {
+      this.logger.warn(`senha_alterada_em não gravado (coluna ausente?): ${(e as Error).message}`);
+    }
+  }
+
+  async getSenhaAlteradaEm(id: string): Promise<Date | null> {
+    try {
+      const rows = await this.prisma.$queryRaw<Array<{ senha_alterada_em: Date | null }>>`
+        SELECT senha_alterada_em FROM usuarios WHERE TRIM(id) = ${id.trim()} LIMIT 1`;
+      return rows[0]?.senha_alterada_em ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Encerra as sessões (auth_sessoes) do usuário, menos `exceto`. */
+  async revogarSessoes(id: string, exceto: string | null): Promise<void> {
+    try {
+      await this.prisma.$executeRaw`
+        UPDATE auth_sessoes SET revoked_at = now()
+        WHERE TRIM(usuario_id) = ${id.trim()} AND revoked_at IS NULL AND TRIM(id) <> ${exceto?.trim() ?? ''}`;
+    } catch (e) {
+      this.logger.warn(`sessões não revogadas (tabela ausente?): ${(e as Error).message}`);
     }
   }
 

@@ -5,6 +5,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
+import { SessoesService } from './sessoes.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { UsuariosModule } from '../usuarios/usuarios.module';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
@@ -36,6 +37,7 @@ import { PermissionScopeModule } from './permission-scope.module';
   controllers: [AuthController],
   providers: [
     AuthService,
+    SessoesService,
     JwtStrategy,
     {
       provide: APP_GUARD,
@@ -46,6 +48,6 @@ import { PermissionScopeModule } from './permission-scope.module';
       useClass: PermissionsGuard, // Valida @Permissions() globalmente (rotas sem decorator passam)
     },
   ],
-  exports: [AuthService, JwtModule],
+  exports: [AuthService, SessoesService, JwtModule],
 })
 export class AuthModule {}

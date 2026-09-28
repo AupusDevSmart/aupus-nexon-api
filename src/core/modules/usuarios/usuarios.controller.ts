@@ -249,26 +249,31 @@ export class UsuariosController {
 
   @Patch(':id/change-password')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Alterar senha do usuário' })
+  @ApiOperation({ summary: 'Alterar a própria senha (ou de outro, com usuarios.manage)' })
   @ApiParam({ name: 'id', description: 'ID do usuário' })
   @ApiResponse({ status: 200, description: 'Senha alterada com sucesso' })
+  @ApiResponse({ status: 403, description: 'id de outro usuário sem usuarios.manage' })
   changePassword(
     @Param('id') id: string,
     @Body() changePasswordDto: ChangePasswordDto,
+    @CurrentUser() currentUser?: any,
   ) {
-    return this.usuariosService.changePassword(id, changePasswordDto);
+    return this.usuariosService.changePassword(id, changePasswordDto, currentUser ?? {});
   }
 
   @Patch(':id/reset-password')
+  @Permissions('usuarios.manage')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Resetar senha do usuário' })
+  @ApiOperation({ summary: 'Resetar senha do usuário (usuarios.manage + escopo)' })
   @ApiParam({ name: 'id', description: 'ID do usuário' })
   @ApiResponse({ status: 200, description: 'Senha resetada com sucesso' })
+  @ApiResponse({ status: 403, description: 'Sem usuarios.manage ou usuário fora do escopo' })
   resetPassword(
     @Param('id') id: string,
     @Body() resetPasswordDto: ResetPasswordDto,
+    @CurrentUser() currentUser?: any,
   ) {
-    return this.usuariosService.resetPassword(id, resetPasswordDto);
+    return this.usuariosService.resetPassword(id, resetPasswordDto, currentUser ?? {});
   }
 
   @Post(':id/upload-avatar')

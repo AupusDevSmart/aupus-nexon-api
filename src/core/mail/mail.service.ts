@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import * as nodemailer from 'nodemailer';
 import { getWelcomeEmailHtml } from './templates/welcome.template';
 import { getPasswordResetEmailHtml } from './templates/password-reset.template';
+import { getConviteOperadorEmailHtml } from './templates/convite-operador.template';
 
 @Injectable()
 export class MailService implements OnModuleInit {
@@ -97,6 +98,42 @@ export class MailService implements OnModuleInit {
       this.logger.log(`Password reset email sent to ${to}`);
     } catch (error) {
       this.logger.error(`Failed to send password reset email to ${to}: ${error.message}`);
+    }
+  }
+
+  /**
+   * Link de redefinição (mesma rota do "esqueci minha senha") — usado também
+   * pelo convite de operador: aceitar o convite = definir a senha.
+   */
+  linkRedefinirSenha(token: string, email: string): string {
+    return `${this.frontendUrl}/redefinir-senha?token=${token}&email=${encodeURIComponent(email)}`;
+  }
+
+  /** Convite de operador. SMTP ausente → só loga (nunca falha o convite). */
+  async sendConviteOperadorEmail(
+    to: string,
+    nome: string,
+    link: string,
+    expiraEmDias: number,
+    convidadoPor: string | null,
+  ): Promise<boolean> {
+    if (!this.transporter) {
+      this.logger.warn(`SMTP not configured. Skipping invite email to ${to}`);
+      return false;
+    }
+    try {
+      const html = getConviteOperadorEmailHtml(nome, link, this.frontendUrl, expiraEmDias, convidadoPor);
+      await this.transporter.sendMail({
+        from: this.fromAddress,
+        to,
+        subject: 'Convite para o NexON - Aupus',
+        html,
+      });
+      this.logger.log(`Invite email sent to ${to}`);
+      return true;
+    } catch (error) {
+      this.logger.error(`Failed to send invite email to ${to}: ${error.message}`);
+      return false;
     }
   }
 }
