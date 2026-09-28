@@ -1058,8 +1058,9 @@ export class CoaService {
   }
 
   /**
-   * Equipamentos no arqIoT por unidade: componente do diagrama IoT (menos a própria
-   * TON) ou ponto com vínculo ativo. 0 = "Sem instrumentação". Erro → null (omite).
+   * Equipamentos instrumentados por unidade: componente do diagrama IoT (menos a própria
+   * TON), ponto com vínculo ativo, SCS declarado ou MQTT habilitado. 0 = "Sem instrumentação".
+   * Erro → null (omite).
    */
   private async equipamentosScsPorUnidade(unidadeIds: string[]): Promise<Map<string, number> | null> {
     const m = new Map<string, number>();
@@ -1077,6 +1078,11 @@ export class CoaService {
           JOIN equipamento_pontos ep ON ep.id = v.equipamento_ponto_id AND ep.deleted_at IS NULL
           JOIN equipamentos e ON e.id = ep.equipamento_id AND e.deleted_at IS NULL
           WHERE v.ativo = true AND v.deleted_at IS NULL
+          UNION
+          -- SCS declarado ou telemetria MQTT também é instrumentação (a lista do app une os dois).
+          SELECT TRIM(e.unidade_id), TRIM(e.id)
+          FROM equipamentos e
+          WHERE e.deleted_at IS NULL AND (e.scs = true OR e.mqtt_habilitado = true)
         ) x
         WHERE unidade_id = ANY(${unidadeIds}::text[])
         GROUP BY unidade_id`;
