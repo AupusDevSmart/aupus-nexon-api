@@ -267,7 +267,7 @@ describe('UsuariosController', () => {
 
       const result = await controller.changePassword(userId, changePasswordDto);
 
-      expect(service.changePassword).toHaveBeenCalledWith(userId, changePasswordDto);
+      expect(service.changePassword).toHaveBeenCalledWith(userId, changePasswordDto, {});
       expect(result).toEqual(expectedResult);
     });
 
@@ -281,7 +281,7 @@ describe('UsuariosController', () => {
       mockUsuariosService.changePassword.mockRejectedValue(new Error('Senha atual incorreta'));
 
       await expect(controller.changePassword(userId, changePasswordDto)).rejects.toThrow('Senha atual incorreta');
-      expect(service.changePassword).toHaveBeenCalledWith(userId, changePasswordDto);
+      expect(service.changePassword).toHaveBeenCalledWith(userId, changePasswordDto, {});
     });
   });
 
@@ -301,7 +301,7 @@ describe('UsuariosController', () => {
 
       const result = await controller.resetPassword(userId, resetPasswordDto);
 
-      expect(service.resetPassword).toHaveBeenCalledWith(userId, resetPasswordDto);
+      expect(service.resetPassword).toHaveBeenCalledWith(userId, resetPasswordDto, {});
       expect(result).toEqual(expectedResult);
     });
 
@@ -315,7 +315,7 @@ describe('UsuariosController', () => {
       mockUsuariosService.resetPassword.mockRejectedValue(new Error('Senhas não coincidem'));
 
       await expect(controller.resetPassword(userId, resetPasswordDto)).rejects.toThrow('Senhas não coincidem');
-      expect(service.resetPassword).toHaveBeenCalledWith(userId, resetPasswordDto);
+      expect(service.resetPassword).toHaveBeenCalledWith(userId, resetPasswordDto, {});
     });
   });
 });
