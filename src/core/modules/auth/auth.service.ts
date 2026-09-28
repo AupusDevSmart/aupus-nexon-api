@@ -14,6 +14,8 @@ import { LoginDto } from './dto/login.dto';
 import { AuthResponseDto } from './dto/auth-response.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetPasswordWithTokenDto } from './dto/reset-password.dto';
+import { SessoesService } from './sessoes.service';
+import { ClienteInfo } from '../../common/cliente-info';
 
 /** Validade do link de redefinição de senha, em minutos. */
 const RESET_TOKEN_EXP_MINUTES = 60;
@@ -29,6 +31,7 @@ export class AuthService {
     private jwtService: JwtService,
     private prisma: PrismaService,
     private mailService: MailService,
+    private sessoes: SessoesService,
   ) {}
 
   /**
@@ -86,7 +89,7 @@ export class AuthService {
    * @param loginDto Credenciais de login
    * @returns Tokens de acesso e dados do usuário
    */
-  async login(loginDto: LoginDto): Promise<AuthResponseDto> {
+  async login(loginDto: LoginDto, cliente?: ClienteInfo): Promise<AuthResponseDto> {
     console.log(`🚀 [AUTH] Iniciando login para: ${loginDto.email}`);
 
     // Validar credenciais
@@ -107,6 +110,10 @@ export class AuthService {
         };
       });
 
+    // Sessão (auth_sessoes): sid vai no access E no refresh token. Se a tabela
+    // ainda não existe (SQL não aplicado), segue sem sid — comportamento legado.
+    const sessao = await this.sessoes.criar(usuario.id, cliente);
+
     // Payload do JWT
     const payload = {
       sub: usuario.id,
@@ -114,6 +121,7 @@ export class AuthService {
       nome: usuario.nome,
       role: permissoes.role?.name || null,
       permissions: permissoes.permissionNames || [],
+      ...(sessao ? { sid: sessao.sid } : {}),
     };
 
     console.log(`🔑 [AUTH] Gerando tokens para usuário: ${usuario.id}`);
@@ -123,7 +131,7 @@ export class AuthService {
 
     // Gerar refresh token (7 dias)
     const refresh_token = this.jwtService.sign(
-      { sub: usuario.id, type: 'refresh' },
+      { sub: usuario.id, type: 'refresh', ...(sessao ? { sid: sessao.sid, jti: sessao.jti } : {}) },
       { expiresIn: '7d' },
     );
 
@@ -151,6 +159,7 @@ export class AuthService {
     (usuarioCompleto as any).role_details = permissoes.role;
     (usuarioCompleto as any).all_permissions = permissoes.permissionNames;
     (usuarioCompleto as any).plantas_vinculadas = plantas_vinculadas;
+    (usuarioCompleto as any).senha_alterada_em = await this.usuariosService.getSenhaAlteradaEm(usuario.id);
 
     console.log(`📦 [AUTH] Dados do usuário para retornar:`, {
       id: usuarioCompleto.id,
@@ -177,6 +186,7 @@ export class AuthService {
    */
   async refreshToken(
     refreshToken: string,
+    cliente?: ClienteInfo,
   ): Promise<{ access_token: string; refresh_token: string; token_type: string; expires_in: number }> {
     console.log(`🔄 [AUTH] Renovando token...`);
 
@@ -218,6 +228,28 @@ export class AuthService {
           };
         });
 
+      // Sessão: token COM sid precisa de sessão viva e rotaciona o jti; token
+      // SEM sid (legado, antes das sessões) continua valendo e ganha uma sessão.
+      let sid: string | null = null;
+      let jti: string | null = null;
+      if (payload.sid) {
+        const r = await this.sessoes.rotacionar(String(payload.sid), usuario.id, payload.jti, cliente);
+        if (!r.jti) {
+          console.log(`🚫 [AUTH] Refresh recusado (sessão ${payload.sid}: ${r.resultado})`);
+          throw new UnauthorizedException(
+            r.resultado === 'revogada' ? 'Sessão encerrada. Entre novamente.' : 'Refresh token inválido ou expirado',
+          );
+        }
+        sid = String(payload.sid);
+        jti = r.jti;
+      } else {
+        const nova = await this.sessoes.criar(usuario.id, cliente);
+        if (nova) {
+          sid = nova.sid;
+          jti = nova.jti;
+        }
+      }
+
       // Criar novo payload com dados atualizados
       const newPayload = {
         sub: usuario.id,
@@ -225,6 +257,7 @@ export class AuthService {
         nome: usuario.nome,
         role: permissoes.role?.name || null,
         permissions: permissoes.permissionNames || [],
+        ...(sid ? { sid } : {}),
       };
 
       // Gerar novos tokens
@@ -233,7 +266,7 @@ export class AuthService {
       });
 
       const refresh_token = this.jwtService.sign(
-        { sub: usuario.id, type: 'refresh' },
+        { sub: usuario.id, type: 'refresh', ...(sid ? { sid, jti } : {}) },
         { expiresIn: '7d' },
       );
 
@@ -292,6 +325,7 @@ export class AuthService {
       role_details: permissoes.role,
       all_permissions: permissoes.permissionNames,
       plantas_vinculadas,
+      senha_alterada_em: await this.usuariosService.getSenhaAlteradaEm(userId),
     };
   }
 
@@ -386,46 +420,85 @@ export class AuthService {
 
     const email = usuario.email;
 
+    // 1) Token de "esqueci minha senha" (password_reset_tokens, 60 min).
+    let tokenValido = false;
     const registro = await this.prisma.password_reset_tokens.findUnique({
       where: { email },
     });
-
-    if (!registro) {
-      throw new BadRequestException('Token inválido ou expirado');
+    if (registro) {
+      const criadoEm = registro.created_at ? new Date(registro.created_at).getTime() : 0;
+      const expirado = Date.now() - criadoEm > RESET_TOKEN_EXP_MINUTES * 60 * 1000;
+      if (expirado) {
+        await this.prisma.password_reset_tokens.delete({ where: { email } }).catch(() => null);
+      } else {
+        tokenValido = await bcrypt.compare(dto.token, registro.token);
+      }
     }
 
-    // Verifica expiração com base no created_at.
-    const criadoEm = registro.created_at ? new Date(registro.created_at).getTime() : 0;
-    const expirado = Date.now() - criadoEm > RESET_TOKEN_EXP_MINUTES * 60 * 1000;
-
-    if (expirado) {
-      await this.prisma.password_reset_tokens.delete({ where: { email } }).catch(() => null);
-      throw new BadRequestException('Token inválido ou expirado');
-    }
-
-    const tokenValido = await bcrypt.compare(dto.token, registro.token);
+    // 2) Token de CONVITE de operador (usuario_convites, validade em dias). Aceitar
+    //    = definir a senha pela primeira vez → ativa o usuário.
+    let conviteId: string | null = null;
     if (!tokenValido) {
-      throw new BadRequestException('Token inválido ou expirado');
+      conviteId = await this.validarConvite(usuario.id, dto.token);
+      if (!conviteId) {
+        throw new BadRequestException('Token inválido ou expirado');
+      }
     }
 
     // Atualiza a senha e invalida o token (uso único).
     const novaSenhaHash = await bcrypt.hash(dto.novaSenha, 12);
     await this.prisma.usuarios.update({
       where: { email },
-      data: { senha: novaSenhaHash, updated_at: new Date() },
+      data: {
+        senha: novaSenhaHash,
+        updated_at: new Date(),
+        ...(conviteId ? { status: 'Ativo', is_active: true } : {}),
+      },
     });
-    await this.prisma.password_reset_tokens.delete({ where: { email } }).catch(() => null);
+    await this.usuariosService.marcarSenhaAlterada(usuario.id);
+    if (conviteId) {
+      await this.prisma.$executeRaw`
+        UPDATE usuario_convites SET aceito_em = now(), updated_at = now() WHERE TRIM(id) = ${conviteId}`;
+      console.log(`✅ [AUTH] Convite ${conviteId} aceito: ${email}`);
+    } else {
+      await this.prisma.password_reset_tokens.delete({ where: { email } }).catch(() => null);
+    }
+    // Senha nova → as sessões abertas (aparelho perdido, etc.) deixam de renovar.
+    await this.sessoes.revogarOutras(usuario.id, null);
 
     console.log(`✅ [AUTH] Senha redefinida com sucesso para: ${email}`);
     return { message: 'Senha redefinida com sucesso' };
   }
 
   /**
+   * Convite pendente (não aceito, não cancelado, dentro da validade) cujo hash
+   * casa com o token. Tabela ausente (SQL não aplicado) → null.
+   */
+  private async validarConvite(usuarioId: string, token: string): Promise<string | null> {
+    try {
+      const convites = await this.prisma.$queryRaw<Array<{ id: string; token_hash: string }>>`
+        SELECT TRIM(id) AS id, token_hash FROM usuario_convites
+        WHERE TRIM(usuario_id) = ${usuarioId.trim()}
+          AND aceito_em IS NULL AND cancelado_em IS NULL AND expira_em > now()
+        ORDER BY enviado_em DESC LIMIT 3`;
+      for (const c of convites) {
+        if (await bcrypt.compare(token, c.token_hash)) return c.id;
+      }
+    } catch (e) {
+      console.warn(`⚠️ [AUTH] validarConvite: ${(e as Error).message}`);
+    }
+    return null;
+  }
+
+  /**
    * Realiza logout (pode ser expandido para blacklist de tokens)
    * @param userId ID do usuário
    */
-  async logout(userId: string): Promise<{ message: string }> {
+  async logout(userId: string, sid?: string | null): Promise<{ message: string }> {
     console.log(`👋 [AUTH] Logout do usuário: ${userId}`);
+
+    // Com sessão: encerra só a deste aparelho (o refresh dela passa a dar 401).
+    if (sid) await this.sessoes.revogar(userId, sid).catch(() => null);
 
     // TODO: Implementar blacklist de tokens se necessário
     // Por enquanto, o logout é gerenciado pelo frontend removendo o token

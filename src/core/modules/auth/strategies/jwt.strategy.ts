@@ -44,6 +44,8 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       nome: payload.nome,
       role: payload.role,
       permissions: payload.permissions || [],
+      // Sessão (auth_sessoes) deste token; ausente em tokens legados.
+      sid: payload.sid ?? null,
     };
   }
 }

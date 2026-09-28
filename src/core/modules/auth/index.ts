@@ -15,3 +15,5 @@ export * from "./permission-scope.service";
 export * from "./permission-scope.module";
 export * from "./decorators/planta-scope.decorator";
 export * from "./guards/planta-scope.guard";
+export * from "./sessoes.service";
+export * from "./sessao-rotacao";
