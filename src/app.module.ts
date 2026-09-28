@@ -34,6 +34,7 @@ import { EquipamentoPontosModule } from './modules/equipamento-pontos/equipament
 import { TonBoModule } from './modules/ton-bo/ton-bo.module';
 import { VinculosMirrorModule } from './modules/iot-vinculos/vinculos-mirror.module';
 import { SinopticoModule } from './modules/sinoptico/sinoptico.module';
+import { PivosModule } from './modules/pivos/pivos.module';
 import { TonBiModule } from './modules/ton-bi/ton-bi.module';
 import { TonAiModule } from './modules/ton-ai/ton-ai.module';
 import { MonitoramentoFvModule } from './modules/monitoramento-fv/monitoramento-fv.module';
@@ -103,6 +104,7 @@ import { IotCatalogModule } from './modules/iot-catalog/iot-catalog.module';
     VinculosMirrorModule,
     TonBoModule,
     SinopticoModule,
+    PivosModule,
     TonBiModule,
     TonAiModule,
     MonitoramentoFvModule,
