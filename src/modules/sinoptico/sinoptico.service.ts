@@ -99,6 +99,8 @@ export class SinopticoService {
 
     // 3. Alarmes ativos na janela
     const alarmWhere: any = {
+      // Só alarmes: comando (tipo='comando') também mora em logs_mqtt e não é falha.
+      tipo: 'alerta',
       created_at: { gte: new Date(agora - janelaAlarmes * 60000) },
       equipamento: {
         unidade_id: uid,

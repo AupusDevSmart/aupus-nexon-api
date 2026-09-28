@@ -25,10 +25,16 @@ export class HttpExceptionFilter implements ExceptionFilter {
     // Extrair mensagem e detalhes do erro
     let message = exception.message;
     let details: any = undefined;
+    // Código de domínio opcional: `throw new ForbiddenException({ message, code: 'COMANDO_FORA_JANELA' })`.
+    // Sem ele, o código sai do status HTTP (comportamento de sempre).
+    let code: string | undefined;
 
     if (typeof exceptionResponse === 'object') {
       const responseObj = exceptionResponse as any;
       message = responseObj.message || message;
+      if (typeof responseObj.code === 'string' && /^[A-Z][A-Z0-9_]{2,63}$/.test(responseObj.code)) {
+        code = responseObj.code;
+      }
 
       // Se há array de mensagens de validação
       if (Array.isArray(responseObj.message)) {
@@ -44,7 +50,7 @@ export class HttpExceptionFilter implements ExceptionFilter {
     response.status(status).json({
       success: false,
       error: {
-        code: this.getErrorCode(status),
+        code: code ?? this.getErrorCode(status),
         message,
         details,
       },

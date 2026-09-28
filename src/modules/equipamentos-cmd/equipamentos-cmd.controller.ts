@@ -14,7 +14,7 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
-import { JwtAuthGuard, Permissions, CurrentUser } from '@/core';
+import { JwtAuthGuard, Permissions, CurrentUser, Cliente, ClienteInfo } from '@/core';
 
 import { EquipamentosCmdService } from './equipamentos-cmd.service';
 import { SendCommandDto } from './dto/send-command.dto';
@@ -67,8 +67,9 @@ export class EquipamentosCmdController {
     @Param('id') id: string,
     @Body() dto: SendCommandDto,
     @CurrentUser() user?: any,
+    @Cliente() cliente?: ClienteInfo,
   ): Promise<CommandResultDto> {
-    return this.cmdService.sendCommand(id, dto, user);
+    return this.cmdService.sendCommand(id, dto, user, cliente);
   }
 
   @Post('wifi')

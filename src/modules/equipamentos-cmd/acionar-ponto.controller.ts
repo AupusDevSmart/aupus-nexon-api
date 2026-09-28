@@ -14,7 +14,7 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
-import { JwtAuthGuard, Permissions, CurrentUser } from '@/core';
+import { JwtAuthGuard, Permissions, CurrentUser, Cliente, ClienteInfo } from '@/core';
 
 import { EquipamentosCmdService } from './equipamentos-cmd.service';
 import { AcionarPontoResultDto } from './dto/acionar-ponto-result.dto';
@@ -53,7 +53,12 @@ export class EquipamentosAcionarPontoController {
   @ApiResponse({ status: 200, type: AcionarPontoResultDto })
   @ApiResponse({ status: 400, description: 'Equipamento sem automacao / ponto invalido / sem mapeamento ton_bo' })
   @ApiResponse({ status: 401, description: 'JWT ausente ou expirado' })
-  @ApiResponse({ status: 403, description: 'Sem permission equipamentos.acionar_ponto' })
+  @ApiResponse({
+    status: 403,
+    description:
+      'Sem permission equipamentos.acionar_ponto, ou error.code = SEM_PERMISSAO_UNIDADE | ' +
+      'COMANDO_FORA_JANELA | COMANDO_BLOQUEADO_PONTA (fica na trilha com status bloqueado)',
+  })
   @ApiResponse({ status: 404, description: 'Equipamento ou ponto nao encontrado' })
   @ApiResponse({ status: 502, description: 'TON respondeu com error' })
   @ApiResponse({ status: 503, description: 'Broker MQTT desconectado' })
@@ -63,6 +68,7 @@ export class EquipamentosAcionarPontoController {
     @Param('pontoId') pontoId: string,
     @Body() dto: AcionarPontoDto = {},
     @CurrentUser() user?: any,
+    @Cliente() cliente?: ClienteInfo,
   ): Promise<AcionarPontoResultDto> {
     return this.cmdService.acionarPonto(
       id,
@@ -70,6 +76,7 @@ export class EquipamentosAcionarPontoController {
       user,
       dto?.sim === true,
       dto?.sim === true ? dto?.testMac : undefined,
+      cliente,
     );
   }
 }

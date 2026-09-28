@@ -316,14 +316,14 @@ export class PermissionScopeService {
         const row = await (this.prisma as any).regras_logs_mqtt?.findFirst?.({
           where: { id },
           select: {
-            equipamentos: {
+            equipamento: {
               select: { planta_id: true, unidade: { select: { planta_id: true } } },
             },
           },
         });
         return (
-          row?.equipamentos?.planta_id?.trim() ||
-          row?.equipamentos?.unidade?.planta_id?.trim() ||
+          row?.equipamento?.planta_id?.trim() ||
+          row?.equipamento?.unidade?.planta_id?.trim() ||
           null
         );
       }
@@ -333,14 +333,14 @@ export class PermissionScopeService {
         const row = await (this.prisma as any).logs_mqtt?.findFirst?.({
           where: { id },
           select: {
-            equipamentos: {
+            equipamento: {
               select: { planta_id: true, unidade: { select: { planta_id: true } } },
             },
           },
         });
         return (
-          row?.equipamentos?.planta_id?.trim() ||
-          row?.equipamentos?.unidade?.planta_id?.trim() ||
+          row?.equipamento?.planta_id?.trim() ||
+          row?.equipamento?.unidade?.planta_id?.trim() ||
           null
         );
       }
