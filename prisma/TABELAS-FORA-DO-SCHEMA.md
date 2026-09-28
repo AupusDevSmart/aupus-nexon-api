@@ -21,9 +21,15 @@ monorepo mas nunca modeladas.
 | `carregador_sessoes` | idem | idem |
 | `carregador_pedidos_vaga` | idem | idem |
 | `iot_comissionamento` | AupusNexOn — comissionamento (2026-08) | `.../2026-08-25_comissionamento.sql` e `2026-08-26_comissionamento_fotos.sql` |
+| `auditoria_acessos` | AupusNexOn — apps v2 (AUPU-70), trilha de acesso | `.../2026-09-28_1-logs-mqtt-trilha.sql` |
+| `usuario_notificacoes`, `dispositivos_push` | idem, conta do app | `.../2026-09-28_2-usuarios-conta.sql` |
+| `auth_sessoes` | idem, sessões por aparelho | `.../2026-09-28_3-auth-sessoes.sql` |
+| `usuario_convites`, `usuario_unidade_permissoes` | idem, operadores | `.../2026-09-28_4-operadores-convites.sql` |
+| `pivo_config`, `pivo_programacoes` | idem, pivô | `.../2026-09-28_5-pivos.sql` |
 | `iot_*` (7 tabelas) | `/var/www/iot_nexon/` — outro sistema | fora deste monorepo |
 
-Total: **15 tabelas** que o diff nao reconhece.
+Total: **23 tabelas** que o diff nao reconhece (15 levantadas em 2026-08-26 + 8 do AUPU-70).
+Colunas fora do schema em tabelas modeladas: `logs_mqtt` (trilha: dispositivo, reconhecido_*, resolvido_*, silenciado_ate) e `usuarios` (senha_alterada_em, cmd_janela) — ver os mesmos SQL.
 
 ### Cuidado com o prefixo `iot_`
 
