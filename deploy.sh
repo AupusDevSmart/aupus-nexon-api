@@ -42,12 +42,16 @@ fi
 step "pnpm install --frozen-lockfile"
 pnpm install --frozen-lockfile
 
-# pnpm v10 strict ignora o postinstall do @prisma/client. Como o schema
-# vem do @aupus/api-shared, e bumps dessa dep podem trazer schema novo,
-# precisa gerar o Client explicitamente apontando pro schema dele.
-# (ref: memory reference_pnpm10_prisma_generate.md)
+# O client gerado do Prisma mora num caminho do store que depende do hash de
+# peers (.pnpm/@prisma+client@6.19.3_<hash>), e o pnpm v10 nao roda o
+# postinstall dele: sem gerar aqui, instalacao nova nasce sem client e o build
+# falha com erro que parece de codigo.
+#
+# O schema e o deste projeto. Apontava para node_modules/@aupus/api-shared,
+# pacote que deixou de existir em 2026-09 — com `set -e`, o deploy parava aqui
+# na primeira instalacao limpa.
 step "pnpm prisma generate"
-pnpm prisma generate --schema=node_modules/@aupus/api-shared/prisma/schema.prisma
+pnpm prisma generate --schema=prisma/schema.prisma
 
 step "Snapshot de dist/ anterior em dist.previous/"
 rm -rf dist.previous
