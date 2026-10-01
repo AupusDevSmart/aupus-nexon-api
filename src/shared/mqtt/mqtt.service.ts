@@ -1749,7 +1749,14 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       // processar com extrator específico (path data.phf/phr, conversão KD).
       const categoriaNome = equipamento.tipo_equipamento_rel?.categoria_nome;
       const codigo = equipamento.tipo_equipamento_rel?.codigo;
-      const isGateway = categoriaNome === 'Gateway';
+      // Medidor Concessionária (EQTL001) lido pela SSU da TON v2 publica os pulsos no formato
+      // do A-966 -> mesmo processamento do gateway. NAO generalizar por conteúdo: o M160
+      // também tem 'phf' (lá é kWh acumulado, não pulsos).
+      const dPulsos: any = dados && typeof dados === 'object' ? dados : {};
+      const temPulsosA966 =
+        dPulsos.phf !== undefined || dPulsos.phr !== undefined ||
+        (dPulsos.data && (dPulsos.data.phf !== undefined || dPulsos.data.phr !== undefined));
+      const isGateway = categoriaNome === 'Gateway' || (codigo === 'EQTL001' && temPulsosA966);
       const isM160 = codigo === 'M-160' || codigo === 'M160' || codigo === 'METER_M160';
 
       if (isGateway) {

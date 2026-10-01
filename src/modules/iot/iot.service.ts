@@ -281,7 +281,9 @@ export class IoTService {
     if (!ton) return { devices: [], elementos_scs: [] };
     if (user && ton.unidade_id) await this.scopeService.assertEntityInScope('unidade', ton.unidade_id, user);
     const devices = await this.prisma.$queryRaw<Array<{ comp_id: string; tipo: string; nome: string; equipamento_id: string | null; assoc_dj_id: string | null; pontos_override: any }>>`
-      SELECT TRIM(d.id) AS comp_id, d.tipo, COALESCE(d.props->>'name', '') AS nome,
+      SELECT TRIM(d.id) AS comp_id,
+             CASE WHEN d.tipo = 'medidor_comum' AND x.estilo = 'ssu' THEN 'medidor_ssu' ELSE d.tipo END AS tipo,
+             COALESCE(d.props->>'name', '') AS nome,
              COALESCE(NULLIF(TRIM(d.equipamento_id), ''), d.props->>'equipamento_id') AS equipamento_id,
              NULLIF(TRIM(d.props->>'disjuntor_equipamento_id'), '') AS assoc_dj_id,
              d.props->'pontos_override' AS pontos_override
@@ -1233,9 +1235,18 @@ export class IoTService {
     // Device Modbus = tem endereco Modbus e modelo do catalogo (nao e' TON).
     // Medidor SSU (NBR 14522, entrada SU+ da TON-V2) entra sempre: nao e' Modbus e o
     // modelo do catalogo e' opcional (o parser e' generico da norma).
+    // Medidor Concessionária ligado DIRETO na TON v2 (cabo SSU) = mesmo papel do medidor_ssu.
+    const ligadoPorSsu = new Set<string>();
+    for (const cx of (diagrama.connections ?? []) as Array<any>) {
+      if (String(cx?.style ?? '') !== 'ssu') continue;
+      for (const id of [cx?.from?.componentId, cx?.to?.componentId]) if (id) ligadoPorSsu.add(String(id));
+    }
+    const ehMedidorSsu = (c: Record<string, any>) =>
+      String(c?.type ?? '') === 'medidor_ssu' ||
+      (String(c?.type ?? '') === 'medidor_comum' && ligadoPorSsu.has(String(c?.id)));
     const devices = comps.filter((c) => {
       if (isTon(c?.type)) return false;
-      if (String(c?.type ?? '') === 'medidor_ssu') return true;
+      if (ehMedidorSsu(c)) return true;
       const p = (c?.props ?? {}) as Record<string, unknown>;
       return (
         String(p.modbus_address ?? '').trim() !== '' &&
@@ -1287,9 +1298,23 @@ export class IoTService {
       if (rawEquip) {
         const ok = await tx.equipamentos.findFirst({
           where: { id: rawEquip, deleted_at: null },
-          select: { id: true },
+          select: { id: true, topico_mqtt: true },
         });
-        if (ok) continue;
+        if (ok) {
+          // Medidor SSU vinculado a um ativo existente (ex.: o medidor da concessionária do
+          // unifilar): o ativo precisa do topico da TON pra o NexON escutar a leitura.
+          if (ehMedidorSsu(comp)) {
+            const b = tonTopicDe(String(comp.id));
+            const pp = (comp.props ?? {}) as Record<string, unknown>;
+            const nm = String(pp.name ?? pp.catalog_id ?? comp.type ?? 'Device').trim() || 'Device';
+            const ad = String(pp.modbus_address ?? '').trim() || '1';
+            const tp = b ? `${b}/${nm}_${ad}/data` : null;
+            if (tp && (ok.topico_mqtt ?? '').trim() !== tp) {
+              await tx.equipamentos.update({ where: { id: ok.id }, data: { topico_mqtt: tp, mqtt_habilitado: true } });
+            }
+          }
+          continue;
+        }
       }
 
       const props = (comp.props ?? {}) as Record<string, unknown>;
@@ -1303,7 +1328,10 @@ export class IoTService {
       // Medidor SSU: tipo de equipamento da categoria "Gateway" (o mesmo do A-966) — e' a
       // categoria que liga a ingestao de pulsos (salvarDadosGateway), o dashboard do
       // gateway e o fluxo BIDIRECIONAL na demanda. A TON publica o mesmo JSON do A-966.
-      const tipoEquipamentoId = String(comp.type ?? '') === 'medidor_ssu' ? 'tipo-ims-a966-001' : undefined;
+      const tipoEquipamentoId =
+        String(comp.type ?? '') === 'medidor_ssu' ? 'tipo-ims-a966-001'
+        : ehMedidorSsu(comp) ? 'cmsyybblg000jjq1qr1na33zz'   // Medidor Concessionária (EQTL001)
+        : undefined;
 
       let equipId: string;
       const existente = await tx.equipamentos.findFirst({
