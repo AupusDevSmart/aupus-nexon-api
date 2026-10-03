@@ -36,6 +36,17 @@ export interface DispatchResult {
 
 const CFG_ID = 'cfgdefault0000000000000000';
 
+export type Confianca = 'alta' | 'media' | 'baixa';
+export interface LinhaGeracao {
+  unidade_id: string;
+  nome: string;
+  kwh_realizado: number;
+  kwh_previsto: number;
+  fonte: 'api' | 'ton' | 'manual' | 'bdo';
+  confianca: Confianca;
+  motivo: string;
+}
+
 /**
  * Dispatcher do boletim diário de geração via WhatsApp — migrado do bdo-aupus-api pro NexON.
  * Lê a config de `notificacao_envio_config`, os destinatários de `notificacao_destinatarios`,
@@ -122,7 +133,11 @@ export class NotificacaoDispatcherService {
     const linhas = rows.map((r) => {
       const real = Number(r.kwh_realizado) || 0;
       // Meta NAO vai na mensagem: ela e' referencia interna, conferida pelo NexON.
-      return `☀️ *${r.nome}*\n   Geração: *${this.fmtKwh(real)} kWh*`;
+      // Confiança: o dono só vê o aviso quando o número é PARCIAL/duvidoso (baixa).
+      const aviso = r.confianca === 'baixa'
+        ? `\n   ⚠️ _Valor parcial: houve falha de comunicação com parte da usina neste dia._`
+        : '';
+      return `☀️ *${r.nome}*\n   Geração: *${this.fmtKwh(real)} kWh*${aviso}`;
     });
 
     const total = rows.reduce((s, r) => s + (Number(r.kwh_realizado) || 0), 0);
@@ -136,27 +151,141 @@ export class NotificacaoDispatcherService {
     );
   }
 
-  /** Linhas de geracao (>0) do dia, opcionalmente filtradas por unidade. Base dos dois textos. */
-  private async linhasGeracao(data: string, unidadeIds: string[] | null) {
-    const filtro =
-      unidadeIds && unidadeIds.length
-        ? Prisma.sql`AND TRIM(g.unidade_id) IN (${Prisma.join(unidadeIds.map((i) => i.trim()))})`
-        : Prisma.empty;
-    const rows = await this.prisma.$queryRaw<
-      Array<{ nome: string; kwh_realizado: number; kwh_previsto: number }>
+  /**
+   * Geração consolidada do dia por usina, COM ou SEM API, e a CONFIANÇA do número.
+   *
+   * Fontes: (1) `geracao_diaria_plantas` — API do fabricante (origem nuvem), BDO ou manual;
+   * (2) o BROKER — leituras das TONs em `equipamentos_dados` (daily_yield de cada inversor).
+   * Usinas sem API (só TON) passam a entrar no boletim; com as duas fontes, uma confere a outra.
+   *
+   * Valor: manual/BDO vence; senão API; API ausente/zerada → valor do broker.
+   * Confiança: alta = 2 fontes batem (≤10%) ou conferido à mão; media = 1 fonte completa;
+   * baixa = dado incompleto (inversor faltando / leitura parada antes das 17h) ou fontes divergentes.
+   * Broker: deduplica por TÓPICO (cadastro duplicado no mesmo tópico contava 2×) e só lê de 04h
+   * em diante (evita total de ontem em inversor que zera tarde). Timestamps em UTC naive.
+   */
+  private async linhasGeracao(data: string, unidadeIds: string[] | null): Promise<LinhaGeracao[]> {
+    const ids = unidadeIds && unidadeIds.length ? unidadeIds.map((i) => i.trim()) : null;
+    const filtroG = ids ? Prisma.sql`AND TRIM(g.unidade_id) IN (${Prisma.join(ids)})` : Prisma.empty;
+    const filtroE = ids ? Prisma.sql`AND TRIM(e.unidade_id) IN (${Prisma.join(ids)})` : Prisma.empty;
+
+    const regs = await this.prisma.$queryRaw<
+      Array<{ unidade_id: string; nome: string; kwh: number; previsto: number; origem: string | null }>
     >`
-      SELECT TRIM(u.nome) AS nome,
-             COALESCE(g.kwh_realizado, 0)::float8 AS kwh_realizado,
-             COALESCE(g.kwh_previsto, 0)::float8 AS kwh_previsto
+      SELECT TRIM(g.unidade_id) AS unidade_id, TRIM(u.nome) AS nome,
+             COALESCE(g.kwh_realizado, 0)::float8 AS kwh,
+             COALESCE(g.kwh_previsto, 0)::float8 AS previsto,
+             g.origem
       FROM geracao_diaria_plantas g
       JOIN unidades u ON TRIM(u.id) = TRIM(g.unidade_id) AND u.deleted_at IS NULL
-      WHERE g.data = ${data}::date
-        AND COALESCE(g.kwh_realizado, 0) > 0
-        ${filtro}
-      ORDER BY u.nome
+      WHERE g.data = ${data}::date ${filtroG}
     `;
-    return rows;
+
+    const ton = await this.prisma.$queryRaw<
+      Array<{ unidade_id: string; nome: string; inv: number; esperado: number; kwh: number;
+              ult_min: Date; dup: boolean; meta: number | null }>
+    >`
+      WITH leit AS (
+        SELECT TRIM(e.unidade_id) AS unidade_id,
+               COALESCE(NULLIF(TRIM(e.topico_mqtt), ''), TRIM(e.id)) AS chave,
+               e.id AS equip, d.timestamp_dados AS ts,
+               CASE WHEN (d.dados->'energy'->>'daily_yield') ~ '^[0-9]+(\.[0-9]+)?$'
+                    THEN (d.dados->'energy'->>'daily_yield')::numeric END AS dy
+        FROM equipamentos_dados d
+        JOIN equipamentos e ON e.id = d.equipamento_id AND e.deleted_at IS NULL
+        WHERE d.timestamp_dados >= (${data}::date - interval '6 days' + interval '3 hours')
+          AND d.timestamp_dados <  (${data}::date + interval '27 hours')
+          AND d.dados->'energy' ? 'daily_yield'
+          AND COALESCE(d.qualidade, '') <> 'MOCK'
+          ${filtroE}
+      ),
+      dia AS (
+        SELECT unidade_id, chave, COUNT(DISTINCT equip) AS n_equip,
+               MAX(LEAST(dy, 20000)) AS dy, MAX(ts) AS ult
+        FROM leit
+        WHERE ts >= (${data}::date + interval '7 hours')     -- 04:00 BRT
+        GROUP BY unidade_id, chave
+      ),
+      vistos AS (                                            -- inversores vistos em 7 dias
+        SELECT unidade_id, COUNT(DISTINCT chave)::int AS n FROM leit GROUP BY unidade_id
+      ),
+      no_diagrama AS (                                       -- inversores desenhados no IoT
+        SELECT TRIM(p.unidade_id) AS unidade_id,
+               COUNT(DISTINCT COALESCE(NULLIF(TRIM(c.equipamento_id), ''), c.props->>'equipamento_id', c.id))::int AS n
+        FROM iot_componentes c JOIN iot_projetos p ON p.id = c.projeto_id AND p.deleted_at IS NULL
+        WHERE c.tipo = 'inversor'
+        GROUP BY TRIM(p.unidade_id)
+      ),
+      esperado AS (                                          -- o maior dos dois (inversor mudo há semanas some dos "vistos")
+        SELECT v.unidade_id, GREATEST(v.n, COALESCE(nd.n, 0)) AS n
+        FROM vistos v LEFT JOIN no_diagrama nd ON nd.unidade_id = v.unidade_id
+      )
+      SELECT dia.unidade_id, TRIM(u.nome) AS nome,
+             COUNT(*)::int AS inv, MAX(es.n)::int AS esperado,
+             COALESCE(SUM(dia.dy), 0)::float8 AS kwh, MIN(dia.ult) AS ult_min,
+             BOOL_OR(dia.n_equip > 1) AS dup,
+             MAX(c.predicao_diaria_kwh)::float8 AS meta
+      FROM dia
+      JOIN unidades u ON TRIM(u.id) = dia.unidade_id AND u.deleted_at IS NULL
+      LEFT JOIN esperado es ON es.unidade_id = dia.unidade_id
+      LEFT JOIN unidade_fv_config c ON TRIM(c.unidade_id) = dia.unidade_id
+      GROUP BY dia.unidade_id, u.nome
+    `;
+
+    // 17:00 BRT do dia = 20:00 UTC naive
+    const fimSol = new Date(`${data}T20:00:00Z`).getTime();
+    const hhmm = (d: Date) => {
+      const t = new Date(new Date(d).getTime() - 3 * 3600_000);
+      return `${String(t.getUTCHours()).padStart(2, '0')}:${String(t.getUTCMinutes()).padStart(2, '0')}`;
+    };
+    const fmt = (v: number) => this.fmtKwh(v);
+    const porUnidade = new Map<string, LinhaGeracao>();
+    const tonPor = new Map(ton.map((t) => [t.unidade_id, t]));
+    const regPor = new Map(regs.map((r) => [r.unidade_id, r]));
+    const unidades = new Set<string>([...regPor.keys(), ...tonPor.keys()]);
+
+    for (const uid of unidades) {
+      const r = regPor.get(uid);
+      const t = tonPor.get(uid);
+      const tonKwh = t ? Number(t.kwh) || 0 : 0;
+      const tonOk = tonKwh > 0;
+      const faltaInv = t && t.esperado > t.inv ? `${t.inv}/${t.esperado} inversores` : '';
+      const parou = t && new Date(t.ult_min).getTime() < fimSol ? `leitura até ${hhmm(t.ult_min)}` : '';
+      const parcial = [faltaInv, parou].filter(Boolean).join(', ');
+      const tonCompleto = tonOk && !parcial;
+      const dup = t?.dup ? ' · ⚠️ inversor cadastrado 2×' : '';
+      const nome = r?.nome ?? t?.nome ?? uid;
+      const origem = (r?.origem ?? 'nuvem').toLowerCase();
+      const apiKwh = r ? Number(r.kwh) || 0 : 0;
+      const previsto = r && Number(r.previsto) > 0 ? Number(r.previsto) : Number(t?.meta) || 0;
+      let linha: LinhaGeracao | null = null;
+
+      if (r && apiKwh > 0 && (origem === 'manual' || origem === 'bdo')) {
+        linha = { unidade_id: uid, nome, kwh_realizado: apiKwh, kwh_previsto: previsto, fonte: origem as any,
+          confianca: 'alta', motivo: origem === 'manual' ? 'conferido manualmente' : 'conferido no BDO' };
+      } else if (r && apiKwh > 0) {
+        if (tonCompleto) {
+          const diff = Math.abs(apiKwh - tonKwh) / Math.max(apiKwh, tonKwh);
+          const pct = Math.round(diff * 100);
+          linha = { unidade_id: uid, nome, kwh_realizado: apiKwh, kwh_previsto: previsto, fonte: 'api',
+            confianca: diff <= 0.1 ? 'alta' : diff <= 0.3 ? 'media' : 'baixa',
+            motivo: diff <= 0.1 ? 'API e TON batem' : `API ${fmt(apiKwh)} × TON ${fmt(tonKwh)} kWh (${pct}%)` };
+        } else {
+          linha = { unidade_id: uid, nome, kwh_realizado: apiKwh, kwh_previsto: previsto, fonte: 'api',
+            confianca: 'media', motivo: tonOk ? `só API (TON parcial: ${parcial})` : 'só API' };
+        }
+      } else if (tonOk) {
+        const semApi = r ? 'API sem dado' : 'sem API';
+        linha = { unidade_id: uid, nome, kwh_realizado: tonKwh, kwh_previsto: previsto, fonte: 'ton',
+          confianca: tonCompleto ? 'media' : 'baixa',
+          motivo: tonCompleto ? `via TON (${semApi})` : `via TON, parcial: ${parcial} (${semApi})` };
+      }
+      if (linha) { linha.motivo += dup; porUnidade.set(uid, linha); }
+    }
+    return [...porUnidade.values()].sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
   }
+
+  private static readonly ICONE: Record<Confianca, string> = { alta: '🟢', media: '🟡', baixa: '🔴' };
 
   /** Texto do boletim do GRUPO — lista compacta, publico ja' familiarizado. */
   async montarTexto(data: string, unidadeIds: string[] | null): Promise<string | null> {
@@ -165,14 +294,15 @@ export class NotificacaoDispatcherService {
     const dataBR = data.split('-').reverse().join('/');
     const linhas = rows.map((r) => {
       const real = Number(r.kwh_realizado) || 0;
-      // Grupo (publico interno/tecnico) MOSTRA a meta. O individual (dono da usina) NAO.
+      // Grupo (publico interno/tecnico) MOSTRA a meta e a CONFIANÇA. O individual (dono) NAO mostra meta.
       const prev = Number(r.kwh_previsto) || 0;
       const pct = prev > 0 ? Math.round((real / prev) * 100) : null;
       const pctTxt = pct != null ? ` (${pct}% da meta)` : '';
-      return `☀️ *${r.nome}*: ${this.fmtKwh(real)} kWh${pctTxt}`;
+      return `${NotificacaoDispatcherService.ICONE[r.confianca]} *${r.nome}*: ${this.fmtKwh(real)} kWh${pctTxt}\n      _${r.motivo}_`;
     });
     const total = rows.reduce((s, r) => s + (Number(r.kwh_realizado) || 0), 0);
-    return `📊 *Boletim de Geração* — ${dataBR}\n\n${linhas.join('\n')}\n\n*Total:* ${this.fmtKwh(total)} kWh`;
+    const legenda = '🟢 2 fontes batem ou conferido · 🟡 1 fonte · 🔴 incompleto ou divergente';
+    return `📊 *Boletim de Geração* — ${dataBR}\n\n${linhas.join('\n')}\n\n*Total:* ${this.fmtKwh(total)} kWh\n\n_Confiança do dado: ${legenda}_`;
   }
 
   private fmtKwh(v: number): string {
