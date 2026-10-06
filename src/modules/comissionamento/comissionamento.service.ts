@@ -1,5 +1,6 @@
 import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
+import { Prisma } from '@prisma/client';
 import { randomBytes } from 'crypto';
 import { promises as fsp } from 'fs';
 import { join, basename } from 'path';
@@ -229,12 +230,16 @@ export class ComissionamentoService {
         -- mqtt_habilitado que sobrou de exclusão pelo unifilar e nunca/não reporta mais.
         AND (
           EXISTS (
+            -- Sem TRIM: ambos char(26) (comparação já ignora o padding) e o TRIM impedia o
+            -- índice (equipamento_id, timestamp_dados) — virava varredura de ~2,8 mi linhas (13 s+).
             SELECT 1 FROM equipamentos_dados ed
-            WHERE TRIM(ed.equipamento_id) = TRIM(e.id)
+            WHERE ed.equipamento_id = e.id
               AND ed.timestamp_dados > now() - interval '7 days'
           )
           OR c.equipamento_id IS NOT NULL
         )
+        ${unidadeId ? Prisma.sql`AND TRIM(e.unidade_id) = ${unidadeId.trim()}` : Prisma.empty}
+        ${plantaId ? Prisma.sql`AND TRIM(u.planta_id) = ${plantaId.trim()}` : Prisma.empty}
       ORDER BY p.nome, u.nome, e.nome
     `;
     let out = rows || [];
