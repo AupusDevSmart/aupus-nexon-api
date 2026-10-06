@@ -175,6 +175,12 @@ export class IoTController {
     return { data };
   }
 
+  @Get('equipamento/:equipamentoId/comandos')
+  @ApiOperation({ summary: 'Pontos de comando do equipamento que já têm vínculo (modbus_bo ou ton_bo)' })
+  async comandosDoEquipamento(@Param('equipamentoId') equipamentoId: string, @CurrentUser() user?: any) {
+    return { data: await this.iotService.comandosDoEquipamento(equipamentoId, user) };
+  }
+
   @Get('disjuntor/:disjuntorId/scs-bundle')
   @ApiOperation({ summary: 'Bundle do sheet do DJ: SCS + PM + fonte de status + comandos' })
   @ApiResponse({ status: 200, description: 'Tudo que o sheet do DJ precisa (escopado por dono)' })

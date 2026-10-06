@@ -355,9 +355,15 @@ export class EquipamentosCmdService {
         ? `TESTE/${this.remapSatelliteMac(rele.tonTopico, testMac)}`
         : rele.tonTopico;
       const comandoSemanticoR = `${equipamento.nome} · ${ponto.nome}`;
-      const cmdTecnicoR = `modbus ${rele.relayName}/${rele.cmdId}`;
+      const cmdTecnicoR = `modbus ${rele.relayName}${rele.relayAddr ? `@${rele.relayAddr}` : ""}/${rele.cmdId}`;
       const startedAtR = Date.now();
-      const payload = JSON.stringify({ device: rele.relayName, cmd: rele.cmdId });
+      // addr: endereço Modbus do device — o firmware novo casa nome+endereço (dois "Inversor"
+      // no mesmo barramento); o firmware antigo ignora o campo e segue casando só o nome.
+      const payload = JSON.stringify({
+        device: rele.relayName,
+        ...(rele.relayAddr ? { addr: rele.relayAddr } : {}),
+        cmd: rele.cmdId,
+      });
       let ackR;
       try {
         ackR = await this.mqtt.publishCommand(topicoRele, payload);
@@ -679,6 +685,8 @@ export class EquipamentosCmdService {
    */
   private async resolveReleBo(pontoId: string): Promise<{
     relayName: string;
+    /** Endereço Modbus do device; null = firmware casa só pelo nome (comportamento antigo). */
+    relayAddr: number | null;
     cmdId: string;
     tonTopico: string;
     tonNome: string;
@@ -692,9 +700,9 @@ export class EquipamentosCmdService {
 
     // Fonte antiga (io_config.bo direto no componente) — fallback + testemunha.
     const rows = await this.prisma.$queryRaw<
-      Array<{ id: string; projeto_id: string; nome: string | null; cmd_id: string }>
+      Array<{ id: string; projeto_id: string; nome: string | null; cmd_id: string; addr: string | null }>
     >`
-      SELECT c.id, c.projeto_id, c.props->>'name' AS nome, k.key AS cmd_id
+      SELECT c.id, c.projeto_id, c.props->>'name' AS nome, k.key AS cmd_id, c.props->>'modbus_address' AS addr
       FROM iot_componentes c
       CROSS JOIN LATERAL jsonb_each(COALESCE(c.props->'io_config'->'bo', '{}'::jsonb)) k
       WHERE TRIM(k.value->>'ponto_id') = ${pontoId}
@@ -704,11 +712,13 @@ export class EquipamentosCmdService {
 
     // Escolhe a fonte: vínculo primeiro, antigo como fallback.
     let relayName: string;
+    let relayAddr: number | null;
     let cmdId: string;
     let compId: string;
     let projetoId: string;
     if (vin) {
       relayName = vin.relay_name;
+      relayAddr = vin.relay_addr;
       cmdId = vin.sinal;
       compId = vin.comp_id;
       projetoId = vin.projeto_id;
@@ -721,6 +731,7 @@ export class EquipamentosCmdService {
       }
     } else if (old) {
       relayName = (old.nome ?? '').trim();
+      relayAddr = Number(old.addr) > 0 ? Number(old.addr) : null;
       cmdId = old.cmd_id;
       compId = old.id;
       projetoId = old.projeto_id;
@@ -778,7 +789,7 @@ export class EquipamentosCmdService {
     const topico = ton?.topico_mqtt?.trim();
     if (!topico || !ton?.mqtt_habilitado) return null;
 
-    return { relayName, cmdId, tonTopico: topico, tonNome: ton.nome };
+    return { relayName, relayAddr, cmdId, tonTopico: topico, tonNome: ton.nome };
   }
 
   /**

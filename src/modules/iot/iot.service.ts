@@ -157,6 +157,32 @@ export class IoTService {
    * (relé) + comandos (ton_bo). O front monta a tela (Estado/Controles/Status/Medição)
    * e assina a telemetria ao vivo do PM/relé. Escopado por dono.
    */
+  /**
+   * Comandos ACIONÁVEIS de um equipamento: pontos tipo 'comando' que já têm vínculo com
+   * um comando Modbus de device (modbus_bo — ex.: liga/desliga de inversor) ou com um
+   * relé da própria TON (ton_bo). Ponto sem vínculo não aparece → a UI só mostra o botão
+   * do que de fato funciona. Escopado por dono.
+   */
+  async comandosDoEquipamento(equipamentoId: string, user?: ScopedUser) {
+    const id = (equipamentoId ?? '').trim();
+    if (!id) return [];
+    if (user) await this.scopeService.assertEntityInScope('equipamento', id, user);
+    return this.prisma.$queryRaw<Array<{ ponto_id: string; ponto: string; origem: string }>>`
+      SELECT TRIM(p.id) AS ponto_id, TRIM(p.nome) AS ponto,
+             CASE WHEN EXISTS (SELECT 1 FROM iot_vinculos v
+                               WHERE v.equipamento_ponto_id = p.id AND v.fonte_tipo = 'modbus_bo'
+                                 AND v.ativo = true AND v.deleted_at IS NULL)
+                  THEN 'modbus' ELSE 'ton' END AS origem
+      FROM equipamento_pontos p
+      WHERE TRIM(p.equipamento_id) = ${id} AND p.tipo = 'comando' AND p.deleted_at IS NULL AND p.ativo = true
+        AND (
+          EXISTS (SELECT 1 FROM iot_vinculos v WHERE v.equipamento_ponto_id = p.id AND v.fonte_tipo = 'modbus_bo'
+                    AND v.ativo = true AND v.deleted_at IS NULL)
+          OR EXISTS (SELECT 1 FROM ton_bo b WHERE b.equipamento_ponto_id = p.id AND b.ativo = true AND b.deleted_at IS NULL)
+        )
+      ORDER BY p.ordem, p.nome`;
+  }
+
   async disjuntorScsBundle(disjuntorId: string, user?: ScopedUser) {
     const id = (disjuntorId ?? '').trim();
     if (!id) return null;

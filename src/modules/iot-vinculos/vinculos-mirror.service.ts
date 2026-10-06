@@ -104,6 +104,8 @@ export class VinculosMirrorService {
   async lookupModbusBo(pontoId: string): Promise<{
     relay_equip_id: string;
     relay_name: string;
+    /** Endereço Modbus do device (props.modbus_address) — vai no comando p/ desempatar nomes repetidos. */
+    relay_addr: number | null;
     sinal: string;
     comp_id: string;
     projeto_id: string;
@@ -112,12 +114,14 @@ export class VinculosMirrorService {
     if (!pid) return null;
     const rows = await this.prisma.$queryRaw<Array<{
       relay_equip_id: string; sinal: string | null; comp_id: string; projeto_id: string | null; relay_name: string | null;
+      relay_addr: string | null;
     }>>`
       SELECT TRIM(v.fonte_equipamento_id) AS relay_equip_id,
              v.sinal AS sinal,
              c.id AS comp_id,
              TRIM(c.projeto_id) AS projeto_id,
-             c.props->>'name' AS relay_name
+             c.props->>'name' AS relay_name,
+             c.props->>'modbus_address' AS relay_addr
       FROM iot_vinculos v
       JOIN iot_componentes c
         ON TRIM(COALESCE(NULLIF(TRIM(c.equipamento_id), ''), c.props->>'equipamento_id')) = TRIM(v.fonte_equipamento_id)
@@ -131,6 +135,7 @@ export class VinculosMirrorService {
     return {
       relay_equip_id: r.relay_equip_id.trim(),
       relay_name: relayName,
+      relay_addr: Number(r.relay_addr) > 0 ? Number(r.relay_addr) : null,
       sinal: (r.sinal ?? '').trim(),
       comp_id: r.comp_id,
       projeto_id: (r.projeto_id ?? '').trim(),
