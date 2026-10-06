@@ -2881,25 +2881,15 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       }
 
       // ========== VOLTAGE ==========
+      // Média de TODA chave numérica (fase-fase phase_a-b/… e fase-neutro phase_a/…):
+      // antes só as 3 fase-fase passavam e inversor que só mede F-N (SOFAR G2) ficava sem tensão.
       if (ultimaLeitura.voltage) {
         agregado.voltage = {};
-
-        // phase_a-b
-        const voltageAB = leituras.map(l => l.dados.voltage?.['phase_a-b']).filter(v => v != null);
-        if (voltageAB.length > 0) {
-          agregado.voltage['phase_a-b'] = parseFloat(this.mean(voltageAB).toFixed(1));
-        }
-
-        // phase_b-c
-        const voltageBC = leituras.map(l => l.dados.voltage?.['phase_b-c']).filter(v => v != null);
-        if (voltageBC.length > 0) {
-          agregado.voltage['phase_b-c'] = parseFloat(this.mean(voltageBC).toFixed(1));
-        }
-
-        // phase_c-a
-        const voltageCA = leituras.map(l => l.dados.voltage?.['phase_c-a']).filter(v => v != null);
-        if (voltageCA.length > 0) {
-          agregado.voltage['phase_c-a'] = parseFloat(this.mean(voltageCA).toFixed(1));
+        const chaves = new Set<string>();
+        leituras.forEach(l => Object.keys(l.dados.voltage ?? {}).forEach(k => chaves.add(k)));
+        for (const k of chaves) {
+          const vals = leituras.map(l => l.dados.voltage?.[k]).filter(v => v != null && Number.isFinite(Number(v))).map(Number);
+          if (vals.length > 0) agregado.voltage[k] = parseFloat(this.mean(vals).toFixed(1));
         }
       }
 

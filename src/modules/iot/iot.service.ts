@@ -1301,17 +1301,18 @@ export class IoTService {
           select: { id: true, topico_mqtt: true },
         });
         if (ok) {
-          // Medidor SSU vinculado a um ativo existente (ex.: o medidor da concessionária do
-          // unifilar): o ativo precisa do topico da TON pra o NexON escutar a leitura.
-          if (ehMedidorSsu(comp)) {
-            const b = tonTopicDe(String(comp.id));
-            const pp = (comp.props ?? {}) as Record<string, unknown>;
-            const nm = String(pp.name ?? pp.catalog_id ?? comp.type ?? 'Device').trim() || 'Device';
-            const ad = String(pp.modbus_address ?? '').trim() || '1';
-            const tp = b ? `${b}/${nm}_${ad}/data` : null;
-            if (tp && (ok.topico_mqtt ?? '').trim() !== tp) {
-              await tx.equipamentos.update({ where: { id: ok.id }, data: { topico_mqtt: tp, mqtt_habilitado: true } });
-            }
+          // Device vinculado a um ativo existente (ex.: inversor/medidor do unifilar): o ativo
+          // precisa do topico da TON pra o NexON escutar a leitura. Medidor SSU: o diagrama
+          // manda (sobrescreve). Demais: so' preenche topico VAZIO — ha' TON de campo com
+          // firmware manual e topico proprio, que nao pode ser trocado por um save do diagrama.
+          const b = tonTopicDe(String(comp.id));
+          const pp = (comp.props ?? {}) as Record<string, unknown>;
+          const nm = String(pp.name ?? pp.catalog_id ?? comp.type ?? 'Device').trim() || 'Device';
+          const ad = String(pp.modbus_address ?? '').trim() || '1';
+          const tp = b ? `${b}/${nm}_${ad}/data` : null;
+          const atual = (ok.topico_mqtt ?? '').trim();
+          if (tp && atual !== tp && (ehMedidorSsu(comp) || atual === '')) {
+            await tx.equipamentos.update({ where: { id: ok.id }, data: { topico_mqtt: tp, mqtt_habilitado: true } });
           }
           continue;
         }
