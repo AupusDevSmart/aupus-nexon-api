@@ -204,12 +204,100 @@ export class IoTService {
         WHERE TRIM(ep.equipamento_id) = ${id} AND ep.tipo = 'comando' AND ep.ativo = true AND ep.deleted_at IS NULL`,
       this.statusPontosDoDisjuntor(id),
     ]);
+    const [cadastro, manobras, pmHoje] = await Promise.all([
+      this.cadastroDoDisjuntor(id),
+      this.manobrasDoDisjuntor(id),
+      pm?.equipamento_id ? this.resumoHojeDoPm(pm.equipamento_id) : Promise.resolve(null),
+    ]);
     return {
       equipamento: { id: eq.id, nome: eq.nome },
       scs: { habilitado: eq.scs, comando: eq.scs_comando, status: eq.scs_status, medicao: eq.scs_medicao },
       pm, status_fonte: statusFonte, comandos,
       status_pontos: statusPontos,
+      cadastro, manobras, pm_hoje: pmHoje,
     };
+  }
+
+  /**
+   * Bloco "Cadastro" do sheet do DJ (mockup nexon-sheet-dj): corrente/tensão nominal
+   * (equipamentos_dados_tecnicos; 0 = não preenchido → null) + vizinhos no unifilar
+   * (equipamentos_conexoes): "alimentado por" = origem das ligações que chegam no DJ,
+   * "alimenta" = destino das que saem dele. Erro → campos vazios (o sheet segue).
+   */
+  private async cadastroDoDisjuntor(disjuntorId: string) {
+    try {
+      const [tec, vizinhos] = await Promise.all([
+        this.prisma.$queryRaw<Array<{ campo: string; valor: string | null }>>`
+          SELECT campo, valor FROM equipamentos_dados_tecnicos
+          WHERE equipamento_id = ${disjuntorId}::bpchar AND campo IN ('corrente_nominal', 'tensao_nominal')`,
+        this.prisma.$queryRaw<Array<{ lado: string; nome: string }>>`
+          SELECT 'alimentado_por' AS lado, COALESCE(NULLIF(TRIM(o.tag), ''), TRIM(o.nome)) AS nome
+          FROM equipamentos_conexoes c JOIN equipamentos o ON o.id = c.equipamento_origem_id AND o.deleted_at IS NULL
+          WHERE c.equipamento_destino_id = ${disjuntorId}::bpchar AND c.deleted_at IS NULL
+          UNION
+          SELECT 'alimenta' AS lado, COALESCE(NULLIF(TRIM(d.tag), ''), TRIM(d.nome)) AS nome
+          FROM equipamentos_conexoes c JOIN equipamentos d ON d.id = c.equipamento_destino_id AND d.deleted_at IS NULL
+          WHERE c.equipamento_origem_id = ${disjuntorId}::bpchar AND c.deleted_at IS NULL`,
+      ]);
+      const num = (campo: string) => {
+        const v = Number(String(tec.find((t) => t.campo === campo)?.valor ?? '').replace(',', '.'));
+        return Number.isFinite(v) && v > 0 ? v : null;
+      };
+      const lado = (l: string) => [...new Set(vizinhos.filter((v) => v.lado === l).map((v) => v.nome))].sort();
+      return {
+        corrente_nominal_a: num('corrente_nominal'),
+        tensao_nominal_v: num('tensao_nominal'),
+        alimentado_por: lado('alimentado_por'),
+        alimenta: lado('alimenta'),
+      };
+    } catch (e) {
+      new Logger(IoTService.name).warn(`[scs-bundle] cadastro indisponível: ${(e as Error).message}`);
+      return { corrente_nominal_a: null, tensao_nominal_v: null, alimentado_por: [], alimenta: [] };
+    }
+  }
+
+  /** "Registros": manobras (comandos) do DJ — trilha logs_mqtt tipo='comando'. Dia = fuso de Brasília. */
+  private async manobrasDoDisjuntor(disjuntorId: string) {
+    try {
+      const rows = await this.prisma.$queryRaw<Array<{ hoje: bigint; ultima_em: Date | null; ultima_msg: string | null }>>`
+        SELECT
+          COUNT(*) FILTER (WHERE (created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo')::date
+                                 = (now() AT TIME ZONE 'America/Sao_Paulo')::date) AS hoje,
+          MAX(created_at) AS ultima_em,
+          (ARRAY_AGG(mensagem ORDER BY created_at DESC))[1] AS ultima_msg
+        FROM logs_mqtt
+        WHERE tipo = 'comando' AND equipamento_id = ${disjuntorId}::bpchar`;
+      const r = rows[0];
+      return { hoje: Number(r?.hoje ?? 0), ultima_em: r?.ultima_em ?? null, ultima_msg: r?.ultima_msg ?? null };
+    } catch (e) {
+      new Logger(IoTService.name).warn(`[scs-bundle] manobras indisponível: ${(e as Error).message}`);
+      return { hoje: 0, ultima_em: null, ultima_msg: null };
+    }
+  }
+
+  /**
+   * Resumo de HOJE do PM do DJ: menor FP (só com carga — sem carga o PD666/M160 reporta 1)
+   * e pico de potência. created_at é UTC sem fuso → dia de Brasília começa às 03:00 UTC.
+   */
+  private async resumoHojeDoPm(pmId: string) {
+    try {
+      const rows = await this.prisma.$queryRaw<Array<{ fp_min: number | null; pt_max_kw: number | null; leituras: bigint }>>`
+        SELECT MIN(NULLIF(dados->>'FPt', '')::numeric) FILTER (WHERE ABS(COALESCE(NULLIF(dados->>'Pt', '')::numeric, 0)) > 100) AS fp_min,
+               MAX(NULLIF(dados->>'Pt', '')::numeric) / 1000.0 AS pt_max_kw,
+               COUNT(*) AS leituras
+        FROM equipamentos_dados
+        WHERE equipamento_id = ${pmId}::bpchar
+          AND created_at >= (date_trunc('day', now() AT TIME ZONE 'America/Sao_Paulo') + interval '3 hours')`;
+      const r = rows[0];
+      return {
+        fp_min: r?.fp_min != null ? Number(r.fp_min) : null,
+        pt_max_kw: r?.pt_max_kw != null ? Number(r.pt_max_kw) : null,
+        leituras: Number(r?.leituras ?? 0),
+      };
+    } catch (e) {
+      new Logger(IoTService.name).warn(`[scs-bundle] pm_hoje indisponível: ${(e as Error).message}`);
+      return null;
+    }
   }
 
   /**
