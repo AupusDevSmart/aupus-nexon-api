@@ -1358,9 +1358,25 @@ export class IoTService {
     const ehMedidorSsu = (c: Record<string, any>) =>
       String(c?.type ?? '') === 'medidor_ssu' ||
       (String(c?.type ?? '') === 'medidor_comum' && ligadoPorSsu.has(String(c?.id)));
+    // Medidor Concessionária ligado a um Gateway A966: o A966 (configurado pelo guia de
+    // instalação do editor) publica em <base>/A966/<ID SSU>/state → é o tópico do medidor.
+    const a966TopicoDe = (compId: string): string | null => {
+      for (const cx of (diagrama.connections ?? []) as Array<any>) {
+        const a = String(cx?.from?.componentId ?? '');
+        const b = String(cx?.to?.componentId ?? '');
+        const outro = a === compId ? b : b === compId ? a : null;
+        if (!outro) continue;
+        const gw = comps.find((c) => String(c?.id) === outro && String(c?.type ?? '') === 'meter_gateway');
+        const base = String(gw?.props?.mqtt_topic_base ?? '').trim().replace(/\/+$/, '');
+        if (gw && base) return `${base}/A966/${String(gw.props?.ssu_id ?? '').trim() || 'SSU'}/state`;
+      }
+      return null;
+    };
+    const ehMedidorA966 = (c: Record<string, any>) =>
+      String(c?.type ?? '') === 'medidor_comum' && !ligadoPorSsu.has(String(c?.id)) && !!a966TopicoDe(String(c?.id));
     const devices = comps.filter((c) => {
       if (isTon(c?.type)) return false;
-      if (ehMedidorSsu(c)) return true;
+      if (ehMedidorSsu(c) || ehMedidorA966(c)) return true;
       const p = (c?.props ?? {}) as Record<string, unknown>;
       return (
         String(p.modbus_address ?? '').trim() !== '' &&
@@ -1423,9 +1439,10 @@ export class IoTService {
           const pp = (comp.props ?? {}) as Record<string, unknown>;
           const nm = String(pp.name ?? pp.catalog_id ?? comp.type ?? 'Device').trim() || 'Device';
           const ad = String(pp.modbus_address ?? '').trim() || '1';
-          const tp = b ? `${b}/${nm}_${ad}/data` : null;
+          const a966 = ehMedidorA966(comp) ? a966TopicoDe(String(comp.id)) : null;
+          const tp = a966 ?? (b ? `${b}/${nm}_${ad}/data` : null);
           const atual = (ok.topico_mqtt ?? '').trim();
-          if (tp && atual !== tp && (ehMedidorSsu(comp) || atual === '')) {
+          if (tp && atual !== tp && (ehMedidorSsu(comp) || !!a966 || atual === '')) {
             await tx.equipamentos.update({ where: { id: ok.id }, data: { topico_mqtt: tp, mqtt_habilitado: true } });
           }
           continue;
@@ -1433,19 +1450,20 @@ export class IoTService {
       }
 
       const props = (comp.props ?? {}) as Record<string, unknown>;
+      const a966Auto = ehMedidorA966(comp) ? a966TopicoDe(String(comp.id)) : null;
       const base = tonTopicDe(String(comp.id));
-      if (!base) continue; // device solto (sem TON conectada) — sem topico derivavel
+      if (!base && !a966Auto) continue; // device solto (sem TON/A966) — sem topico derivavel
 
       const nome =
         String(props.name ?? props.catalog_id ?? comp.type ?? 'Device').trim() || 'Device';
       const addr = String(props.modbus_address ?? '').trim() || '1';
-      const topico = `${base}/${nome}_${addr}/data`;
+      const topico = a966Auto ?? `${base}/${nome}_${addr}/data`;
       // Medidor SSU: tipo de equipamento da categoria "Gateway" (o mesmo do A-966) — e' a
       // categoria que liga a ingestao de pulsos (salvarDadosGateway), o dashboard do
       // gateway e o fluxo BIDIRECIONAL na demanda. A TON publica o mesmo JSON do A-966.
       const tipoEquipamentoId =
         String(comp.type ?? '') === 'medidor_ssu' ? 'tipo-ims-a966-001'
-        : ehMedidorSsu(comp) ? 'cmsyybblg000jjq1qr1na33zz'   // Medidor Concessionária (EQTL001)
+        : (ehMedidorSsu(comp) || a966Auto) ? 'cmsyybblg000jjq1qr1na33zz'   // Medidor Concessionária (EQTL001)
         : undefined;
 
       let equipId: string;
