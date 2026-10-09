@@ -1,3 +1,4 @@
+import { EquipamentosSetpointController } from './setpoint.controller';
 import { Module } from '@nestjs/common';
 import { PrismaModule } from '@/core';
 
@@ -14,7 +15,7 @@ import { EquipamentosCmdService } from './equipamentos-cmd.service';
  */
 @Module({
   imports: [PrismaModule, MqttModule],
-  controllers: [EquipamentosCmdController, EquipamentosAcionarPontoController],
+  controllers: [EquipamentosCmdController, EquipamentosAcionarPontoController, EquipamentosSetpointController],
   providers: [EquipamentosCmdService],
   exports: [EquipamentosCmdService],
 })

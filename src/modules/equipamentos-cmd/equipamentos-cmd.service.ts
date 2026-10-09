@@ -804,4 +804,141 @@ export class EquipamentosCmdService {
     if (!/\/satellite\/[^/]+/.test(baseTopico)) return baseTopico;
     return baseTopico.replace(/(\/satellite\/)[^/]+/, `$1${mac.toUpperCase()}`);
   }
+
+  // ===================================================================== SETPOINTS
+  // Comando com VALOR (limite de potência, FP, reativo, endereço Modbus). O catálogo do
+  // modelo traz `setpoints` (o que a tela mostra, em unidade de engenharia → registrador:
+  // × escala) e o `bo_map` correspondente (o que o firmware escreve; value "$valor").
+  // Payload p/ a TON: {"device":nome,"addr":N,"cmd":setpoint_id,"valor":bruto}.
+
+  /** Device IoT (nó do diagrama) ligado a este equipamento + modelo do catálogo. */
+  private async deviceDoEquipamento(eqId: string) {
+    const rows = await this.prisma.$queryRaw<Array<{
+      id: string; projeto_id: string; nome: string | null; addr: string | null; cat: string | null;
+    }>>`
+      SELECT c.id, TRIM(c.projeto_id) AS projeto_id, c.props->>'name' AS nome,
+             c.props->>'modbus_address' AS addr, c.props->>'catalog_id' AS cat
+      FROM iot_componentes c
+      WHERE TRIM(COALESCE(NULLIF(TRIM(c.equipamento_id), ''), c.props->>'equipamento_id')) = ${eqId}
+        AND c.tipo IN ('inversor', 'power_meter', 'medidor_comum', 'rele_protecao')
+      LIMIT 1`;
+    const d = rows[0];
+    if (!d || !d.cat) return null;
+    const mod = await this.prisma.$queryRaw<Array<{ fabricante: string; modelo: string; mapeamento: any }>>`
+      SELECT fabricante, modelo, mapeamento FROM iot_device_modelos
+      WHERE mapeamento->>'catalog_id' = ${d.cat} LIMIT 1`;
+    const m = mod[0];
+    return {
+      compId: d.id,
+      projetoId: d.projeto_id,
+      nome: (d.nome ?? '').trim(),
+      addr: Number(d.addr) > 0 ? Number(d.addr) : null,
+      modelo: m ? `${m.fabricante} ${m.modelo}` : d.cat,
+      setpoints: (Array.isArray(m?.mapeamento?.setpoints) ? m.mapeamento.setpoints : []) as Array<Record<string, any>>,
+      boMap: ((m?.mapeamento?.bo_map ?? {}) as Record<string, any>),
+    };
+  }
+
+  /** TON gateway do componente (BFS nas conexões do projeto) → tópico/nome. */
+  private async tonDoComponente(compId: string, projetoId: string) {
+    const [comps, conns] = await Promise.all([
+      this.prisma.iot_componentes.findMany({ where: { projeto_id: projetoId }, select: { id: true, tipo: true, equipamento_id: true } }),
+      this.prisma.iot_conexoes.findMany({ where: { projeto_id: projetoId }, select: { from_comp_id: true, to_comp_id: true } }),
+    ]);
+    const adj = new Map<string, string[]>();
+    for (const cn of conns) {
+      if (!cn.from_comp_id || !cn.to_comp_id) continue;
+      (adj.get(cn.from_comp_id) ?? adj.set(cn.from_comp_id, []).get(cn.from_comp_id)!).push(cn.to_comp_id);
+      (adj.get(cn.to_comp_id) ?? adj.set(cn.to_comp_id, []).get(cn.to_comp_id)!).push(cn.from_comp_id);
+    }
+    const byId = new Map(comps.map((c) => [c.id, c]));
+    const visto = new Set<string>([compId]);
+    const fila = [compId];
+    while (fila.length) {
+      const id = fila.shift() as string;
+      const c = byId.get(id);
+      if (id !== compId && c && String(c.tipo ?? '').toLowerCase().startsWith('ton') && c.equipamento_id) {
+        const ton = await this.prisma.equipamentos.findFirst({
+          where: { id: c.equipamento_id.trim(), deleted_at: null },
+          select: { nome: true, topico_mqtt: true, mqtt_habilitado: true },
+        });
+        const topico = ton?.topico_mqtt?.trim();
+        return topico && ton?.mqtt_habilitado ? { topico, nome: ton.nome } : null;
+      }
+      for (const nb of adj.get(id) ?? []) if (!visto.has(nb)) { visto.add(nb); fila.push(nb); }
+    }
+    return null;
+  }
+
+  /** Ajustes (setpoints) disponíveis p/ o equipamento — só os que o firmware sabe escrever. */
+  async listarSetpoints(equipamentoId: string, user?: Autor) {
+    const eqId = equipamentoId.trim();
+    if (user) await this.scopeService.assertEntityInScope('equipamento', eqId, user);
+    const dev = await this.deviceDoEquipamento(eqId);
+    if (!dev) return { modelo: null, setpoints: [] };
+    return {
+      modelo: dev.modelo,
+      device: dev.nome,
+      addr: dev.addr,
+      setpoints: dev.setpoints.filter((sp) => sp?.id && dev.boMap[sp.id]),
+    };
+  }
+
+  /** Envia um setpoint (valor em unidade de engenharia, ex.: 0.95 ou 80 %). */
+  async enviarSetpoint(equipamentoId: string, setpointId: string, valor: number, user?: Autor, cliente?: ClienteInfo) {
+    const eqId = equipamentoId.trim();
+    if (user) await this.scopeService.assertEntityInScope('equipamento', eqId, user);
+    const equipamento = await this.prisma.equipamentos.findFirst({ where: { id: eqId, deleted_at: null }, select: { nome: true } });
+    if (!equipamento) throw new NotFoundException(`Equipamento ${eqId} nao encontrado`);
+    const dev = await this.deviceDoEquipamento(eqId);
+    if (!dev) throw new BadRequestException(`"${equipamento.nome}" não está ligado a um dispositivo do IoT com modelo do catálogo.`);
+    const sp = dev.setpoints.find((x) => x?.id === setpointId);
+    const bo = dev.boMap[setpointId];
+    if (!sp || !bo) throw new BadRequestException(`O modelo ${dev.modelo} não suporta o ajuste "${setpointId}".`);
+    if (!dev.nome) throw new BadRequestException('Dispositivo do IoT sem nome (props.name).');
+
+    // Validação em UNIDADE DE ENGENHARIA (faixas do catálogo) e depois no BRUTO (bo_map).
+    const v = Number(valor);
+    if (!Number.isFinite(v)) throw new BadRequestException('Valor inválido.');
+    const faixas: Array<[number, number]> = Array.isArray(sp.faixas) ? sp.faixas : [[Number(sp.min), Number(sp.max)]];
+    const dentro = faixas.some(([a, b]) => Number.isFinite(a) && Number.isFinite(b) && v >= Math.min(a, b) && v <= Math.max(a, b));
+    if (!dentro) {
+      throw new BadRequestException(`${sp.label}: valor ${v} fora da faixa permitida (${faixas.map(([a, b]) => `${a} a ${b}`).join(' ou ')}).`);
+    }
+    const bruto = Math.round(v * (Number(sp.escala) || 1));
+    if ((Number.isFinite(Number(bo.min)) && bruto < Number(bo.min)) || (Number.isFinite(Number(bo.max)) && bruto > Number(bo.max))) {
+      throw new BadRequestException(`${sp.label}: valor convertido ${bruto} fora da faixa do registrador.`);
+    }
+
+    const rotulo = `${sp.label} = ${v}${sp.unidade ? ` ${sp.unidade}` : ''}`;
+    const bloqueio = await this.verificarRestricoes(eqId, sp.label, user);
+    if (bloqueio) {
+      await this.registrarComando({ equipamentoId: eqId, mensagem: bloqueio.message, status: 'bloqueado', severidade: 'WARN', comandoTecnico: bloqueio.code, comandoSemantico: `${equipamento.nome} · ${rotulo}` }, user, cliente);
+      throw new ForbiddenException({ message: bloqueio.message, code: bloqueio.code });
+    }
+    const ton = await this.tonDoComponente(dev.compId, dev.projetoId);
+    if (!ton) throw new BadRequestException('Nenhuma TON com MQTT ligada a este dispositivo no diagrama IoT.');
+    if (!this.mqtt.isConnected()) throw new ServiceUnavailableException('Broker MQTT nao conectado no momento.');
+
+    const semantico = `${equipamento.nome} · ${rotulo}`;
+    const tecnico = `setpoint ${dev.nome}${dev.addr ? `@${dev.addr}` : ''}/${setpointId}=${bruto}`;
+    const payload = JSON.stringify({ device: dev.nome, ...(dev.addr ? { addr: dev.addr } : {}), cmd: setpointId, valor: bruto });
+    const t0 = Date.now();
+    let ack;
+    try {
+      ack = await this.mqtt.publishCommand(ton.topico, payload);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Erro desconhecido';
+      await this.registrarComando({ equipamentoId: eqId, mensagem: `${semantico}: sem resposta da TON (${message})`, status: 'timeout', severidade: 'ERROR', latencyMs: Date.now() - t0, comandoTecnico: tecnico, comandoSemantico: semantico }, user, cliente);
+      throw new GatewayTimeoutException(`TON "${ton.nome}" nao respondeu ao ajuste dentro do timeout.`);
+    }
+    const latency = Date.now() - t0;
+    if (ack.status === 'error') {
+      await this.registrarComando({ equipamentoId: eqId, mensagem: `${semantico}: recusado (${ack.msg})`, status: 'error', severidade: 'ERROR', cmdId: ack.cmd_id, latencyMs: latency, comandoTecnico: tecnico, comandoSemantico: semantico }, user, cliente);
+      throw new BadGatewayException({ message: `Inversor/TON recusou o ajuste: ${ack.msg}`, cmd_id: ack.cmd_id, latency_ms: latency });
+    }
+    await this.registrarComando({ equipamentoId: eqId, mensagem: `${semantico} (${tecnico})`, status: ack.status, severidade: ack.status === 'ok' ? 'INFO' : 'WARN', cmdId: ack.cmd_id, latencyMs: latency, comandoTecnico: tecnico, comandoSemantico: semantico }, user, cliente);
+    this.logger.log(`[setpoint] ${semantico} -> ${tecnico} via TON ${ton.nome} status=${ack.status} ${latency}ms`);
+    return { cmd_id: ack.cmd_id, status: ack.status, msg: ack.msg, latency_ms: latency, comando_tecnico: tecnico, comando_semantico: semantico, valor_bruto: bruto };
+  }
 }
