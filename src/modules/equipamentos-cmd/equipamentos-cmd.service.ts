@@ -466,13 +466,17 @@ export class EquipamentosCmdService {
     // pra TESTE/<base>/cmd (firmware de simulação). Esse flag/tópico de produção é resquício
     // de quando criar TON no unifilar exigia tópico; ele só faz sentido pro comando REAL.
     if (!sim && !ton.mqtt_habilitado) {
-      throw new BadRequestException(`TON "${ton.nome}" com mqtt_habilitado=false.`);
+      throw new BadRequestException(
+        `A TON "${ton.nome}" ainda não tem Tópico Base: no editor IoT, abra a ${ton.nome}, preencha o "Tópico Base", salve o diagrama e grave o firmware nela.`,
+      );
     }
     // Base do tópico: em produção usa o topico_mqtt; em SIM, se não houver tópico, usa o
     // NOME da TON — que é o que o firmware 🧪 escuta (gerador: `TESTE/${topicBase||name}`).
     const baseTopico = ton.topico_mqtt?.trim() || (sim ? ton.nome?.trim() : '');
     if (!baseTopico) {
-      throw new BadRequestException(`TON "${ton.nome}" sem topico_mqtt configurado.`);
+      throw new BadRequestException(
+        `A TON "${ton.nome}" ainda não tem Tópico Base: no editor IoT, abra a ${ton.nome}, preencha o "Tópico Base", salve o diagrama e grave o firmware nela.`,
+      );
     }
     // Modo SIMULAÇÃO/LAB: o pulso ON->OFF vai pra TESTE/<base>/cmd (firmware de
     // simulação), não pro tópico real — testa o pipeline sem tocar produção.
