@@ -1,5 +1,6 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { Redis } from 'ioredis';
+import { emSegundos } from '../util/em-segundos';
 import { PrismaService } from '@/core';
 // Builtins do Node, sem efeito colateral na carga: nao ha por que adia-los com
 // require() dentro da funcao, que alem de esconder a dependencia obriga o TS a
@@ -242,7 +243,7 @@ export class MqttRedisBufferService implements OnModuleInit, OnModuleDestroy {
           const existe = await this.prisma.equipamentos_dados.findFirst({
             where: {
               equipamento_id: dado.equipamentoId,
-              timestamp_dados: new Date(dado.timestamp),
+              timestamp_dados: emSegundos(new Date(dado.timestamp)),
             },
             select: { id: true },
           });
@@ -329,7 +330,7 @@ export class MqttRedisBufferService implements OnModuleInit, OnModuleDestroy {
       where: {
         uk_equipamento_timestamp: {
           equipamento_id: dado.equipamentoId,
-          timestamp_dados: timestamp,
+          timestamp_dados: emSegundos(timestamp),
         },
       },
       update: {
@@ -341,7 +342,7 @@ export class MqttRedisBufferService implements OnModuleInit, OnModuleDestroy {
       },
       create: {
         equipamento_id: dado.equipamentoId,
-        timestamp_dados: timestamp,
+        timestamp_dados: emSegundos(timestamp),
         dados: dadosJSON,
         fonte: 'MQTT_REDIS_BUFFER',
         qualidade,

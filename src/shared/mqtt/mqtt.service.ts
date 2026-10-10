@@ -11,6 +11,7 @@ import {
 import { MqttIngestionService } from '../../modules/equipamentos-dados/services/mqtt-ingestion.service';
 import { detectarOverflowUint } from '../util/inverter-overflow';
 import { MqttRedisBufferService } from './mqtt-redis-buffer.service';
+import { emSegundos } from '../util/em-segundos';
 import { RegrasLogsMqttEngine } from '../../modules/regras-logs-mqtt/regras-logs-mqtt.engine';
 import { EventEmitter } from 'events';
 import Ajv from 'ajv';
@@ -83,6 +84,7 @@ interface BufferData {
   }>;
   timestamp_inicio: Date;
 }
+
 
 @Injectable()
 export class MqttService extends EventEmitter implements OnModuleInit, OnModuleDestroy {
@@ -2223,7 +2225,7 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
         where: {
           uk_equipamento_timestamp: {
             equipamento_id: equipamentoId,
-            timestamp_dados: timestamp,
+            timestamp_dados: emSegundos(timestamp),
           },
         },
         update: {
@@ -2239,7 +2241,7 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
           equipamento_id: equipamentoId,
           dados: dadosProcessados as any,
           fonte: 'MQTT',
-          timestamp_dados: timestamp,
+          timestamp_dados: emSegundos(timestamp),
           timestamp_fim: timestamp,
           num_leituras: 1,
           qualidade: qualidadeOriginal,
@@ -2439,7 +2441,7 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
           where: {
             uk_equipamento_timestamp: {
               equipamento_id: equipamentoId,
-              timestamp_dados: timestampDados,
+              timestamp_dados: emSegundos(timestampDados),
             },
           },
           update: {
@@ -2456,7 +2458,7 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
             equipamento_id: equipamentoId,
             dados: dadosProcessados as any,
             fonte: 'MQTT',
-            timestamp_dados: timestampDados,
+            timestamp_dados: emSegundos(timestampDados),
             timestamp_fim: timestampDados,
             num_leituras: resumo.total_leituras || 1,
             qualidade: qualidadeReal, // ✅ Usar qualidade calculada baseada nos dados reais
@@ -2641,7 +2643,7 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
           where: {
             uk_equipamento_timestamp: {
               equipamento_id: equipamentoId,
-              timestamp_dados: buffer.timestamp_inicio,
+              timestamp_dados: emSegundos(buffer.timestamp_inicio),
             },
           },
           update: {
@@ -2658,7 +2660,7 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
             equipamento_id: equipamentoId,
             dados: dadosAgregados as any,
             fonte: 'MQTT',
-            timestamp_dados: buffer.timestamp_inicio,
+            timestamp_dados: emSegundos(buffer.timestamp_inicio),
             timestamp_fim,
             num_leituras: leiturasSalvar.length,
             qualidade: qualidadeGeral,
@@ -2677,11 +2679,16 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
             await this.redisBuffer.salvarNoBuffer(equipamentoId, leitura.timestamp, leitura.dados);
           }
           console.log(`✅ [Buffer] ${leiturasSalvar.length} leituras salvas no buffer Redis para retry automático`);
-        } else {
-          console.error(`❌ [Buffer] Buffer Redis não disponível! ${leiturasSalvar.length} leituras perdidas.`);
+          // As leituras JÁ estão no Redis (que faz o retry): esvazia o buffer local. Antes ele
+          // era mantido E reenviado inteiro ao Redis a cada minuto — 1 erro persistente virou
+          // 306 mil mensagens duplicadas na fila e ~3 h de atraso em tudo (10/10/2026).
+          buffer.leituras = [];
+          buffer.timestamp_inicio = new Date();
+          return;
         }
+        console.error(`❌ [Buffer] Buffer Redis não disponível! Mantendo ${leiturasSalvar.length} leituras no buffer local.`);
 
-        // Re-throw para propagar o erro e manter as leituras no buffer local
+        // Sem Redis: re-throw e mantém as leituras no buffer local p/ a próxima tentativa
         throw error;
       }
 
