@@ -401,7 +401,7 @@ export class CoaService {
         WHERE e.mqtt_habilitado = true AND e.deleted_at IS NULL
           AND EXISTS (
             SELECT 1 FROM equipamentos_dados ed
-            WHERE TRIM(ed.equipamento_id) = TRIM(e.id)
+            WHERE ed.equipamento_id = e.id
               AND ed.timestamp_dados > now() - interval '7 days'
           )
       `;

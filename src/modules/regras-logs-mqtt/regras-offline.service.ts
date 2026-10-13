@@ -60,13 +60,17 @@ export class RegrasOfflineService implements OnModuleInit {
     const rows = await this.prisma.$queryRaw<
       Array<{ equipamento_id: string; ultima: Date | null }>
     >`
-      SELECT TRIM(ed.equipamento_id) AS equipamento_id, MAX(ed.timestamp_dados) AS ultima
-      FROM equipamentos_dados ed
-      WHERE TRIM(ed.equipamento_id) IN (
-        SELECT DISTINCT TRIM(equipamento_id) FROM regras_logs_mqtt
+      SELECT TRIM(r.equipamento_id) AS equipamento_id, x.ultima
+      FROM (
+        SELECT DISTINCT equipamento_id FROM regras_logs_mqtt
         WHERE operador = 'sem_comunicacao' AND ativo = true AND deleted_at IS NULL
-      )
-      GROUP BY TRIM(ed.equipamento_id)
+      ) r
+      CROSS JOIN LATERAL (
+        -- MAX por equipamento no índice; o GROUP BY TRIM() varria a tabela inteira (NEXON-4)
+        SELECT MAX(ed.timestamp_dados) AS ultima
+        FROM equipamentos_dados ed
+        WHERE ed.equipamento_id = r.equipamento_id
+      ) x
     `;
     const ultimas = new Map<string, Date | null>();
     for (const r of rows) {

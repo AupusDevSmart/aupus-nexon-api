@@ -113,7 +113,7 @@ export class FusionInverterFallbackService {
     const r = await this.prisma.$queryRaw<Array<{ c: number }>>`
       SELECT count(*)::int AS c
       FROM equipamentos_dados
-      WHERE TRIM(equipamento_id) = ${equipamentoId}
+      WHERE equipamento_id = ${equipamentoId.trim()}::bpchar
         AND fonte NOT LIKE 'NUVEM%'
         AND timestamp_dados >= now() - make_interval(mins => ${this.STALE_MIN})`;
     return Number(r[0]?.c ?? 0) > 0;

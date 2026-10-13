@@ -275,7 +275,7 @@ export class ComissionamentoService {
         AND (e.tipo_equipamento IS NULL OR e.tipo_equipamento NOT ILIKE 'TON%')
         AND NOT EXISTS (
           SELECT 1 FROM equipamentos_dados ed
-          WHERE TRIM(ed.equipamento_id) = TRIM(e.id)
+          WHERE ed.equipamento_id = e.id
             AND ed.timestamp_dados > now() - interval '7 days'
         )
       ORDER BY u.nome, e.nome

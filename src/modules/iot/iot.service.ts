@@ -526,11 +526,19 @@ export class IoTService {
     if (!elementos.length) return { unidade_id: uid, elementos: [] };
 
     const ids = elementos.map((e) => e.equipamento_id);
+    // Última leitura por equipamento via LATERAL no índice (equipamento_id, timestamp_dados).
+    // TRIM(ed.equipamento_id) desligava o índice e varria os 5 GB da tabela a cada
+    // chamada (7–11 s na Visão Geral dos apps, NEXON-4). char(26) já ignora espaço à direita.
     const dados = await this.prisma.$queryRaw<Array<{ eid: string; dados: any; created_at: Date }>>`
-      SELECT DISTINCT ON (TRIM(ed.equipamento_id)) TRIM(ed.equipamento_id) AS eid, ed.dados, ed.created_at
-      FROM equipamentos_dados ed
-      WHERE TRIM(ed.equipamento_id) IN (${Prisma.join(ids)})
-      ORDER BY TRIM(ed.equipamento_id), ed.created_at DESC`;
+      SELECT TRIM(i.eid) AS eid, x.dados, x.created_at
+      FROM unnest(${ids}::text[]) AS i(eid)
+      CROSS JOIN LATERAL (
+        SELECT ed.dados, ed.created_at
+        FROM equipamentos_dados ed
+        WHERE ed.equipamento_id = i.eid::bpchar
+        ORDER BY ed.timestamp_dados DESC
+        LIMIT 1
+      ) x`;
     const porId = new Map(dados.map((d) => [d.eid, d]));
 
     return {

@@ -69,18 +69,22 @@ export class SinopticoService {
     });
     const ids = equipamentos.map((e) => e.id.trim());
 
-    // 2. Ultima leitura por equipamento (max timestamp_dados em uma unica query)
+    // 2. Ultima leitura por equipamento: MAX por equipamento no índice (LATERAL).
+    // O groupBy lia o histórico inteiro de cada equipamento (6 s com cache frio, NEXON-4).
     const grupos = ids.length
-      ? await this.prisma.equipamentos_dados.groupBy({
-          by: ['equipamento_id'],
-          where: { equipamento_id: { in: ids } },
-          _max: { timestamp_dados: true },
-        })
+      ? await this.prisma.$queryRaw<Array<{ eid: string; ultima: Date | null }>>`
+          SELECT TRIM(i.eid) AS eid, x.ultima
+          FROM unnest(${ids}::text[]) AS i(eid)
+          CROSS JOIN LATERAL (
+            SELECT MAX(ed.timestamp_dados) AS ultima
+            FROM equipamentos_dados ed
+            WHERE ed.equipamento_id = i.eid::bpchar
+          ) x`
       : [];
 
     const ultimoPorEquip = new Map<string, Date | null>();
     for (const g of grupos) {
-      ultimoPorEquip.set(g.equipamento_id.trim(), g._max.timestamp_dados ?? null);
+      if (g.ultima) ultimoPorEquip.set(g.eid, g.ultima);
     }
 
     const agora = Date.now();
