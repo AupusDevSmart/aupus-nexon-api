@@ -280,6 +280,7 @@ export class EquipamentosService {
   async tiposUnifilar(): Promise<Array<{
     id: string; codigo: string; nome: string; sigla: string | null;
     pontos_nativos: { comando: string[]; status: string[] };
+    somente_visual: boolean;
   }>> {
     const rows = await this.prisma.$queryRaw<Array<{
       id: string; codigo: string; nome: string; sigla: string | null; propriedades_schema: any;
@@ -295,6 +296,8 @@ export class EquipamentosService {
       return {
         id: r.id, codigo: r.codigo, nome: r.nome, sigla: r.sigla,
         pontos_nativos: { comando: rotulos(n.comando), status: rotulos(n.status) },
+        // tipo só de desenho (ex.: Carga): sem SCS/medição/comando no cadastro
+        somente_visual: (r.propriedades_schema as any)?.somente_visual === true,
       };
     });
   }
@@ -344,6 +347,7 @@ export class EquipamentosService {
       scs_medicao: r.scs_medicao ?? 'nenhuma',
       tipo_nome: r.tipo_nome ?? null,
       sigla: r.sigla ?? null,
+      somente_visual: (r.propriedades_schema as any)?.somente_visual === true,
       pontos_nativos: { comando: rotulos(nativos.comando), status: rotulos(nativos.status) },
       pontos_comando: pontos.filter((p) => p.tipo === 'comando').map((p) => p.nome.trim()),
       pontos_status: pontos.filter((p) => p.tipo === 'status').map((p) => p.nome.trim()),
