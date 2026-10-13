@@ -15,6 +15,7 @@ import { WebSocketModule } from './websocket/websocket.module';
 
 // Modulos NexOn-only
 import { HealthModule } from './modules/health/health.module';
+import { AlarmesComunicacaoModule } from './modules/alarmes-comunicacao/alarmes-comunicacao.module';
 import { DiagramasModule } from './modules/diagramas/diagramas.module';
 import { EquipamentosDadosModule } from './modules/equipamentos-dados/equipamentos-dados.module';
 import { ConfiguracaoDemandaModule } from './modules/configuracao-demanda/configuracao-demanda.module';
@@ -74,6 +75,7 @@ import { IotCatalogModule } from './modules/iot-catalog/iot-catalog.module';
     WebSocketModule,
 
     HealthModule,
+    AlarmesComunicacaoModule,
     AuthModule,
 
     // Compartilhados

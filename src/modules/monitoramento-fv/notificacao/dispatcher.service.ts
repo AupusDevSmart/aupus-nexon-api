@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { randomBytes } from 'crypto';
 import { PrismaService, Prisma } from '@/core';
 import { WhatsappService } from './whatsapp.service';
+import { AlarmesComunicacaoService } from '../../alarmes-comunicacao/alarmes-comunicacao.service';
 
 export interface EnvioConfig {
   ativo: boolean;
@@ -63,6 +64,7 @@ export class NotificacaoDispatcherService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly whats: WhatsappService,
+    private readonly comunicacao: AlarmesComunicacaoService,
   ) {}
 
   async getConfig(): Promise<EnvioConfig> {
@@ -320,7 +322,11 @@ export class NotificacaoDispatcherService {
 
     // 1) Grupo (todas as usinas)
     if (cfg.enviar_grupo && cfg.grupo_jid) {
-      const texto = await this.montarTexto(data, null);
+      // Grupo = equipe Aupus: recebe também o fechamento de comunicação (todas as usinas).
+      // NUNCA nos individuais (donos só veem as próprias usinas).
+      const geracao = await this.montarTexto(data, null);
+      const comunic = await this.comunicacao.secaoBoletim();
+      const texto = [geracao, comunic].filter(Boolean).join('\n\n━━━━━━━━━━━━━━\n\n') || null;
       if (!texto) {
         alvos.push({ destino: cfg.grupo_jid, tipo: 'grupo', status: 'sem_dados' });
       } else if (dryRun) {

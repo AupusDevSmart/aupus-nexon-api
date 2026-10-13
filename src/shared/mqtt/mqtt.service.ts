@@ -1462,7 +1462,9 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     try {
       await this.prisma.iot_dispositivos_online.updateMany({
         where: { topico_mqtt: topico },
-        data: { online: false, last_seen: new Date() },
+        // Só derruba o flag: last_seen = último contato REAL. O LWT fica retido no broker e é
+        // reentregue a cada reconexão da API — carimbar aqui "ressuscitava" TON morta.
+        data: { online: false },
       });
     } catch (e) {
       console.error(

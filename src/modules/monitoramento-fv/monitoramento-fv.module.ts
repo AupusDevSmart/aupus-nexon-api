@@ -17,6 +17,7 @@ import { GeracaoManualController } from './geracao/geracao-manual.controller';
 import { GeracaoManualService } from './geracao/geracao-manual.service';
 import { ConfigFvController } from './config/config-fv.controller';
 import { ConfigFvService } from './config/config-fv.service';
+import { AlarmesComunicacaoModule } from '../alarmes-comunicacao/alarmes-comunicacao.module';
 
 /**
  * Monitoramento FV — integração das funcionalidades do BDO no NexON.
@@ -26,7 +27,7 @@ import { ConfigFvService } from './config/config-fv.service';
  * Ver docs/INTEGRACAO_NEXON_DASHBOARD.md.
  */
 @Module({
-  imports: [PrismaModule],
+  imports: [PrismaModule, AlarmesComunicacaoModule],
   controllers: [NotificacaoController, MonitoramentoController, GeracaoManualController, ConfigFvController],
   providers: [
     NotificacaoService,
