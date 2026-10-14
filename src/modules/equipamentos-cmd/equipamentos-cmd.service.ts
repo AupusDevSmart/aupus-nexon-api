@@ -296,7 +296,8 @@ export class EquipamentosCmdService {
         equipamento.tipo_equipamento ??
         '',
     ).toUpperCase();
-    if (codigoTipo.includes('BOMBA') && !sim) {
+    // Só a bomba de COMBUSTÍVEL: a motobomba do pivô (bombeamento) é comandável.
+    if (/BOMBA_?COMBUST/.test(codigoTipo) && !sim) {
       throw new BadRequestException(
         `"${equipamento.nome}" é uma bomba autônoma — o relé é acionado pela lógica (RFID/regras/nível), não por comando manual. Use o painel de bancada (🧪) para testar o relé.`,
       );
