@@ -205,24 +205,42 @@ export class GatewayDashboardService {
     // 3. Picos do dia: precisa do timestamp do bucket que teve o pico.
     // Calcula por bucket (no SQL) e usa argmax via DISTINCT ON.
     const picoConsumoRow: any[] = await this.prisma.$queryRaw`
-      SELECT timestamp_dados,
-             COALESCE((dados->'data'->>'phf')::numeric, (dados->>'phf')::numeric) * ${kd} * ${fp} AS kw
-        FROM equipamentos_dados
-       WHERE equipamento_id = ${id}
-         AND timestamp_dados >= ${dataInicioDia}
-         AND timestamp_dados <  ${agora}
-         AND COALESCE((dados->'data'->>'phf')::numeric, (dados->>'phf')::numeric) IS NOT NULL
+      -- Demanda = maior média de 15 min em janela FIXA (:00/:15/:30/:45), como a
+      -- concessionária fatura. Soma os blocos que fecharam dentro de cada janela —
+      -- vale para medidor de 1, 5 ou 15 min (o A-966, de 15 min, dá o mesmo de antes).
+      -- Bloco = fim do intervalo do medidor (arredondado ao minuto) → janela que ele fecha.
+      WITH b AS (
+        SELECT date_bin('15 minutes', date_trunc('minute', timestamp_dados + interval '30 seconds') - interval '1 second',
+                        TIMESTAMP '2000-01-01') AS janela,
+               COALESCE((dados->'data'->>'phf')::numeric, (dados->>'phf')::numeric) AS pulsos
+          FROM equipamentos_dados
+         WHERE equipamento_id = ${id}
+           AND timestamp_dados >= ${dataInicioDia}
+           AND timestamp_dados <  ${agora}
+           AND COALESCE((dados->'data'->>'phf')::numeric, (dados->>'phf')::numeric) IS NOT NULL
+      )
+      SELECT janela + interval '15 minutes' AS timestamp_dados, SUM(pulsos) * ${kd} * 4 AS kw
+        FROM b GROUP BY janela
        ORDER BY kw DESC
        LIMIT 1
     `;
     const picoInjecaoRow: any[] = await this.prisma.$queryRaw`
-      SELECT timestamp_dados,
-             COALESCE((dados->'data'->>'phr')::numeric, (dados->>'phr')::numeric) * ${kd} * ${fp} AS kw
-        FROM equipamentos_dados
-       WHERE equipamento_id = ${id}
-         AND timestamp_dados >= ${dataInicioDia}
-         AND timestamp_dados <  ${agora}
-         AND COALESCE((dados->'data'->>'phr')::numeric, (dados->>'phr')::numeric) IS NOT NULL
+      -- Demanda = maior média de 15 min em janela FIXA (:00/:15/:30/:45), como a
+      -- concessionária fatura. Soma os blocos que fecharam dentro de cada janela —
+      -- vale para medidor de 1, 5 ou 15 min (o A-966, de 15 min, dá o mesmo de antes).
+      -- Bloco = fim do intervalo do medidor (arredondado ao minuto) → janela que ele fecha.
+      WITH b AS (
+        SELECT date_bin('15 minutes', date_trunc('minute', timestamp_dados + interval '30 seconds') - interval '1 second',
+                        TIMESTAMP '2000-01-01') AS janela,
+               COALESCE((dados->'data'->>'phr')::numeric, (dados->>'phr')::numeric) AS pulsos
+          FROM equipamentos_dados
+         WHERE equipamento_id = ${id}
+           AND timestamp_dados >= ${dataInicioDia}
+           AND timestamp_dados <  ${agora}
+           AND COALESCE((dados->'data'->>'phr')::numeric, (dados->>'phr')::numeric) IS NOT NULL
+      )
+      SELECT janela + interval '15 minutes' AS timestamp_dados, SUM(pulsos) * ${kd} * 4 AS kw
+        FROM b GROUP BY janela
        ORDER BY kw DESC
        LIMIT 1
     `;
@@ -239,24 +257,42 @@ export class GatewayDashboardService {
     // 3b. Picos do MES corrente (do dia 1 do mes BRT ate agora). Usado pelo
     // toggle "Atual / Mes" nos gauges de demanda do modal.
     const picoConsumoMesRow: any[] = await this.prisma.$queryRaw`
-      SELECT timestamp_dados,
-             COALESCE((dados->'data'->>'phf')::numeric, (dados->>'phf')::numeric) * ${kd} * ${fp} AS kw
-        FROM equipamentos_dados
-       WHERE equipamento_id = ${id}
-         AND timestamp_dados >= ${dataInicioMes}
-         AND timestamp_dados <  ${agora}
-         AND COALESCE((dados->'data'->>'phf')::numeric, (dados->>'phf')::numeric) IS NOT NULL
+      -- Demanda = maior média de 15 min em janela FIXA (:00/:15/:30/:45), como a
+      -- concessionária fatura. Soma os blocos que fecharam dentro de cada janela —
+      -- vale para medidor de 1, 5 ou 15 min (o A-966, de 15 min, dá o mesmo de antes).
+      -- Bloco = fim do intervalo do medidor (arredondado ao minuto) → janela que ele fecha.
+      WITH b AS (
+        SELECT date_bin('15 minutes', date_trunc('minute', timestamp_dados + interval '30 seconds') - interval '1 second',
+                        TIMESTAMP '2000-01-01') AS janela,
+               COALESCE((dados->'data'->>'phf')::numeric, (dados->>'phf')::numeric) AS pulsos
+          FROM equipamentos_dados
+         WHERE equipamento_id = ${id}
+           AND timestamp_dados >= ${dataInicioMes}
+           AND timestamp_dados <  ${agora}
+           AND COALESCE((dados->'data'->>'phf')::numeric, (dados->>'phf')::numeric) IS NOT NULL
+      )
+      SELECT janela + interval '15 minutes' AS timestamp_dados, SUM(pulsos) * ${kd} * 4 AS kw
+        FROM b GROUP BY janela
        ORDER BY kw DESC
        LIMIT 1
     `;
     const picoInjecaoMesRow: any[] = await this.prisma.$queryRaw`
-      SELECT timestamp_dados,
-             COALESCE((dados->'data'->>'phr')::numeric, (dados->>'phr')::numeric) * ${kd} * ${fp} AS kw
-        FROM equipamentos_dados
-       WHERE equipamento_id = ${id}
-         AND timestamp_dados >= ${dataInicioMes}
-         AND timestamp_dados <  ${agora}
-         AND COALESCE((dados->'data'->>'phr')::numeric, (dados->>'phr')::numeric) IS NOT NULL
+      -- Demanda = maior média de 15 min em janela FIXA (:00/:15/:30/:45), como a
+      -- concessionária fatura. Soma os blocos que fecharam dentro de cada janela —
+      -- vale para medidor de 1, 5 ou 15 min (o A-966, de 15 min, dá o mesmo de antes).
+      -- Bloco = fim do intervalo do medidor (arredondado ao minuto) → janela que ele fecha.
+      WITH b AS (
+        SELECT date_bin('15 minutes', date_trunc('minute', timestamp_dados + interval '30 seconds') - interval '1 second',
+                        TIMESTAMP '2000-01-01') AS janela,
+               COALESCE((dados->'data'->>'phr')::numeric, (dados->>'phr')::numeric) AS pulsos
+          FROM equipamentos_dados
+         WHERE equipamento_id = ${id}
+           AND timestamp_dados >= ${dataInicioMes}
+           AND timestamp_dados <  ${agora}
+           AND COALESCE((dados->'data'->>'phr')::numeric, (dados->>'phr')::numeric) IS NOT NULL
+      )
+      SELECT janela + interval '15 minutes' AS timestamp_dados, SUM(pulsos) * ${kd} * 4 AS kw
+        FROM b GROUP BY janela
        ORDER BY kw DESC
        LIMIT 1
     `;
@@ -272,11 +308,37 @@ export class GatewayDashboardService {
     // 4. Comunicacao: leituras esperadas ate agora baseado nas horas decorridas no dia.
     // Evita mostrar 0% as 00:00; mostra qualidade real ate o momento.
     const horasDecorridas = (agora.getTime() - dataInicioDia.getTime()) / 3_600_000;
-    const leituras_esperadas = Math.max(1, Math.floor(horasDecorridas * LEITURAS_POR_HORA));
+    // blocos por hora conforme o intervalo do medidor (A-966: 4; medidor de 5 min: 12)
+    const blocosPorHora = ultimasRaw[0] ? Math.round(1 / horasDoBloco(ultimasRaw[0].dados)) : LEITURAS_POR_HORA;
+    const leituras_esperadas = Math.max(1, Math.floor(horasDecorridas * blocosPorHora));
     const pacotes_perdidos = Math.max(0, leituras_esperadas - num_leituras_hoje);
     const percentual = Math.min(100, (num_leituras_hoje / leituras_esperadas) * 100);
 
+    // 5. Minuto a minuto (parcial da TON-V2, ssu_minutos): potência "agora" + última hora.
+    //    Só exibição — energia e demanda acima vêm dos blocos do medidor.
+    const minutosRaw = await this.prisma.$queryRaw<any[]>`
+      SELECT ts, ke, phf, phr, qhfi, qhfc, qhri, qhrc
+        FROM ssu_minutos
+       WHERE equipamento_id = ${id} AND ts >= ${new Date(Date.now() - 60 * 60_000)}
+       ORDER BY ts`.catch(() => [] as any[]);
+    const serieMinutos = minutosRaw.map((m) => {
+      const k = Number(m.ke) || kd;
+      return {
+        timestamp: m.ts,
+        kW_consumo: Number(m.phf) * k * 60,
+        kW_injecao: Number(m.phr) * k * 60,
+        kvar_ind: (Number(m.qhfi) + Number(m.qhri)) * k * 60,
+        kvar_cap: (Number(m.qhfc) + Number(m.qhrc)) * k * 60,
+      };
+    });
+    const ultimoMin = serieMinutos[serieMinutos.length - 1];
+    const minuto_a_minuto = {
+      agora: ultimoMin && Date.now() - new Date(ultimoMin.timestamp).getTime() < 3 * 60_000 ? ultimoMin : null,
+      serie: serieMinutos,
+    };
+
     return {
+      minuto_a_minuto,
       equipamento: {
         id: eq.id,
         nome: eq.nome,

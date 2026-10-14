@@ -1761,6 +1761,13 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       const temPulsosA966 =
         dPulsos.phf !== undefined || dPulsos.phr !== undefined ||
         (dPulsos.data && (dPulsos.data.phf !== undefined || dPulsos.data.phr !== undefined));
+      // Parcial de 1 min da SSU (TON-V2, "parcial":1): só a potência "agora" e a curva
+      // minuto a minuto. NÃO vai pro histórico nem pra energia/demanda (essas vêm do bloco
+      // de fim de intervalo do medidor) — grava em ssu_minutos e encerra aqui.
+      if ((dPulsos as any).parcial === 1 && (codigo === 'EQTL001' || categoriaNome === 'Gateway')) {
+        await this.salvarParcialSsu(equipamentoId, dPulsos, timestampDados);
+        return;
+      }
       const isGateway = categoriaNome === 'Gateway' || (codigo === 'EQTL001' && temPulsosA966);
       const isM160 = codigo === 'M-160' || codigo === 'M160' || codigo === 'METER_M160';
 
@@ -2120,6 +2127,25 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
    * useGatewayGraficos.ts / a966-modal.tsx — extrair pra util compartilhada
    * num próximo refactor (ver "depois vamos revisar essa função").
    */
+  /** Parcial de 1 min da SSU → ssu_minutos (retenção 7 dias). Nunca lança. */
+  private async salvarParcialSsu(equipamentoId: string, dados: any, ts: Date) {
+    try {
+      const m = dados?.min ?? {};
+      const n = (v: any) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Math.trunc(Number(v)) : 0);
+      const ke = keDoBloco(dados);
+      await this.prisma.$executeRaw`
+        INSERT INTO ssu_minutos (equipamento_id, ts, nsu, seg, ke, phf, phr, qhfi, qhfc, qhri, qhrc)
+        VALUES (${equipamentoId.trim()}, ${emSegundos(ts)}, ${n(dados?.NSU)}, ${n(dados?.seg)}, ${ke},
+                ${n(m.phf)}, ${n(m.phr)}, ${n(m.qhfi)}, ${n(m.qhfc)}, ${n(m.qhri)}, ${n(m.qhrc)})
+        ON CONFLICT (equipamento_id, ts) DO NOTHING`;
+      if (Math.random() < 0.01) {
+        await this.prisma.$executeRaw`DELETE FROM ssu_minutos WHERE ts < ${new Date(Date.now() - 7 * 86_400_000)}`;
+      }
+    } catch (e) {
+      console.error(`❌ [SSU parcial] ${equipamentoId}:`, (e as Error).message);
+    }
+  }
+
   private async salvarDadosGateway(
     equipamentoId: string,
     dados: any,
