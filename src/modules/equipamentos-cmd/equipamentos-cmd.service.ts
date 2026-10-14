@@ -592,6 +592,95 @@ export class EquipamentosCmdService {
   }
 
   /**
+   * Aciona uma BO de TON SEM ponto de comando — usado pelo bombeamento do pivô, que é
+   * configuração do pivô (pivo_config.bombeamento), não ponto em ton_bo (ton_bo é
+   * UNIQUE por BO e uma bomba pode servir vários pivôs).
+   *   modo 'pulso'  → r{N} on (ack) → pulsoMs → r{N} off
+   *   modo 'liga'   → r{N} on (ack) e fica (bomba em contato mantido)
+   *   modo 'desliga'→ r{N} off (ack)
+   * Passa pelas mesmas restrições do acionar (permissão na instalação, janela do
+   * operador, bloqueio de ponta do pivô — "Ligar bomba" conta como partida) e grava
+   * a trilha no equipamento do pivô.
+   */
+  async acionarBoDireto(
+    p: { equipamentoId: string; tonId: string; bo: number; modo: 'pulso' | 'liga' | 'desliga'; pulsoMs?: number; rotulo: string },
+    user?: Autor,
+    cliente?: ClienteInfo,
+  ): Promise<{ status: string; latency_ms: number }> {
+    const eqId = p.equipamentoId.trim();
+    const bo = Math.trunc(Number(p.bo));
+    if (!(bo >= 1 && bo <= 16)) throw new BadRequestException(`BO inválida: ${p.bo}`);
+    const eq = await this.prisma.equipamentos.findFirst({ where: { id: eqId, deleted_at: null }, select: { nome: true } });
+    if (!eq) throw new NotFoundException(`Equipamento ${eqId} nao encontrado`);
+    const semantico = `${eq.nome} · ${p.rotulo}`;
+
+    const bloqueio = await this.verificarRestricoes(eqId, p.rotulo, user);
+    if (bloqueio) {
+      await this.registrarComando(
+        { equipamentoId: eqId, mensagem: bloqueio.message, status: 'bloqueado', severidade: 'WARN', comandoTecnico: bloqueio.code, comandoSemantico: semantico },
+        user, cliente,
+      );
+      throw new ForbiddenException({ message: bloqueio.message, code: bloqueio.code });
+    }
+
+    const ton = await this.prisma.equipamentos.findFirst({
+      where: { id: p.tonId.trim(), deleted_at: null },
+      select: { id: true, nome: true, topico_mqtt: true },
+    });
+    if (!ton) throw new BadRequestException(`TON do bombeamento (${p.tonId}) não encontrada ou removida.`);
+    const topico = ton.topico_mqtt?.trim();
+    if (!topico) throw new BadRequestException(`A TON "${ton.nome}" não tem Tópico Base.`);
+    if (!this.mqtt.isConnected()) throw new ServiceUnavailableException('Broker MQTT nao conectado no momento.');
+
+    const cmd = p.modo === 'desliga' ? `r${bo} off` : `r${bo} on`;
+    const t0 = Date.now();
+    let ack;
+    try {
+      ack = await this.mqtt.publishCommand(topico, cmd);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Erro desconhecido';
+      await this.registrarComando(
+        { equipamentoId: eqId, mensagem: `${semantico}: sem resposta da TON ${ton.nome} (${msg})`, status: 'timeout', severidade: 'ERROR', latencyMs: Date.now() - t0, tonId: ton.id, comandoTecnico: cmd, comandoSemantico: semantico },
+        user, cliente,
+      );
+      throw new GatewayTimeoutException(`TON "${ton.nome}" nao respondeu ao comando ${cmd} dentro do timeout.`);
+    }
+    const latency_ms = Date.now() - t0;
+    if (ack.status === 'error') {
+      await this.registrarComando(
+        { equipamentoId: eqId, mensagem: `${semantico}: TON recusou (${ack.msg})`, status: 'error', severidade: 'ERROR', cmdId: ack.cmd_id, latencyMs: latency_ms, tonId: ton.id, comandoTecnico: cmd, comandoSemantico: semantico },
+        user, cliente,
+      );
+      throw new BadGatewayException({ message: `TON recusou o comando: ${ack.msg}`, cmd_id: ack.cmd_id, latency_ms });
+    }
+    let tecnico = cmd;
+    if (p.modo === 'pulso') {
+      const ms = Math.max(100, Math.min(10000, Number(p.pulsoMs) || 1000));
+      await this.sleep(ms);
+      try {
+        await this.mqtt.publish(`${topico}/cmd`, JSON.stringify({ cmd_id: randomUUID(), cmd: `r${bo} off` }), { qos: 1, retain: false });
+      } catch (err) {
+        this.logger.error(`[bo-direto] CRITICO: falha ao publicar r${bo} off apos ON em TON ${ton.nome}: ${(err as Error).message}`);
+      }
+      tecnico = `r${bo} on -> ${ms}ms -> r${bo} off`;
+    }
+    await this.registrarComando(
+      { equipamentoId: eqId, mensagem: `${semantico} (${tecnico} @ ${ton.nome})`, status: ack.status, severidade: ack.status === 'ok' ? 'INFO' : 'WARN', cmdId: ack.cmd_id, latencyMs: latency_ms, tonId: ton.id, comandoTecnico: tecnico, comandoSemantico: semantico },
+      user, cliente,
+    );
+    return { status: ack.status, latency_ms };
+  }
+
+  /** Estado de uma entrada (BI, 1-based) de uma TON, como chegou em <base>/inputs. null = sem leitura. */
+  async lerEntradaTon(tonId: string, bi: number): Promise<{ valor: 0 | 1 | null; updated_at: Date | null }> {
+    const rows = await this.prisma.$queryRaw<Array<{ inputs: any; updated_at: Date }>>`
+      SELECT inputs, updated_at FROM equipamento_io_estado WHERE equipamento_id = ${tonId.trim()}::bpchar LIMIT 1`;
+    const r = rows[0];
+    const v = r?.inputs?.[`d${Math.trunc(bi)}`];
+    return { valor: v === undefined || v === null ? null : v ? 1 : 0, updated_at: r?.updated_at ?? null };
+  }
+
+  /**
    * Grava a linha da trilha de comando (logs_mqtt tipo='comando') com autor
    * (usuario_id) e aparelho (dispositivo, headers X-Client-*). dispositivo fica
    * fora do schema Prisma → UPDATE raw à parte, tolerante à coluna ausente.
