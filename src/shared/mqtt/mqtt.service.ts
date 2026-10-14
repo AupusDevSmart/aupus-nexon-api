@@ -1,4 +1,5 @@
 import { Injectable, OnModuleInit, OnModuleDestroy, Inject, forwardRef, Optional } from '@nestjs/common';
+import { keDoBloco, horasDoBloco } from '../util/ssu-bucket';
 import { OnEvent } from '@nestjs/event-emitter';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import * as mqtt from 'mqtt';
@@ -2128,10 +2129,10 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     // Ke (kWh/pulso): o gateway A-966 nao informa → padrao historico 0,048. A TON-V2
     // (leitor SSU NBR 14522) publica `ke` do cadastro no envelope → prevalece quando
     // vier valido. Mesma regra no gateway-dashboard.service (kdDe).
-    const KD_PADRAO_A966 = 0.048;
-    const keInformado = Number(dados?.ke ?? dados?.data?.ke ?? NaN);
-    const KD_A966_SSU = Number.isFinite(keInformado) && keInformado > 0 ? keInformado : KD_PADRAO_A966;
-    const BUCKET_HORAS = 0.25;        // 15 min nominal
+    // Ke e duração do bloco: regra única em shared/util/ssu-bucket (A-966 = 0,048 e
+    // 15 min; TON-V2 = ke do envelope ou 0,3 Wh/pulso, e intervalo pelo `seg`).
+    const KD_A966_SSU = keDoBloco(dados);
+    const BUCKET_HORAS = horasDoBloco(dados);
     const GLITCH_PHF_THRESHOLD = 100; // pulsos; ≈ 4.8 kWh em 15min
 
     const mqttMode = process.env.MQTT_MODE || 'production';

@@ -1,5 +1,6 @@
 import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '@/core';
+import { keDoBloco, horasDoBloco } from '../../../shared/util/ssu-bucket';
 
 // Constante de divisao do medidor SSU acoplado ao A966. Energia (kWh) =
 // leitura_bruta * KD. Hoje hardcoded; quando houver mais de uma unidade
@@ -15,8 +16,11 @@ const ENERGIA_PARA_POTENCIA = 4;
  * regra da ingestao (mqtt.service salvarDadosGateway).
  */
 function kdDe(dados: any): number {
-  const v = Number(dados?.ke ?? dados?.data?.ke ?? NaN);
-  return Number.isFinite(v) && v > 0 ? v : KD_A966_SSU;
+  return keDoBloco(dados);
+}
+/** kWh do bloco → kW médio: 1 / horas do bloco (15 min = 4; TON-V2 de 5 min = 12). */
+function fpDe(dados: any): number {
+  return 1 / horasDoBloco(dados);
 }
 
 // 24h * 4 buckets/h = 96 leituras esperadas/dia se cadencia for 15min
@@ -50,16 +54,17 @@ function calcularBucket(
   qhri: number,
   qhrc: number,
   kd: number = KD_A966_SSU,
+  fp: number = ENERGIA_PARA_POTENCIA,
 ): BucketDerivado {
   const phf_kwh = phf * kd;
   const phr_kwh = phr * kd;
   const q_ind_kvarh = (qhfi + qhri) * kd;
   const q_cap_kvarh = (qhfc + qhrc) * kd;
 
-  const kW_consumo = phf_kwh * ENERGIA_PARA_POTENCIA;
-  const kW_injecao = phr_kwh * ENERGIA_PARA_POTENCIA;
-  const kvar_ind = q_ind_kvarh * ENERGIA_PARA_POTENCIA;
-  const kvar_cap = q_cap_kvarh * ENERGIA_PARA_POTENCIA;
+  const kW_consumo = phf_kwh * fp;
+  const kW_injecao = phr_kwh * fp;
+  const kvar_ind = q_ind_kvarh * fp;
+  const kvar_cap = q_cap_kvarh * fp;
 
   // Reativo total = resultante Qind - Qcap (com sinal). Sinal define
   // a natureza predominante (positivo = indutivo, negativo = capacitivo).
@@ -132,6 +137,7 @@ export class GatewayDashboardService {
     });
     // Ke deste equipamento: da leitura mais recente (TON-V2 publica; A-966 cai no padrao)
     const kd = kdDe(ultimasRaw[0]?.dados);
+    const fp = fpDe(ultimasRaw[0]?.dados);   // 15 min → 4; bloco de 5 min → 12
 
     const ultimas_leituras = ultimasRaw.map((r) => {
       const d = calcularBucket(
@@ -142,6 +148,7 @@ export class GatewayDashboardService {
         getNum(r.dados, 'qhri'),
         getNum(r.dados, 'qhrc'),
         kd,
+        fp,
       );
       return {
         timestamp: r.timestamp_dados,
@@ -166,6 +173,7 @@ export class GatewayDashboardService {
               getNum(ultimasRaw[0].dados, 'qhri'),
               getNum(ultimasRaw[0].dados, 'qhrc'),
               kd,
+              fp,
             ),
           }
         : null;
@@ -198,7 +206,7 @@ export class GatewayDashboardService {
     // Calcula por bucket (no SQL) e usa argmax via DISTINCT ON.
     const picoConsumoRow: any[] = await this.prisma.$queryRaw`
       SELECT timestamp_dados,
-             COALESCE((dados->'data'->>'phf')::numeric, (dados->>'phf')::numeric) * ${kd} * ${ENERGIA_PARA_POTENCIA} AS kw
+             COALESCE((dados->'data'->>'phf')::numeric, (dados->>'phf')::numeric) * ${kd} * ${fp} AS kw
         FROM equipamentos_dados
        WHERE equipamento_id = ${id}
          AND timestamp_dados >= ${dataInicioDia}
@@ -209,7 +217,7 @@ export class GatewayDashboardService {
     `;
     const picoInjecaoRow: any[] = await this.prisma.$queryRaw`
       SELECT timestamp_dados,
-             COALESCE((dados->'data'->>'phr')::numeric, (dados->>'phr')::numeric) * ${kd} * ${ENERGIA_PARA_POTENCIA} AS kw
+             COALESCE((dados->'data'->>'phr')::numeric, (dados->>'phr')::numeric) * ${kd} * ${fp} AS kw
         FROM equipamentos_dados
        WHERE equipamento_id = ${id}
          AND timestamp_dados >= ${dataInicioDia}
@@ -232,7 +240,7 @@ export class GatewayDashboardService {
     // toggle "Atual / Mes" nos gauges de demanda do modal.
     const picoConsumoMesRow: any[] = await this.prisma.$queryRaw`
       SELECT timestamp_dados,
-             COALESCE((dados->'data'->>'phf')::numeric, (dados->>'phf')::numeric) * ${kd} * ${ENERGIA_PARA_POTENCIA} AS kw
+             COALESCE((dados->'data'->>'phf')::numeric, (dados->>'phf')::numeric) * ${kd} * ${fp} AS kw
         FROM equipamentos_dados
        WHERE equipamento_id = ${id}
          AND timestamp_dados >= ${dataInicioMes}
@@ -243,7 +251,7 @@ export class GatewayDashboardService {
     `;
     const picoInjecaoMesRow: any[] = await this.prisma.$queryRaw`
       SELECT timestamp_dados,
-             COALESCE((dados->'data'->>'phr')::numeric, (dados->>'phr')::numeric) * ${kd} * ${ENERGIA_PARA_POTENCIA} AS kw
+             COALESCE((dados->'data'->>'phr')::numeric, (dados->>'phr')::numeric) * ${kd} * ${fp} AS kw
         FROM equipamentos_dados
        WHERE equipamento_id = ${id}
          AND timestamp_dados >= ${dataInicioMes}
@@ -362,14 +370,15 @@ export class GatewayDashboardService {
       select: { dados: true },
     });
     const kd = kdDe(ultRow?.dados);
+    const fp = fpDe(ultRow?.dados);
 
     const dados = rows.map((r) => {
       const phf_avg = Number(r.phf_avg) || 0;
       const phr_avg = Number(r.phr_avg) || 0;
       return {
         timestamp: r.bucket,
-        kW_consumo: phf_avg * kd * ENERGIA_PARA_POTENCIA,
-        kW_injecao: phr_avg * kd * ENERGIA_PARA_POTENCIA,
+        kW_consumo: phf_avg * kd * fp,
+        kW_injecao: phr_avg * kd * fp,
         num_leituras: r.num_leituras,
       };
     });
