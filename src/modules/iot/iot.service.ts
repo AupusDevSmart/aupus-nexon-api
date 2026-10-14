@@ -839,7 +839,17 @@ export class IoTService {
           string,
           unknown
         >;
-      const topico = String(props.mqtt_topic_base ?? '').trim();
+      // Satélite LoRa (lora_mode 'tx') NÃO tem tópico próprio no diagrama: o
+      // mqtt_topic_base dele é o da GATEWAY, e o tópico real é <base>/satellite/<MAC>.
+      // Usar a base crua sobrescrevia o ativo da satélite com o tópico da gateway
+      // (e na recriação as N satélites colapsavam no mesmo ativo). Sem MAC no
+      // diagrama → não mexe no tópico (fica o que o ativo já tem).
+      const base = String(props.mqtt_topic_base ?? '').trim().replace(/\/+$/, '');
+      const ehSatelite =
+        String(props.lora_mode ?? '').toLowerCase() === 'tx' ||
+        String(props.lora_role ?? '').toLowerCase() === 'satellite';
+      const macSat = String(props.mac_address ?? '').trim().toUpperCase();
+      const topico = !ehSatelite ? base : base && macSat ? `${base}/satellite/${macSat}` : '';
 
       // (1) ja vinculado e valido? MANTEM o vinculo; so PROPAGA o topico se ele
       // mudou (usuario preencheu o Topico Base DEPOIS de ja ter o equipamento) —
