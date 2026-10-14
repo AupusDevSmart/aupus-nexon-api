@@ -25,6 +25,7 @@ enum LabelPositionEnum {
   BOTTOM = 'bottom',
   LEFT = 'left',
   RIGHT = 'right',
+  DIAG = 'diag', // diagonal inferior direita (padrão do nome no unifilar)
 }
 
 /**
