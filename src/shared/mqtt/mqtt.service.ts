@@ -1764,9 +1764,17 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       // Parcial de 1 min da SSU (TON-V2, "parcial":1): só a potência "agora" e a curva
       // minuto a minuto. NÃO vai pro histórico nem pra energia/demanda (essas vêm do bloco
       // de fim de intervalo do medidor) — grava em ssu_minutos e encerra aqui.
-      if ((dPulsos as any).parcial === 1 && (codigo === 'EQTL001' || categoriaNome === 'Gateway')) {
+      // TON-V2: "fim":0 = minuto do medidor (formato do bloco + min) → só ssu_minutos.
+      // "parcial":1 = formato antigo da parcial (firmware de 14/10 manhã) → idem.
+      const ehSsuEquip = codigo === 'EQTL001' || categoriaNome === 'Gateway';
+      if (ehSsuEquip && ((dPulsos as any).parcial === 1 || (dPulsos as any).fim === 0)) {
         await this.salvarParcialSsu(equipamentoId, dPulsos, timestampDados);
         return;
+      }
+      // "fim":1 = fechamento do intervalo (bloco oficial): segue como bloco E o último
+      // minuto dele entra na série minuto a minuto (sem buraco na curva).
+      if (ehSsuEquip && (dPulsos as any).fim === 1 && (dPulsos as any).min) {
+        await this.salvarParcialSsu(equipamentoId, dPulsos, timestampDados);
       }
       const isGateway = categoriaNome === 'Gateway' || (codigo === 'EQTL001' && temPulsosA966);
       const isM160 = codigo === 'M-160' || codigo === 'M160' || codigo === 'METER_M160';
@@ -2134,8 +2142,9 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       const n = (v: any) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Math.trunc(Number(v)) : 0);
       const ke = keDoBloco(dados);
       await this.prisma.$executeRaw`
-        INSERT INTO ssu_minutos (equipamento_id, ts, nsu, seg, ke, phf, phr, qhfi, qhfc, qhri, qhrc)
+        INSERT INTO ssu_minutos (equipamento_id, ts, nsu, seg, ke, q, posto, phf, phr, qhfi, qhfc, qhri, qhrc)
         VALUES (${equipamentoId.trim()}, ${emSegundos(ts)}, ${n(dados?.NSU)}, ${n(dados?.seg)}, ${ke},
+                ${dados?.q == null ? null : n(dados.q)}, ${dados?.posto == null ? null : n(dados.posto)},
                 ${n(m.phf)}, ${n(m.phr)}, ${n(m.qhfi)}, ${n(m.qhfc)}, ${n(m.qhri)}, ${n(m.qhrc)})
         ON CONFLICT (equipamento_id, ts) DO NOTHING`;
       if (Math.random() < 0.01) {
@@ -2188,7 +2197,12 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     // chega phf > THRESHOLD junto com phr > THRESHOLD num mesmo bucket, é
     // pulso vazado do contador phr pro phf (~1 ocorrência por 2 semanas
     // observada em prod). Zera phf antes do delta. Bruto fica intacto no JSONB.
+    // Só para o A-966: a TON-V2 separa a energia por quadrante quadro a quadro, então phf e
+    // phr no mesmo bloco são reais (troca de consumo↔injeção no meio do intervalo — visto na
+    // bancada de 14/10, o filtro zerava consumo legítimo).
+    const ehTonV2 = dados?.fmt !== undefined || dados?.seg !== undefined;
     const glitchPhf =
+      !ehTonV2 &&
       !ignorarParaAgregado &&
       phf > GLITCH_PHF_THRESHOLD &&
       phr > GLITCH_PHF_THRESHOLD;

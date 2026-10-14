@@ -12,3 +12,7 @@ CREATE TABLE IF NOT EXISTS ssu_minutos (
   qhri integer NOT NULL DEFAULT 0, qhrc integer NOT NULL DEFAULT 0,
   PRIMARY KEY (equipamento_id, ts)
 );
+
+-- Minuto do medidor (TON-V2, "fim":0/1): quadrante e posto do último segundo do minuto.
+ALTER TABLE ssu_minutos ADD COLUMN IF NOT EXISTS q smallint;
+ALTER TABLE ssu_minutos ADD COLUMN IF NOT EXISTS posto smallint;

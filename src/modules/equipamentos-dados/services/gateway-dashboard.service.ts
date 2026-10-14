@@ -317,25 +317,47 @@ export class GatewayDashboardService {
     // 5. Minuto a minuto (parcial da TON-V2, ssu_minutos): potência "agora" + última hora.
     //    Só exibição — energia e demanda acima vêm dos blocos do medidor.
     const minutosRaw = await this.prisma.$queryRaw<any[]>`
-      SELECT ts, ke, phf, phr, qhfi, qhfc, qhri, qhrc
+      SELECT ts, ke, nsu, seg, q, posto, phf, phr, qhfi, qhfc, qhri, qhrc
         FROM ssu_minutos
        WHERE equipamento_id = ${id} AND ts >= ${new Date(Date.now() - 60 * 60_000)}
        ORDER BY ts`.catch(() => [] as any[]);
     const serieMinutos = minutosRaw.map((m) => {
       const k = Number(m.ke) || kd;
+      const kW_consumo = Number(m.phf) * k * 60;
+      const kW_injecao = Number(m.phr) * k * 60;
+      const kvar_ind = (Number(m.qhfi) + Number(m.qhri)) * k * 60;
+      const kvar_cap = (Number(m.qhfc) + Number(m.qhrc)) * k * 60;
+      const p = Math.max(kW_consumo, kW_injecao);
+      const qv = Math.abs(kvar_ind - kvar_cap);
       return {
         timestamp: m.ts,
-        kW_consumo: Number(m.phf) * k * 60,
-        kW_injecao: Number(m.phr) * k * 60,
-        kvar_ind: (Number(m.qhfi) + Number(m.qhri)) * k * 60,
-        kvar_cap: (Number(m.qhfc) + Number(m.qhrc)) * k * 60,
+        nsu: m.nsu == null ? null : Number(m.nsu),
+        seg: m.seg == null ? null : Number(m.seg),
+        // quadrante e posto vêm do último segundo do minuto (só com carga têm significado)
+        q: m.q == null ? null : Number(m.q),
+        posto: m.posto == null ? null : Number(m.posto),
+        kW_consumo, kW_injecao, kvar_ind, kvar_cap,
+        FP: p + qv > 0 ? p / Math.sqrt(p * p + qv * qv) : null,
+        FP_natureza: kvar_ind > kvar_cap ? 'ind' : kvar_cap > kvar_ind ? 'cap' : null,
       };
     });
     const ultimoMin = serieMinutos[serieMinutos.length - 1];
-    const minuto_a_minuto = {
-      agora: ultimoMin && Date.now() - new Date(ultimoMin.timestamp).getTime() < 3 * 60_000 ? ultimoMin : null,
-      serie: serieMinutos,
-    };
+    const agoraMin = ultimoMin && Date.now() - new Date(ultimoMin.timestamp).getTime() < 3 * 60_000 ? ultimoMin : null;
+    // Intervalo do medidor em andamento (TON-V2): soma dos minutos do NSU atual + quanto falta.
+    let intervalo: null | { nsu: number; kwh_consumo: number; kwh_injecao: number; minutos: number; fecha_em_s: number | null } = null;
+    if (agoraMin && agoraMin.nsu != null) {
+      const doNsu = minutosRaw.filter((m) => Number(m.nsu) === agoraMin.nsu);
+      const k = Number(minutosRaw[minutosRaw.length - 1]?.ke) || kd;
+      const decorrido = Math.round((Date.now() - new Date(agoraMin.timestamp).getTime()) / 1000);
+      intervalo = {
+        nsu: agoraMin.nsu,
+        kwh_consumo: doNsu.reduce((a, m) => a + Number(m.phf), 0) * k,
+        kwh_injecao: doNsu.reduce((a, m) => a + Number(m.phr), 0) * k,
+        minutos: doNsu.length,
+        fecha_em_s: agoraMin.seg == null ? null : Math.max(0, agoraMin.seg - decorrido),
+      };
+    }
+    const minuto_a_minuto = { agora: agoraMin, serie: serieMinutos, intervalo };
 
     return {
       minuto_a_minuto,
