@@ -10,7 +10,8 @@ import { PivoConfigDto, ProgramacaoPivoDto } from './dto/pivos.dto';
  * comanda (equipamentos.acionar_ponto) ou gerencia (equipamentos.manage), e o
  * operador com permissão por instalação precisa de "comandar" nela.
  *
- * Programações são SÓ armazenadas — o servidor não executa nada sozinho.
+ * Programações, início agendado, paradas e bloqueio de ponta são executados pelo
+ * servidor (PivoAutomacaoService).
  */
 @ApiTags('Pivôs')
 @ApiBearerAuth()
@@ -31,14 +32,14 @@ export class PivosController {
   @Post(':id/acionar')
   @HttpCode(HttpStatus.OK)
   @Permissions('equipamentos.acionar_ponto')
-  @ApiOperation({ summary: 'Executa a sequência: girar_direita | girar_esquerda (liga bomba → pressão → gira) | desligar' })
+  @ApiOperation({ summary: 'Executa a sequência: girar_direita | girar_esquerda (liga bomba → pressão → gira) | desligar. `irrigacao` opcional: direção, %, sem água, canhão, parada e início (futuro = agenda).' })
   acionar(
     @Param('id') id: string,
-    @Body() body: { acao: AcaoPivo },
+    @Body() body: { acao: AcaoPivo; irrigacao?: unknown },
     @CurrentUser() user?: any,
     @Cliente() cliente?: ClienteInfo,
   ) {
-    return this.sequencia.acionar(id, body?.acao, user, cliente);
+    return this.sequencia.acionar(id, body?.acao, user, cliente, { irrigacao: body?.irrigacao });
   }
 
   @Get(':id/bombeamento/opcoes')
@@ -74,7 +75,7 @@ export class PivosController {
   }
 
   @Get(':id/programacoes')
-  @ApiOperation({ summary: 'Programações salvas do pivô (não são executadas pelo servidor)' })
+  @ApiOperation({ summary: 'Programações do pivô (o servidor liga no dia/hora e para pelo tempo ou percurso)' })
   listar(@Param('id') id: string, @CurrentUser() user?: any) {
     return this.service.listarProgramacoes(id, user);
   }
