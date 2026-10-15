@@ -8,6 +8,7 @@ import { FeriadosNacionaisService } from './services/feriados-nacionais.service'
 import { MqttIngestionService } from './services/mqtt-ingestion.service';
 import { GatewayGraficosService } from './services/gateway-graficos.service';
 import { GatewayDashboardService } from './services/gateway-dashboard.service';
+import { MedidorResumoService } from './services/medidor-resumo.service';
 import { PrismaModule } from '@/core';
 
 @Module({
@@ -22,6 +23,7 @@ import { PrismaModule } from '@/core';
     MqttIngestionService,
     GatewayGraficosService,
     GatewayDashboardService,
+    MedidorResumoService,
   ],
   exports: [
     EquipamentosDadosService,

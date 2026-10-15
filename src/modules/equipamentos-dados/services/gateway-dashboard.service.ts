@@ -46,7 +46,7 @@ export interface BucketDerivado {
  * Calcula todos os derivados de UM bucket (uma leitura ou uma agregacao).
  * Recebe valores brutos do payload (sem KD aplicada).
  */
-function calcularBucket(
+export function calcularBucket(
   phf: number,
   phr: number,
   qhfi: number,
@@ -94,7 +94,7 @@ function calcularBucket(
 }
 
 /** Extrai um campo numerico do payload, suportando nested em 'data' ou flat. */
-function getNum(dados: any, campo: string): number {
+export function getNum(dados: any, campo: string): number {
   const flat = dados?.data && typeof dados.data === 'object' ? dados.data : dados;
   const v = flat?.[campo];
   if (typeof v === 'number' && Number.isFinite(v)) return v;
