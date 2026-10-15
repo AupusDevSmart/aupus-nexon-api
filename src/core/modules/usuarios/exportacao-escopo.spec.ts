@@ -193,7 +193,7 @@ describe('Exportações: escopo por planta + trilha', () => {
     ];
     const svc = () => {
       prisma.$queryRaw.mockResolvedValue(linhas as any);
-      return new CarregadorEletricoService(prisma as any, scope, {} as any);
+      return new CarregadorEletricoService(prisma as any, scope, {} as any, {} as any);
     };
 
     it('usuário com escopo não recebe sessões sem planta nem de outra planta', async () => {

@@ -136,4 +136,16 @@ export class MailService implements OnModuleInit {
       return false;
     }
   }
+
+  /** Aviso simples (texto curto em HTML). Sem SMTP → false, nunca lança. */
+  async sendAviso(to: string, subject: string, html: string): Promise<boolean> {
+    if (!this.transporter || !to) return false;
+    try {
+      await this.transporter.sendMail({ from: this.fromAddress, to, subject, html });
+      return true;
+    } catch (error) {
+      this.logger.error(`Failed to send notice to ${to}: ${error.message}`);
+      return false;
+    }
+  }
 }

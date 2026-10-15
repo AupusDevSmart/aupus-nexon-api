@@ -1,13 +1,13 @@
-import { Body, Controller, Delete, ForbiddenException, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Put, Query, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard, CurrentUser, Cliente, ExportacaoAuditoriaService } from '@/core';
 import type { ClienteInfo } from '@/core';
 import { CarregadorEletricoService } from './carregador-eletrico.service';
 
 /**
- * Carregador Elétrico — moradores, liberação (porteiro), sessões, pedir vaga,
- * estado (modal) e export mensal. Owner-scoped no service. Cadastro de moradores
- * exige admin; liberar/pedir-vaga é operação de portaria (qualquer autenticado no
- * escopo). Encerrar sessão NÃO é rota manual — vem da ingestão MQTT (desconexão).
+ * Carregador Elétrico — moradores, liberação, sessões, pedir vaga, estado (modal),
+ * valor do kWh e export mensal. Owner-scoped no service. Perfis no service:
+ * analista (valor do kWh), proprietário (moradores, export) e morador (só a própria
+ * recarga). Encerrar também vem da ingestão MQTT (desconexão).
  */
 @Controller('carregador-eletrico')
 @UseGuards(JwtAuthGuard)
@@ -16,11 +16,6 @@ export class CarregadorEletricoController {
     private readonly svc: CarregadorEletricoService,
     private readonly exportacoes: ExportacaoAuditoriaService,
   ) {}
-
-  private assertAdmin(user: any) {
-    const role = String(user?.role || '').toLowerCase();
-    if (!['super_admin', 'admin', 'gerente'].includes(role)) throw new ForbiddenException('Apenas administradores.');
-  }
 
   @Get('carregadores')
   async carregadores(@CurrentUser() user: any) {
@@ -34,13 +29,17 @@ export class CarregadorEletricoController {
   }
   @Post('moradores')
   async salvarMorador(@Body() body: any, @CurrentUser() user: any) {
-    this.assertAdmin(user);
     return { data: await this.svc.salvarMorador(body, user) };
   }
   @Delete('moradores/:id')
   async removerMorador(@Param('id') id: string, @CurrentUser() user: any) {
-    this.assertAdmin(user);
     return { data: await this.svc.removerMorador(id, user) };
+  }
+
+  // ---- Configuração (valor do kWh: só analista) ----
+  @Put(':id/config')
+  async salvarConfig(@Param('id') id: string, @Body() body: any, @CurrentUser() user: any) {
+    return { data: await this.svc.salvarConfig(id, body ?? {}, user) };
   }
 
   // ---- Operação (portaria) ----

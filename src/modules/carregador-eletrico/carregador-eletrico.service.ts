@@ -1,5 +1,8 @@
 import { Injectable, Logger, ForbiddenException, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Interval } from '@nestjs/schedule';
 import { randomBytes } from 'node:crypto';
+import { MailService } from '../../core/mail/mail.service';
+import { dataBR, hojeSP, papelCarregador, PapelCarregador, situacaoValidade, somarDias, tarifaValida, validadeDe } from './carregador.util';
 import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
 import { MqttService } from '../../shared/mqtt/mqtt.service';
 
@@ -22,7 +25,62 @@ export class CarregadorEletricoService {
     private readonly prisma: PrismaService,
     private readonly scope: PermissionScopeService,
     private readonly mqtt: MqttService,
+    private readonly mail: MailService,
   ) {}
+
+  // ===== Perfil (analista | proprietario | morador) =====
+  /** Morador ligado ao usuário logado (moradores.usuario_id ou e-mail igual ao do usuário). */
+  async moradorDoUsuario(user?: ScopedUser): Promise<any | null> {
+    const uid = (user as any)?.id ? String((user as any).id).trim() : null;
+    if (!uid) return null;
+    const r = await this.prisma.$queryRaw<any[]>`
+      SELECT m.id, m.nome, m.apartamento, m.planta_id, to_char(m.validade,'YYYY-MM-DD') AS validade, m.ativo
+      FROM moradores m
+      LEFT JOIN usuarios u ON TRIM(u.id) = ${uid}
+      WHERE m.deleted_at IS NULL
+        AND (TRIM(m.usuario_id) = ${uid} OR (m.email IS NOT NULL AND u.email IS NOT NULL AND lower(m.email) = lower(u.email)))
+      ORDER BY m.ativo DESC LIMIT 1`.catch(() => []);
+    return r[0] ?? null;
+  }
+  async papel(user?: ScopedUser): Promise<{ papel: PapelCarregador; morador: any | null }> {
+    const role = (user as any)?.role ?? (user as any)?.roles?.[0];
+    const morador = await this.moradorDoUsuario(user);
+    return { papel: papelCarregador(typeof role === 'object' ? role?.name : role, !!morador), morador };
+  }
+  private async exigirPapel(user: ScopedUser | undefined, aceitos: PapelCarregador[], msg: string) {
+    if (!user) return;
+    const { papel } = await this.papel(user);
+    if (!aceitos.includes(papel)) throw new ForbiddenException(msg);
+  }
+
+  /** Trilha de morador (planta): grava em cada carregador da planta. */
+  private async trilhaPlanta(plantaId: string | null, mensagem: string, semantico: string, user?: ScopedUser) {
+    if (!plantaId) return;
+    const cars = await this.prisma.$queryRaw<Array<{ id: string }>>`
+      SELECT TRIM(e.id) AS id FROM equipamentos e JOIN unidades u ON TRIM(u.id)=TRIM(e.unidade_id)
+      LEFT JOIN tipos_equipamentos te ON TRIM(te.id)=TRIM(e.tipo_equipamento_id)
+      WHERE TRIM(u.planta_id)=${plantaId.trim()} AND e.deleted_at IS NULL
+        AND (e.tipo_equipamento ILIKE '%carregador%' OR te.codigo ILIKE '%CARREGADOR%')`.catch(() => []);
+    for (const c of cars) await this.trilha(c.id, mensagem, semantico, user);
+  }
+
+  // ===== Configuração do carregador (valor do kWh) =====
+  async salvarConfig(equipamentoId: string, body: any, user?: ScopedUser): Promise<any> {
+    const eid = equipamentoId.trim();
+    await this.assertPlantaNoEscopo(user, (await this.plantaDoCarregador(eid)) || '');
+    await this.exigirPapel(user, ['analista'], 'Só o analista altera o valor do kWh.');
+    const tarifa = tarifaValida(body?.tarifa_kwh);
+    if (tarifa == null) throw new BadRequestException('Valor do kWh fora da faixa (R$ 0,30 a R$ 5,00).');
+    const atual = (await this.prisma.$queryRaw<any[]>`SELECT tarifa_kwh FROM carregador_config WHERE TRIM(equipamento_id)=${eid} LIMIT 1`)[0];
+    if (atual) {
+      await this.prisma.$executeRaw`UPDATE carregador_config SET tarifa_kwh=${tarifa}, updated_at=now() WHERE TRIM(equipamento_id)=${eid}`;
+    } else {
+      await this.prisma.$executeRaw`INSERT INTO carregador_config (id, equipamento_id, tarifa_kwh) VALUES (${this.genId()}, ${eid}, ${tarifa})`;
+    }
+    const antes = atual?.tarifa_kwh != null ? Number(atual.tarifa_kwh).toFixed(2).replace('.', ',') : '—';
+    await this.trilha(eid, `Valor do kWh alterado: R$ ${antes} → R$ ${tarifa.toFixed(2).replace('.', ',')} (vale para recargas iniciadas a partir de agora)`, 'carregador.tarifa', user);
+    return { tarifa_kwh: tarifa };
+  }
 
   private genId(): string { return randomBytes(13).toString('hex'); }
 
@@ -93,7 +151,9 @@ export class CarregadorEletricoService {
   async listarMoradores(user?: ScopedUser, plantaId?: string): Promise<any[]> {
     const plantas = await this.plantasDoUsuario(user);
     const rows = await this.prisma.$queryRaw<any[]>`
-      SELECT id, nome, apartamento, tag_uid, planta_id, unidade_id, ativo,
+      SELECT id, nome, apartamento, tag_uid, planta_id, unidade_id, ativo, email,
+             to_char(validade,'YYYY-MM-DD') AS validade, aviso_validade_em,
+             (SELECT COUNT(*) FROM carregador_sessoes s WHERE s.morador_id = moradores.id AND s.status='ativa')::int > 0 AS em_recarga,
              to_char(updated_at,'YYYY-MM-DD HH24:MI') AS updated_at
       FROM moradores
       WHERE deleted_at IS NULL AND (${plantaId ?? null}::text IS NULL OR planta_id = ${plantaId ?? null})
@@ -106,33 +166,113 @@ export class CarregadorEletricoService {
     if (!nome) throw new BadRequestException('Nome do morador obrigatório');
     const plantaId = body.planta_id ? String(body.planta_id).trim() : null;
     await this.assertPlantaNoEscopo(user, plantaId || '');
+    await this.exigirPapel(user, ['analista', 'proprietario'], 'Só o proprietário ou o analista cadastram moradores.');
     const tag = body.tag_uid ? String(body.tag_uid).trim().toUpperCase() : null;
+    const validade = validadeDe(body.validade);
+    if (validade === undefined) throw new BadRequestException('Validade inválida (use dd/mm/aaaa).');
+    const email = body.email ? String(body.email).trim().toLowerCase() : null;
+    if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new BadRequestException('E-mail do morador inválido.');
+    const hoje = hojeSP();
     const id = body.id ? String(body.id).trim() : this.genId();
-    const existe = body.id
-      ? (await this.prisma.$queryRaw<any[]>`SELECT 1 FROM moradores WHERE id=${id} AND deleted_at IS NULL LIMIT 1`).length > 0
-      : false;
-    if (existe) {
+    const antes = body.id
+      ? (await this.prisma.$queryRaw<any[]>`SELECT id, ativo, to_char(validade,'YYYY-MM-DD') AS validade FROM moradores WHERE id=${id} AND deleted_at IS NULL LIMIT 1`)[0]
+      : undefined;
+    const emRecarga = antes ? await this.emRecarga(id) : false;
+    // Com recarga em andamento não dá para desativar nem deixar vencer: expira ao fim da recarga.
+    if (emRecarga && (body.ativo === false || (validade && validade < hoje))) {
+      throw new BadRequestException('Morador com recarga em andamento: o acesso só pode vencer ou ser desativado depois do fim da recarga.');
+    }
+    if (!antes && validade && validade < hoje) throw new BadRequestException('A validade não pode estar no passado.');
+    const ativo = body.ativo !== false && !(validade && validade < hoje);
+    if (antes) {
       await this.prisma.$executeRaw`
-        UPDATE moradores SET nome=${nome}, apartamento=${body.apartamento ?? null}, tag_uid=${tag},
-          planta_id=${plantaId}, unidade_id=${body.unidade_id ?? null}, ativo=${body.ativo !== false}, updated_at=now()
+        UPDATE moradores SET nome=${nome}, apartamento=${body.apartamento ?? null}, tag_uid=${tag}, email=${email},
+          validade=${validade}::date, aviso_validade_em = CASE WHEN validade IS DISTINCT FROM ${validade}::date THEN NULL ELSE aviso_validade_em END,
+          planta_id=${plantaId}, unidade_id=${body.unidade_id ?? null}, ativo=${ativo}, updated_at=now()
         WHERE id=${id}`;
     } else {
       await this.prisma.$executeRaw`
-        INSERT INTO moradores (id, nome, apartamento, tag_uid, planta_id, unidade_id, ativo)
-        VALUES (${id}, ${nome}, ${body.apartamento ?? null}, ${tag}, ${plantaId}, ${body.unidade_id ?? null}, ${body.ativo !== false})`;
+        INSERT INTO moradores (id, nome, apartamento, tag_uid, planta_id, unidade_id, ativo, email, validade)
+        VALUES (${id}, ${nome}, ${body.apartamento ?? null}, ${tag}, ${plantaId}, ${body.unidade_id ?? null}, ${ativo}, ${email}, ${validade}::date)`;
     }
+    await this.vincularUsuario(id, email);
+    await this.trilhaPlanta(plantaId,
+      `${antes ? 'Morador alterado' : 'Morador autorizado'} · ${body.apartamento ? `${body.apartamento} · ` : ''}${nome} · validade ${validade ? dataBR(validade) : 'sem validade'}${ativo ? '' : ' · inativo'}`,
+      antes ? 'carregador.morador_alterado' : 'carregador.morador_autorizado', user);
     // Re-sincroniza a whitelist de tags dos carregadores da planta.
     if (plantaId) await this.publicarWhitelistPlanta(plantaId);
     return { id };
   }
 
   async removerMorador(id: string, user?: ScopedUser): Promise<{ ok: boolean }> {
-    const r = await this.prisma.$queryRaw<any[]>`SELECT planta_id FROM moradores WHERE id=${id.trim()} LIMIT 1`;
+    const r = await this.prisma.$queryRaw<any[]>`SELECT planta_id, nome, apartamento FROM moradores WHERE id=${id.trim()} AND deleted_at IS NULL LIMIT 1`;
     if (!r.length) return { ok: true };
     await this.assertPlantaNoEscopo(user, r[0].planta_id || '');
+    await this.exigirPapel(user, ['analista', 'proprietario'], 'Só o proprietário ou o analista removem moradores.');
+    if (await this.emRecarga(id.trim())) {
+      throw new BadRequestException('Não é possível remover com recarga em andamento.');
+    }
     await this.prisma.$executeRaw`UPDATE moradores SET deleted_at=now(), ativo=false WHERE id=${id.trim()}`;
+    await this.trilhaPlanta(r[0].planta_id ? String(r[0].planta_id).trim() : null,
+      `Morador removido · ${r[0].apartamento ? `${r[0].apartamento} · ` : ''}${r[0].nome}`, 'carregador.morador_removido', user);
     if (r[0].planta_id) await this.publicarWhitelistPlanta(String(r[0].planta_id).trim());
     return { ok: true };
+  }
+
+  private async emRecarga(moradorId: string): Promise<boolean> {
+    const r = await this.prisma.$queryRaw<any[]>`SELECT 1 FROM carregador_sessoes WHERE morador_id=${moradorId} AND status='ativa' LIMIT 1`;
+    return r.length > 0;
+  }
+
+  /** Liga o morador ao usuário do NexON com o mesmo e-mail (perfil Morador). */
+  private async vincularUsuario(moradorId: string, email: string | null) {
+    await this.prisma.$executeRaw`
+      UPDATE moradores SET usuario_id = (SELECT id FROM usuarios WHERE lower(email) = lower(${email}) AND deleted_at IS NULL LIMIT 1)
+      WHERE id = ${moradorId}`.catch(() => undefined);
+  }
+
+  /**
+   * Validade do acesso (de hora em hora):
+   *  - vence amanhã (ou hoje) e sem aviso → e-mail ao morador e ao proprietário da planta;
+   *  - vencido → desativa e tira a tag da whitelist; com recarga em andamento espera ela acabar.
+   * Tudo na trilha dos carregadores da planta.
+   */
+  @Interval(60 * 60 * 1000)
+  async cuidarValidades(): Promise<void> {
+    if (process.env.CARREGADOR_VALIDADE === 'off') return;
+    const lock = await this.prisma.$queryRaw<Array<{ ok: boolean }>>`SELECT pg_try_advisory_lock(5150002) AS ok`.catch(() => [{ ok: false }]);
+    if (!lock[0]?.ok) return;
+    try {
+      const hoje = hojeSP();
+      const rows = await this.prisma.$queryRaw<any[]>`
+        SELECT m.id, m.nome, m.apartamento, m.email, TRIM(m.planta_id) AS planta_id, to_char(m.validade,'YYYY-MM-DD') AS validade, m.aviso_validade_em,
+               p.nome AS planta_nome, u.email AS dono_email, u.nome AS dono_nome
+        FROM moradores m
+        LEFT JOIN plantas p ON TRIM(p.id) = TRIM(m.planta_id)
+        LEFT JOIN usuarios u ON u.id = p.proprietario_id
+        WHERE m.deleted_at IS NULL AND m.ativo AND m.validade IS NOT NULL AND m.validade <= ${somarDias(hoje, 1)}::date`;
+      for (const m of rows) {
+        const sit = situacaoValidade(m.validade, hoje);
+        if (sit === 'vencido') {
+          if (await this.emRecarga(m.id)) continue; // expira logo após o fim da recarga
+          await this.prisma.$executeRaw`UPDATE moradores SET ativo=false, updated_at=now() WHERE id=${m.id}`;
+          if (m.planta_id) await this.publicarWhitelistPlanta(m.planta_id);
+          await this.trilhaPlanta(m.planta_id, `Acesso vencido e desativado · ${m.apartamento ? `${m.apartamento} · ` : ''}${m.nome} (validade ${dataBR(m.validade)})`, 'carregador.morador_vencido');
+        } else if (sit === 'vence_amanha' && !m.aviso_validade_em) {
+          const assunto = `Acesso ao carregador vence em ${dataBR(m.validade)}`;
+          const corpo = (quem: string) => `<p>Olá, ${quem}.</p><p>O acesso de <b>${m.nome}</b>${m.apartamento ? ` (${m.apartamento})` : ''} ao carregador de veículo elétrico${m.planta_nome ? ` de <b>${m.planta_nome}</b>` : ''} vale até <b>${dataBR(m.validade)}</b>.</p><p>Para renovar, o proprietário altera a validade no NexON (Carregador › Configuração › Moradores autorizados).</p>`;
+          const env: string[] = [];
+          if (m.email && (await this.mail.sendAviso(m.email, assunto, corpo(m.nome)))) env.push('morador');
+          if (m.dono_email && (await this.mail.sendAviso(m.dono_email, assunto, corpo(m.dono_nome ?? 'proprietário')))) env.push('proprietário');
+          await this.prisma.$executeRaw`UPDATE moradores SET aviso_validade_em=now() WHERE id=${m.id}`;
+          await this.trilhaPlanta(m.planta_id, `Aviso de vencimento · ${m.nome} · validade ${dataBR(m.validade)} · ${env.length ? `e-mail para ${env.join(' e ')}` : 'sem e-mail enviado (sem endereço ou SMTP)'}`, 'carregador.aviso_validade');
+        }
+      }
+    } catch (e) {
+      this.logger.warn(`[carregador] validades: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      await this.prisma.$queryRaw`SELECT pg_advisory_unlock(5150002)`.catch(() => undefined);
+    }
   }
 
   // ===== Whitelist de tags → TON (modo automático) =====
@@ -160,20 +300,27 @@ export class CarregadorEletricoService {
     const eid = equipamentoId.trim();
     const plantaId = await this.plantaDoCarregador(eid);
     await this.assertPlantaNoEscopo(user, plantaId || '');
-    const mor = (await this.prisma.$queryRaw<any[]>`SELECT id, nome FROM moradores WHERE id=${moradorId.trim()} AND deleted_at IS NULL LIMIT 1`)[0];
+    const p = await this.papel(user);
+    const alvo = p.papel === 'morador' ? String(p.morador?.id ?? '') : moradorId.trim();
+    const mor = (await this.prisma.$queryRaw<any[]>`
+      SELECT id, nome, ativo, to_char(validade,'YYYY-MM-DD') AS validade FROM moradores WHERE id=${alvo} AND deleted_at IS NULL LIMIT 1`)[0];
     if (!mor) throw new NotFoundException('Morador não encontrado');
+    if (!mor.ativo || situacaoValidade(mor.validade, hojeSP()) === 'vencido') {
+      throw new BadRequestException(`O acesso de ${mor.nome} ao carregador está ${mor.ativo ? `vencido desde ${dataBR(mor.validade)}` : 'desativado'}.`);
+    }
 
     // Já existe sessão ativa? não abre outra.
     const ativa = (await this.prisma.$queryRaw<any[]>`SELECT id FROM carregador_sessoes WHERE TRIM(equipamento_id)=${eid} AND status='ativa' LIMIT 1`)[0];
     if (ativa) throw new BadRequestException('Já existe uma sessão ativa nesta vaga. Encerre a atual (desconecte o carro) antes.');
 
-    const cfg = (await this.prisma.$queryRaw<any[]>`SELECT ultima_leitura_kwh FROM carregador_config WHERE TRIM(equipamento_id)=${eid} LIMIT 1`)[0];
+    const cfg = (await this.prisma.$queryRaw<any[]>`SELECT ultima_leitura_kwh, tarifa_kwh, ultimo_soc FROM carregador_config WHERE TRIM(equipamento_id)=${eid} LIMIT 1`)[0];
     const kwhInicio = cfg?.ultima_leitura_kwh ?? null;
     const id = this.genId();
     const quem = String((user as any)?.name || (user as any)?.email || 'porteiro');
+    // O valor do kWh fica gravado na recarga: mudar a tarifa depois não recalcula recarga fechada.
     await this.prisma.$executeRaw`
-      INSERT INTO carregador_sessoes (id, equipamento_id, planta_id, morador_id, morador_nome, inicio, kwh_inicio, liberado_por, liberado_por_user, status)
-      VALUES (${id}, ${eid}, ${plantaId}, ${mor.id}, ${mor.nome}, now(), ${kwhInicio}, 'porteiro', ${quem}, 'ativa')`;
+      INSERT INTO carregador_sessoes (id, equipamento_id, planta_id, morador_id, morador_nome, inicio, kwh_inicio, liberado_por, liberado_por_user, status, tarifa_kwh, soc_inicio)
+      VALUES (${id}, ${eid}, ${plantaId}, ${mor.id}, ${mor.nome}, now(), ${kwhInicio}, ${p.papel === 'morador' ? 'morador' : 'porteiro'}, ${quem}, 'ativa', ${cfg?.tarifa_kwh ?? null}, ${cfg?.ultimo_soc ?? null})`;
     await this.enviarComando(eid, { carregador: 'habilitar', sessao: id, morador: mor.nome });
     await this.trilha(eid, `Recarga iniciada · ${mor.nome} · por ${quem}`, 'carregador.iniciar', user);
     return { id, morador: mor.nome };
@@ -209,6 +356,11 @@ export class CarregadorEletricoService {
     const ativa = (await this.prisma.$queryRaw<any[]>`
       SELECT id, morador_nome FROM carregador_sessoes WHERE TRIM(equipamento_id)=${eid} AND status='ativa' ORDER BY inicio DESC LIMIT 1`)[0];
     if (!ativa) throw new BadRequestException('Não há recarga em andamento neste carregador.');
+    const p = await this.papel(user);
+    if (user && p.papel === 'morador') {
+      const dono = (await this.prisma.$queryRaw<any[]>`SELECT morador_id FROM carregador_sessoes WHERE id=${ativa.id}`)[0];
+      if (String(dono?.morador_id ?? '').trim() !== String(p.morador?.id ?? '').trim()) throw new ForbiddenException('Só quem está carregando pode parar a recarga.');
+    }
     const cfg = (await this.prisma.$queryRaw<any[]>`SELECT ultima_leitura_kwh FROM carregador_config WHERE TRIM(equipamento_id)=${eid} LIMIT 1`)[0];
     const r = await this.encerrarSessao(eid, cfg?.ultima_leitura_kwh ?? null, 'parado_no_nexon');
     const quem = String((user as any)?.name || (user as any)?.email || 'usuário');
@@ -233,6 +385,8 @@ export class CarregadorEletricoService {
       WHERE id=${ativa.id}`;
     // Corta o fornecimento (garantia — a TON já cortou no hardware).
     await this.enviarComando(eid, { carregador: 'desabilitar', motivo });
+    // Acesso vencido durante a recarga: expira agora.
+    void this.cuidarValidades();
     return { ok: true, sessao: ativa.id };
   }
 
@@ -261,12 +415,18 @@ export class CarregadorEletricoService {
   // ===== Sessões (lista: ativas + histórico) =====
   async listarSessoes(user?: ScopedUser, equipamentoId?: string, limite = 100): Promise<any[]> {
     const plantas = await this.plantasDoUsuario(user);
+    const p = user ? await this.papel(user) : null;
+    const so = p?.papel === 'morador' ? String(p.morador?.id ?? '-') : null;
     const rows = await this.prisma.$queryRaw<any[]>`
-      SELECT s.id, TRIM(s.equipamento_id) AS equipamento_id, s.morador_nome, s.status,
+      SELECT s.id, TRIM(s.equipamento_id) AS equipamento_id, s.morador_nome, s.status, TRIM(s.morador_id) AS morador_id,
              s.kwh_total, s.ocioso_min, s.liberado_por, s.liberado_por_user, s.ocioso_por_nome, s.planta_id,
-             to_char(s.inicio,'DD/MM HH24:MI') AS inicio, to_char(s.fim,'DD/MM HH24:MI') AS fim
+             COALESCE(s.tarifa_kwh, c.tarifa_kwh) AS tarifa_kwh,
+             to_char(s.inicio,'DD/MM HH24:MI') AS inicio, to_char(s.fim,'DD/MM HH24:MI') AS fim,
+             to_char(s.inicio,'YYYY-MM-DD"T"HH24:MI:SS') AS inicio_iso, to_char(s.fim,'YYYY-MM-DD"T"HH24:MI:SS') AS fim_iso
       FROM carregador_sessoes s
+      LEFT JOIN carregador_config c ON TRIM(c.equipamento_id)=TRIM(s.equipamento_id)
       WHERE (${equipamentoId ?? null}::text IS NULL OR TRIM(s.equipamento_id) = ${equipamentoId ?? null})
+        AND (${so}::text IS NULL OR TRIM(s.morador_id) = ${so})
       ORDER BY (s.status='ativa') DESC, s.inicio DESC
       LIMIT ${Math.min(Number(limite) || 100, 500)}`;
     return plantas ? rows.filter((r) => !!r.planta_id && plantas.includes(String(r.planta_id).trim())) : rows;
@@ -278,10 +438,17 @@ export class CarregadorEletricoService {
     await this.assertPlantaNoEscopo(user, plantaId || '');
     const cfg = (await this.prisma.$queryRaw<any[]>`SELECT * FROM carregador_config WHERE TRIM(equipamento_id)=${eid} LIMIT 1`)[0] ?? null;
     const ativa = (await this.prisma.$queryRaw<any[]>`
-      SELECT id, morador_nome, kwh_total, to_char(inicio,'DD/MM HH24:MI') AS inicio, ocioso_inicio, ocioso_por_nome
+      SELECT id, morador_nome, TRIM(morador_id) AS morador_id, kwh_total, tarifa_kwh, soc_inicio,
+             to_char(inicio,'DD/MM HH24:MI') AS inicio, to_char(inicio,'YYYY-MM-DD"T"HH24:MI:SS') AS inicio_iso, ocioso_inicio, ocioso_por_nome
       FROM carregador_sessoes WHERE TRIM(equipamento_id)=${eid} AND status='ativa' LIMIT 1`)[0] ?? null;
-    const ultimas = await this.listarSessoes(undefined, eid, 8);
+    const ultimas = await this.listarSessoes(user, eid, 8);
+    const p = user ? await this.papel(user) : { papel: 'analista' as PapelCarregador, morador: null };
     return {
+      papel: p.papel,
+      meu_morador: p.morador ? { id: String(p.morador.id).trim(), nome: p.morador.nome, apartamento: p.morador.apartamento, validade: p.morador.validade, ativo: p.morador.ativo } : null,
+      soc: cfg?.ultimo_soc != null && cfg?.ultimo_soc_em && Date.now() - new Date(cfg.ultimo_soc_em).getTime() < 30 * 60000 ? Number(cfg.ultimo_soc) : null,
+      capacidade_bateria_kwh: cfg?.capacidade_bateria_kwh ?? null,
+      potencia_kw: cfg?.potencia_kw ?? null,
       estado: cfg?.ultimo_estado ?? 'desconhecido',
       fonte_kwh: cfg?.fonte_kwh ?? 'ton',
       tarifa_kwh: cfg?.tarifa_kwh ?? null,
@@ -293,31 +460,45 @@ export class CarregadorEletricoService {
   }
 
   // ===== Export mensal (morador · kWh · ocioso · R$) =====
-  async exportarMensal(mesAno: string, user?: ScopedUser, plantaId?: string): Promise<{ csv: string; linhas: any[] }> {
-    // mesAno: 'YYYY-MM'. Agrega sessões encerradas do mês por morador.
+  async exportarMensal(mesAno: string, user?: ScopedUser, plantaId?: string): Promise<{ csv: string; linhas: any[]; detalhe: any[] }> {
+    await this.exigirPapel(user, ['analista', 'proprietario'], 'Exportação só para o proprietário ou o analista.');
     const m = /^\d{4}-\d{2}$/.test(mesAno) ? mesAno : null;
     if (!m) throw new BadRequestException("Mês inválido (use 'YYYY-MM')");
     await this.assertPlantaNoEscopo(user, plantaId || '');
     const plantas = await this.plantasDoUsuario(user);
     const inicioMes = `${m}-01`;
-    const rows = await this.prisma.$queryRaw<any[]>`
-      SELECT s.morador_nome AS morador,
-             ROUND(COALESCE(SUM(s.kwh_total),0)::numeric, 3) AS kwh,
-             COALESCE(SUM(s.ocioso_min),0)::int AS ocioso_min,
-             ROUND(COALESCE(SUM(s.kwh_total * COALESCE(c.tarifa_kwh,0)),0)::numeric, 2) AS valor_reais,
-             s.planta_id
+    // Recarga entra no mês em que COMEÇOU; a em andamento fica para depois de encerrada.
+    // Valor = kWh × R$/kWh gravado na recarga (fallback: o do carregador).
+    const det = await this.prisma.$queryRaw<any[]>`
+      SELECT COALESCE(m.apartamento, '') AS apartamento, s.morador_nome AS morador, TRIM(e.nome) AS vaga,
+             to_char(s.inicio,'DD/MM/YYYY HH24:MI') AS inicio, to_char(s.fim,'DD/MM/YYYY HH24:MI') AS fim,
+             GREATEST(EXTRACT(EPOCH FROM (s.fim - s.inicio))/60, 0)::int AS duracao_min,
+             ROUND(COALESCE(s.kwh_total,0)::numeric, 3) AS kwh, COALESCE(s.ocioso_min,0)::int AS ocioso_min,
+             COALESCE(s.tarifa_kwh, c.tarifa_kwh) AS tarifa_kwh,
+             ROUND((COALESCE(s.kwh_total,0) * COALESCE(s.tarifa_kwh, c.tarifa_kwh, 0))::numeric, 2) AS valor_reais,
+             TRIM(s.planta_id) AS planta_id
       FROM carregador_sessoes s
       LEFT JOIN carregador_config c ON TRIM(c.equipamento_id)=TRIM(s.equipamento_id)
+      LEFT JOIN moradores m ON m.id = s.morador_id
+      LEFT JOIN equipamentos e ON TRIM(e.id) = TRIM(s.equipamento_id)
       WHERE s.status='encerrada'
-        AND s.fim >= ${inicioMes}::date
-        AND s.fim < (${inicioMes}::date + interval '1 month')
+        AND s.inicio >= ${inicioMes}::date
+        AND s.inicio < (${inicioMes}::date + interval '1 month')
         AND (${plantaId ?? null}::text IS NULL OR s.planta_id = ${plantaId ?? null})
-      GROUP BY s.morador_nome, s.planta_id
-      ORDER BY s.morador_nome`;
-    const linhas = plantas ? rows.filter((r) => !!r.planta_id && plantas.includes(String(r.planta_id).trim())) : rows;
-    const header = 'Morador;kWh;Ocioso (min);Valor (R$)';
-    const body = linhas.map((r) => `${(r.morador ?? '—')};${r.kwh};${r.ocioso_min};${String(r.valor_reais).replace('.', ',')}`).join('\n');
-    return { csv: `${header}\n${body}\n`, linhas };
+      ORDER BY m.apartamento NULLS LAST, s.morador_nome, s.inicio`;
+    const detalhe = plantas ? det.filter((r) => !!r.planta_id && plantas.includes(String(r.planta_id).trim())) : det;
+    const grupos = new Map<string, any>();
+    for (const r of detalhe) {
+      const k = `${r.apartamento}|${r.morador ?? ''}`;
+      const g = grupos.get(k) ?? { apartamento: r.apartamento || null, morador: r.morador, recargas: 0, kwh: 0, ocioso_min: 0, valor_reais: 0, planta_id: r.planta_id };
+      g.recargas += 1; g.kwh += Number(r.kwh); g.ocioso_min += Number(r.ocioso_min); g.valor_reais += Number(r.valor_reais);
+      grupos.set(k, g);
+    }
+    const linhas = [...grupos.values()].map((g) => ({ ...g, kwh: Math.round(g.kwh * 1000) / 1000, valor_reais: Math.round(g.valor_reais * 100) / 100 }));
+    const br = (v: unknown) => String(v ?? '').replace('.', ',');
+    const header = 'Apartamento;Morador;Recargas;kWh;Ocioso (min);Valor (R$)';
+    const body = linhas.map((r) => `${r.apartamento ?? ''};${r.morador ?? '—'};${r.recargas};${br(r.kwh)};${r.ocioso_min};${br(r.valor_reais)}`).join('\n');
+    return { csv: `${header}\n${body}\n`, linhas, detalhe };
   }
 
   // ===== Comando MQTT ao carregador (habilitar/desabilitar) =====
