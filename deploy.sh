@@ -64,7 +64,8 @@ step "Garantindo logs/"
 mkdir -p logs
 
 step "Reload no PM2 ($PM2_APP)"
-pm2 reload ecosystem.config.cjs --update-env
+# ecosystem.config.cjs saiu do repositório (b42774d): recarrega o processo pelo nome.
+pm2 reload "$PM2_APP" --update-env
 
 # ---- firmware-compiler (subdir) ----
 # Subprojeto Node plano (sem deps npm hoje), porem mantemos pnpm install para
@@ -83,4 +84,4 @@ fi
 step "Estado final"
 pm2 list | grep -E "name|$PM2_APP|aupus-firmware-compiler" || true
 
-printf '\nDeploy concluido. Para rollback: rm -rf dist && mv dist.previous dist && pm2 reload ecosystem.config.cjs\n'
+printf '\nDeploy concluido. Para rollback: rm -rf dist && mv dist.previous dist && pm2 reload $PM2_APP\n'
