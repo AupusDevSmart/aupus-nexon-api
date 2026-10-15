@@ -48,6 +48,10 @@ export class CarregadorEletricoController {
   async liberar(@Param('id') id: string, @Body() body: any, @CurrentUser() user: any) {
     return { data: await this.svc.liberarRecarga(id, String(body?.morador_id || '').trim(), user) };
   }
+  @Post(':id/parar')
+  async parar(@Param('id') id: string, @CurrentUser() user: any) {
+    return { data: await this.svc.pararRecarga(id, user) };
+  }
   @Post(':id/pedir-vaga')
   async pedirVaga(@Param('id') id: string, @Body() body: any, @CurrentUser() user: any) {
     return { data: await this.svc.pedirVaga(id, String(body?.morador_id || '').trim(), user) };
