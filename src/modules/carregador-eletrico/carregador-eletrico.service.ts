@@ -27,6 +27,28 @@ export class CarregadorEletricoService {
   private genId(): string { return randomBytes(13).toString('hex'); }
 
   /**
+   * Trilha de comando (logs_mqtt tipo='comando'): quem liberou, parou ou pediu a vaga.
+   * Aparece em Registros do carregador e na busca de logs. Nunca lança.
+   */
+  private async trilha(equipamentoId: string, mensagem: string, semantico: string, user?: ScopedUser): Promise<void> {
+    try {
+      await this.prisma.logs_mqtt.create({
+        data: {
+          tipo: 'comando',
+          equipamento_id: equipamentoId.trim(),
+          mensagem: mensagem.slice(0, 500),
+          severidade: 'INFO',
+          status: 'enviado',
+          usuario_id: (user as any)?.id ? String((user as any).id).trim() : null,
+          comando_semantico: semantico,
+        },
+      });
+    } catch (e) {
+      this.logger.warn(`[carregador] trilha não gravada: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
+  /**
    * Plantas visíveis (null = admin). Para escopados, registro SEM planta_id não
    * entra em lista nem export: não dá para provar que é dele.
    */
@@ -153,6 +175,7 @@ export class CarregadorEletricoService {
       INSERT INTO carregador_sessoes (id, equipamento_id, planta_id, morador_id, morador_nome, inicio, kwh_inicio, liberado_por, liberado_por_user, status)
       VALUES (${id}, ${eid}, ${plantaId}, ${mor.id}, ${mor.nome}, now(), ${kwhInicio}, 'porteiro', ${quem}, 'ativa')`;
     await this.enviarComando(eid, { carregador: 'habilitar', sessao: id, morador: mor.nome });
+    await this.trilha(eid, `Recarga iniciada · ${mor.nome} · por ${quem}`, 'carregador.iniciar', user);
     return { id, morador: mor.nome };
   }
 
@@ -174,7 +197,23 @@ export class CarregadorEletricoService {
         UPDATE carregador_sessoes SET ocioso_inicio=now(), ocioso_por_morador_id=${mor.id}, ocioso_por_nome=${mor.nome}, updated_at=now()
         WHERE id=${ativa.id}`;
     }
+    await this.trilha(eid, `Vaga pedida · ${mor.nome}`, 'carregador.pedir_vaga', user);
     return { ok: true, ocioso_iniciado: !!(ativa && !ativa.ocioso_inicio) };
+  }
+
+  // ===== Parar recarga pela tela (corta o contator e fecha a sessão) =====
+  async pararRecarga(equipamentoId: string, user?: ScopedUser): Promise<any> {
+    const eid = equipamentoId.trim();
+    const plantaId = await this.plantaDoCarregador(eid);
+    await this.assertPlantaNoEscopo(user, plantaId || '');
+    const ativa = (await this.prisma.$queryRaw<any[]>`
+      SELECT id, morador_nome FROM carregador_sessoes WHERE TRIM(equipamento_id)=${eid} AND status='ativa' ORDER BY inicio DESC LIMIT 1`)[0];
+    if (!ativa) throw new BadRequestException('Não há recarga em andamento neste carregador.');
+    const cfg = (await this.prisma.$queryRaw<any[]>`SELECT ultima_leitura_kwh FROM carregador_config WHERE TRIM(equipamento_id)=${eid} LIMIT 1`)[0];
+    const r = await this.encerrarSessao(eid, cfg?.ultima_leitura_kwh ?? null, 'parado_no_nexon');
+    const quem = String((user as any)?.name || (user as any)?.email || 'usuário');
+    await this.trilha(eid, `Recarga parada · ${ativa.morador_nome ?? '—'} · por ${quem}`, 'carregador.parar', user);
+    return r;
   }
 
   // ===== Encerrar sessão (chamado pela ingestão MQTT ao desconectar) =====
