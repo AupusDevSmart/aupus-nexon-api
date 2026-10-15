@@ -31,9 +31,8 @@ const num = (v: unknown): number | null => (v === null || v === undefined ? null
  * Pivô (apps NexON v2): configuração (bloqueio de ponta, horário reservado,
  * motobomba do sistema conjugado) e programações.
  *
- * PROGRAMAÇÕES SÃO SÓ ARMAZENADAS: o servidor não tem agendador de comando e não
- * liga pivô sozinho. Quem executa é o operador (app/web) ou o CLP. O bloqueio de
- * ponta, esse sim, vale no acionar (EquipamentosCmdService → COMANDO_BLOQUEADO_PONTA).
+ * Quem EXECUTA as programações (e o início agendado, as paradas e a pausa/retomada
+ * da ponta) é o PivoAutomacaoService. O bloqueio de ponta também vale no acionar.
  *
  * Tabelas pivo_config / pivo_programacoes (db/manual-migrations/2026-09-28_5-pivos.sql)
  * ficam fora do schema Prisma. Sem o SQL aplicado: leituras devolvem padrão/vazio
@@ -153,7 +152,7 @@ export class PivosService {
   }
 
   // ==========================================================================
-  // Programações (só armazenadas — ver doc da classe)
+  // Programações (executadas pelo PivoAutomacaoService)
   // ==========================================================================
 
   async listarProgramacoes(equipamentoId: string, user?: ScopedUser) {
