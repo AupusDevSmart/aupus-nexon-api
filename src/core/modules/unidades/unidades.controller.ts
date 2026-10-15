@@ -157,6 +157,8 @@ export class UnidadesController {
     status: HttpStatus.NOT_FOUND,
     description: 'Planta não encontrada',
   })
+  // Unidade nova só em planta do escopo (planta_id do body, checado antes de gravar).
+  @UsePlantaScope({ entity: 'planta', from: 'body', name: 'planta_id' })
   async create(@Body() createDto: CreateUnidadeDto): Promise<UnidadeResponse> {
     this.logger.log(`🏗️  [CREATE UNIDADE] Iniciando criação de unidade`);
     this.logger.log(`📝 [CREATE UNIDADE] Dados:`, JSON.stringify(createDto, null, 2));
@@ -239,6 +241,7 @@ export class UnidadesController {
     status: HttpStatus.NOT_FOUND,
     description: 'Planta não encontrada',
   })
+  @UsePlantaScope({ entity: 'planta', name: 'plantaId' })
   async findByPlanta(
     @Param('plantaId') plantaId: string,
     @CurrentUser() user: any,
@@ -275,6 +278,7 @@ export class UnidadesController {
     status: HttpStatus.NOT_FOUND,
     description: 'Unidade não encontrada',
   })
+  @UsePlantaScope({ entity: 'unidade' })
   async findOne(
     @Param('id') id: string,
     @CurrentUser() user: any,
@@ -310,6 +314,7 @@ export class UnidadesController {
     status: HttpStatus.NOT_FOUND,
     description: 'Unidade não encontrada',
   })
+  @UsePlantaScope({ entity: 'unidade' })
   async getEstatisticas(@Param('id') id: string) {
     this.logger.log(`📊 [ESTATISTICAS UNIDADE] Unidade: ${id}`);
 
@@ -348,6 +353,9 @@ export class UnidadesController {
     status: HttpStatus.BAD_REQUEST,
     description: 'Dados inválidos',
   })
+  // A unidade tem que ser do escopo e, se vier planta_id, a planta de destino
+  // também: mover para planta alheia daria a unidade (e os equipamentos) a outro dono.
+  @UsePlantaScope({ entity: 'unidade' }, { entity: 'planta', from: 'body', name: 'planta_id', optional: true })
   async update(
     @Param('id') id: string,
     @Body() updateDto: UpdateUnidadeDto,
@@ -392,6 +400,7 @@ export class UnidadesController {
     status: HttpStatus.BAD_REQUEST,
     description: 'Não é possível remover unidade com equipamentos vinculados',
   })
+  @UsePlantaScope({ entity: 'unidade' })
   async remove(@Param('id') id: string) {
     this.logger.log(`🗑️  [DELETE UNIDADE] Removendo: ${id}`);
 
@@ -431,6 +440,7 @@ export class UnidadesController {
     status: HttpStatus.NOT_FOUND,
     description: 'Unidade não encontrada',
   })
+  @UsePlantaScope({ entity: 'unidade' })
   async findEquipamentosByUnidade(
     @Param('id') id: string,
     @Query(new ValidationPipe({ transform: true })) query: EquipamentoQueryDto,
@@ -470,6 +480,7 @@ export class UnidadesController {
     status: HttpStatus.NOT_FOUND,
     description: 'Unidade não encontrada',
   })
+  @UsePlantaScope({ entity: 'unidade' })
   async getEstatisticasEquipamentos(@Param('id') id: string) {
     this.logger.log(`📊 [ESTATISTICAS EQUIPAMENTOS UNIDADE] Unidade: ${id}`);
 
