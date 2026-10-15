@@ -10,6 +10,8 @@ export interface PlantaScopeMetadata {
   from?: 'param' | 'body' | 'query';
   /** Nome do campo/param onde o id esta (default: 'id') */
   name?: string;
+  /** Campo ausente/vazio nao e erro (ex.: unidade_id opcional no body). Default: false (404). */
+  optional?: boolean;
 }
 
 /**
@@ -30,5 +32,5 @@ export interface PlantaScopeMetadata {
  *   @UsePlantaScope({ entity: 'planta', from: 'body', name: 'planta_id' })
  *   createUnidade(@Body() body: { planta_id: string; ... }) { ... }
  */
-export const UsePlantaScope = (meta: PlantaScopeMetadata) =>
-  SetMetadata(PLANTA_SCOPE_KEY, meta);
+export const UsePlantaScope = (...metas: PlantaScopeMetadata[]) =>
+  SetMetadata(PLANTA_SCOPE_KEY, metas);

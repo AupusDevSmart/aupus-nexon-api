@@ -1467,12 +1467,14 @@ export class EquipamentosService {
     });
   }
 
-  async findEquipamentosUC() {
+  async findEquipamentosUC(user?: ScopedUser) {
+    const where: any = { classificacao: 'UC', deleted_at: null };
+    const scope = await this.scopeService.getScope(user);
+    if (this.scopeService.isScoped(scope)) {
+      where.OR = [{ planta_id: { in: scope } }, { unidade: { planta_id: { in: scope } } }];
+    }
     return await this.prisma.equipamentos.findMany({
-      where: {
-        classificacao: 'UC',
-        deleted_at: null,
-      },
+      where,
       select: {
         id: true,
         nome: true,

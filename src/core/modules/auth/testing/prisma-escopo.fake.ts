@@ -17,6 +17,14 @@ export const FIXTURE = {
     { id: 'E2', nome: 'Medidor Dois', planta_id: 'P2', unidade_id: 'U2', deleted_at: null },
   ],
   planta_operadores: [{ usuario_id: 'op1', planta_id: 'P1' }],
+  anexos_equipamentos: [
+    { id: 'AX1', equipamento_id: 'E1', nome_original: 'manual-um.pdf', deleted_at: null },
+    { id: 'AX2', equipamento_id: 'E2', nome_original: 'manual.pdf', deleted_at: null },
+  ],
+  anexos_unidades: [
+    { id: 'AU1', unidade_id: 'U1', nome_original: 'laudo.pdf', deleted_at: null },
+    { id: 'AU2', unidade_id: 'U2', nome_original: 'laudo-dois.pdf', deleted_at: null },
+  ],
 };
 
 const casa = (row: any, where: any = {}): boolean =>
@@ -49,6 +57,12 @@ export function prismaEscopoFake() {
         const e = FIXTURE.equipamentos.find((x) => casa(x, where));
         return e ? comUnidade(e) : null;
       }),
+    },
+    anexos_equipamentos: {
+      findFirst: jest.fn(async ({ where }: any) => FIXTURE.anexos_equipamentos.find((a) => casa(a, where)) ?? null),
+    },
+    anexos_unidades: {
+      findFirst: jest.fn(async ({ where }: any) => FIXTURE.anexos_unidades.find((a) => casa(a, where)) ?? null),
     },
     $executeRaw: jest.fn(async () => 1),
     $queryRaw: jest.fn(async () => []),

@@ -15,7 +15,7 @@ const DONO1 = { id: 'dono1', nome: 'Dono Um', role: 'proprietario' };
 const OP1 = { id: 'op1', nome: 'Operador Um', role: 'operador' };
 const CATIVO = { id: 'ninguem', nome: 'Sem Vínculo', role: 'cativo' };
 const ARQUIVO = path.join(os.tmpdir(), `nexon-anexo-teste-${process.pid}.pdf`);
-const CLIENTE = { plataforma: 'Web', aparelho: null, dispositivo: 'Chrome no macOS', ip: '10.0.0.9', userAgent: 'Mozilla/5.0' };
+const CLIENTE = { plataforma: 'Web', aparelho: null, dispositivo: 'Chrome no macOS', ip: '10.0.0.9', ipSocket: '127.0.0.1', xff: '6.6.6.6, 10.0.0.9', userAgent: 'Mozilla/5.0' };
 
 describe('Exportações: escopo por planta + trilha', () => {
   beforeAll(() => fs.writeFileSync(ARQUIVO, 'pdf'));
@@ -144,8 +144,15 @@ describe('Exportações: escopo por planta + trilha', () => {
 
     it('operador recebe 403 no anexo de outra planta', async () => {
       await expect(equip.downloadAnexo('AX2', res, OP1, CLIENTE)).rejects.toBeInstanceOf(ForbiddenException);
+      // escopo checado ANTES de ler metadados/arquivo do anexo
+      expect(anexosEquip.buscarAnexo).not.toHaveBeenCalled();
       expect(anexosEquip.obterCaminhoArquivo).not.toHaveBeenCalled();
-      expect(ultimaTrilha().acao).toBe('exportacao_negada');
+      const t = ultimaTrilha();
+      expect(t.acao).toBe('exportacao_negada');
+      // dono resolvido pelo anexo no banco, para a trilha também
+      expect(t.plantaIds).toEqual(['P2']);
+      expect(t.detalhes).toMatchObject({ anexo_id: 'AX2', arquivo: 'manual.pdf', equipamentos: [{ id: 'E2' }] });
+      expect(t.detalhes).toMatchObject({ ip: '10.0.0.9', ip_socket: '127.0.0.1', xff: '6.6.6.6, 10.0.0.9' });
     });
 
     it('listar, enviar e remover anexo de outra planta dão 403', async () => {

@@ -26,7 +26,9 @@ export type ScopedEntityType =
   | 'solicitacao_servico'
   | 'programacao_os'
   | 'regra_log_mqtt'
-  | 'log_mqtt';
+  | 'log_mqtt'
+  | 'anexo_equipamento'
+  | 'anexo_unidade';
 
 /**
  * Papeis que veem TODAS as plantas (escopo nulo). Lista fechada de proposito:
@@ -353,6 +355,23 @@ export class PermissionScopeService {
           row?.equipamento?.unidade?.planta_id?.trim() ||
           null
         );
+      }
+      case 'anexo_equipamento': {
+        // Dono resolvido pelo anexo no banco, nunca por id vindo do cliente.
+        const row = await this.prisma.anexos_equipamentos.findFirst({
+          where: { id, deleted_at: null },
+          select: { equipamento_id: true },
+        });
+        if (!row?.equipamento_id) return null;
+        return this.resolveEntityPlantaId('equipamento', row.equipamento_id.trim());
+      }
+      case 'anexo_unidade': {
+        const row = await this.prisma.anexos_unidades.findFirst({
+          where: { id, deleted_at: null },
+          select: { unidade_id: true },
+        });
+        if (!row?.unidade_id) return null;
+        return this.resolveEntityPlantaId('unidade', row.unidade_id.trim());
       }
       case 'log_mqtt': {
         // Resolvida via equipamento. equipamentos.planta_id e nullable;
