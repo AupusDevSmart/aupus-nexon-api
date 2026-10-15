@@ -409,6 +409,7 @@ export class GatewayDashboardService {
     periodo: string,
     inicio?: string,
     fim?: string,
+    intervalo?: string,
   ) {
     const id = equipamentoId.trim();
     await this.assertEquipamentoExiste(id);
@@ -419,11 +420,22 @@ export class GatewayDashboardService {
       );
     }
 
-    const { dataInicio, dataFim, intervaloMin } = this.resolverJanela(
-      periodo as Periodo,
-      inicio,
-      fim,
-    );
+    const janela = this.resolverJanela(periodo as Periodo, inicio, fim);
+    const { dataInicio, dataFim } = janela;
+    // intervalo=15 força blocos de 15 min (como a concessionária fatura) em janelas
+    // de até 62 dias: base da demanda máxima do mês e da energia por posto (NEXON-5).
+    let intervaloMin = janela.intervaloMin;
+    if (intervalo != null && intervalo !== '') {
+      const pedido = Number(intervalo);
+      if (![15, 60].includes(pedido)) {
+        throw new BadRequestException('intervalo invalido. Use: 15 ou 60');
+      }
+      const dias = (dataFim.getTime() - dataInicio.getTime()) / 86_400_000;
+      if (pedido === 15 && dias > 62) {
+        throw new BadRequestException('intervalo=15 aceita janelas de ate 62 dias');
+      }
+      intervaloMin = pedido;
+    }
 
     const rows: any[] = await this.prisma.$queryRaw`
       SELECT

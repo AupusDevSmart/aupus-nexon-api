@@ -166,10 +166,11 @@ export class EquipamentosDadosController {
     @Query('inicio') inicio?: string,
     @Query('fim') fim?: string,
     @CurrentUser() user?: any,
+    @Query('intervalo') intervalo?: string,
   ) {
     this.logger.log(`GET /equipamentos-dados/${id}/gateway/tendencia?periodo=${periodo}`);
     await this.assertEqInScope(id, user);
-    return this.gatewayDashboardService.getTendencia(id, periodo, inicio, fim);
+    return this.gatewayDashboardService.getTendencia(id, periodo, inicio, fim, intervalo);
   }
 
   // ============================================================================
