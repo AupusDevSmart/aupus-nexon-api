@@ -704,6 +704,12 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       const eid = equipamentoId.trim();
       const kwh = d.kwh ?? d.energia ?? d.kwh_total ?? null;
       const estado = d.estado ?? null;
+      // Bateria do carro (%), quando o carregador informa (OCPP SoC / campo soc).
+      const soc = Number(d.soc ?? d.SoC ?? d.bateria ?? d.state_of_charge);
+      if (Number.isFinite(soc) && soc >= 0 && soc <= 100) {
+        await this.prisma.$executeRaw`UPDATE carregador_config SET ultimo_soc=${soc}, ultimo_soc_em=now() WHERE TRIM(equipamento_id)=${eid}`.catch(() => undefined);
+        await this.prisma.$executeRaw`UPDATE carregador_sessoes SET soc_inicio=COALESCE(soc_inicio, ${soc}) WHERE TRIM(equipamento_id)=${eid} AND status='ativa'`.catch(() => undefined);
+      }
       const desconectado =
         d.conectado === false ||
         d.evento === 'desconectado' ||
