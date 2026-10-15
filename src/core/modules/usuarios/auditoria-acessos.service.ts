@@ -5,7 +5,7 @@ import { novoId26 } from '../../common/cliente-info';
 export interface RegistroAcesso {
   autorId: string | null;
   alvoUsuarioId: string | null;
-  acao: 'convite' | 'convite_reenviado' | 'permissoes';
+  acao: 'convite' | 'convite_reenviado' | 'permissoes' | 'exportacao' | 'exportacao_negada';
   mensagem: string;
   detalhes?: Record<string, unknown>;
   plantaIds?: string[];
@@ -15,7 +15,8 @@ export interface RegistroAcesso {
 
 /**
  * Trilha de ACESSO (auditoria_acessos) — aparece em GET /logs-mqtt?tipo=acesso
- * ("Permissões alteradas", com autor e horário). Falha ao gravar só loga: a
+ * ("Permissões alteradas", com autor e horário). Também guarda as exportações de
+ * dados (acao 'exportacao' / 'exportacao_negada', ver ExportacaoAuditoriaService). Falha ao gravar só loga: a
  * mudança de permissão já foi feita e não deve voltar atrás por causa da trilha.
  */
 @Injectable()

@@ -26,6 +26,10 @@ export class CarregadorEletricoService {
 
   private genId(): string { return randomBytes(13).toString('hex'); }
 
+  /**
+   * Plantas visíveis (null = admin). Para escopados, registro SEM planta_id não
+   * entra em lista nem export: não dá para provar que é dele.
+   */
   private async plantasDoUsuario(user?: ScopedUser): Promise<string[] | null> {
     if (!user) return null;
     const escopo = await this.scope.getScope(user);
@@ -60,7 +64,7 @@ export class CarregadorEletricoService {
       WHERE e.deleted_at IS NULL
         AND (e.tipo_equipamento ILIKE '%carregador%' OR te.codigo ILIKE '%CARREGADOR%' OR te.nome ILIKE '%carregador%')
       ORDER BY e.nome`;
-    return plantas ? rows.filter((r) => !r.planta_id || plantas.includes(String(r.planta_id).trim())) : rows;
+    return plantas ? rows.filter((r) => !!r.planta_id && plantas.includes(String(r.planta_id).trim())) : rows;
   }
 
   // ===== Moradores =====
@@ -72,7 +76,7 @@ export class CarregadorEletricoService {
       FROM moradores
       WHERE deleted_at IS NULL AND (${plantaId ?? null}::text IS NULL OR planta_id = ${plantaId ?? null})
       ORDER BY ativo DESC, nome`;
-    return plantas ? rows.filter((r) => !r.planta_id || plantas.includes(String(r.planta_id).trim())) : rows;
+    return plantas ? rows.filter((r) => !!r.planta_id && plantas.includes(String(r.planta_id).trim())) : rows;
   }
 
   async salvarMorador(body: any, user?: ScopedUser): Promise<any> {
@@ -226,7 +230,7 @@ export class CarregadorEletricoService {
       WHERE (${equipamentoId ?? null}::text IS NULL OR TRIM(s.equipamento_id) = ${equipamentoId ?? null})
       ORDER BY (s.status='ativa') DESC, s.inicio DESC
       LIMIT ${Math.min(Number(limite) || 100, 500)}`;
-    return plantas ? rows.filter((r) => !r.planta_id || plantas.includes(String(r.planta_id).trim())) : rows;
+    return plantas ? rows.filter((r) => !!r.planta_id && plantas.includes(String(r.planta_id).trim())) : rows;
   }
 
   async getEstado(equipamentoId: string, user?: ScopedUser): Promise<any> {
@@ -271,7 +275,7 @@ export class CarregadorEletricoService {
         AND (${plantaId ?? null}::text IS NULL OR s.planta_id = ${plantaId ?? null})
       GROUP BY s.morador_nome, s.planta_id
       ORDER BY s.morador_nome`;
-    const linhas = plantas ? rows.filter((r) => !r.planta_id || plantas.includes(String(r.planta_id).trim())) : rows;
+    const linhas = plantas ? rows.filter((r) => !!r.planta_id && plantas.includes(String(r.planta_id).trim())) : rows;
     const header = 'Morador;kWh;Ocioso (min);Valor (R$)';
     const body = linhas.map((r) => `${(r.morador ?? '—')};${r.kwh};${r.ocioso_min};${String(r.valor_reais).replace('.', ',')}`).join('\n');
     return { csv: `${header}\n${body}\n`, linhas };

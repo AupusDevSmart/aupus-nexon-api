@@ -1,5 +1,6 @@
 import { Body, Controller, Delete, ForbiddenException, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
-import { JwtAuthGuard, CurrentUser } from '@/core';
+import { JwtAuthGuard, CurrentUser, Cliente, ExportacaoAuditoriaService } from '@/core';
+import type { ClienteInfo } from '@/core';
 import { CarregadorEletricoService } from './carregador-eletrico.service';
 
 /**
@@ -11,7 +12,10 @@ import { CarregadorEletricoService } from './carregador-eletrico.service';
 @Controller('carregador-eletrico')
 @UseGuards(JwtAuthGuard)
 export class CarregadorEletricoController {
-  constructor(private readonly svc: CarregadorEletricoService) {}
+  constructor(
+    private readonly svc: CarregadorEletricoService,
+    private readonly exportacoes: ExportacaoAuditoriaService,
+  ) {}
 
   private assertAdmin(user: any) {
     const role = String(user?.role || '').toLowerCase();
@@ -61,7 +65,22 @@ export class CarregadorEletricoController {
 
   // ---- Export mensal ----
   @Get('export')
-  async exportar(@Query('mes') mes: string, @Query('plantaId') plantaId: string, @CurrentUser() user: any) {
-    return { data: await this.svc.exportarMensal(mes, user, plantaId || undefined) };
+  async exportar(
+    @Query('mes') mes: string,
+    @Query('plantaId') plantaId: string,
+    @CurrentUser() user: any,
+    @Cliente() cliente?: ClienteInfo,
+  ) {
+    const data = await this.exportacoes.executar(
+      { user, cliente, tipo: 'carregador', plantaIds: plantaId ? [plantaId] : [], periodo: { mes }, formato: 'csv' },
+      () => this.svc.exportarMensal(mes, user, plantaId || undefined),
+      {
+        resumo: (r) => ({
+          linhas: r.linhas.length,
+          plantaIds: plantaId ? [plantaId] : r.linhas.map((l: any) => l.planta_id),
+        }),
+      },
+    );
+    return { data };
   }
 }

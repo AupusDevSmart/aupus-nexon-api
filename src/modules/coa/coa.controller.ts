@@ -2,7 +2,8 @@ import { Controller, Get, Param, Query, UseGuards, HttpCode, HttpStatus, Logger 
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import { CoaService, DashboardData } from './coa.service';
 import { JwtAuthGuard } from '@/core';
-import { UserProprietarioId, CurrentUser } from '@/core';
+import { UserProprietarioId, CurrentUser, Cliente, ExportacaoAuditoriaService } from '@/core';
+import type { ClienteInfo } from '@/core';
 
 @ApiTags('COA - Centro de Operações')
 @Controller('coa')
@@ -10,7 +11,10 @@ import { UserProprietarioId, CurrentUser } from '@/core';
 export class CoaController {
   private readonly logger = new Logger(CoaController.name);
 
-  constructor(private readonly coaService: CoaService) {}
+  constructor(
+    private readonly coaService: CoaService,
+    private readonly exportacoes: ExportacaoAuditoriaService,
+  ) {}
 
   @Get('dashboard')
   @HttpCode(HttpStatus.OK)
@@ -76,7 +80,13 @@ export class CoaController {
     @Query('periodo') periodo?: string,
     @Query('data') data?: string,
     @CurrentUser() user?: any,
+    @Cliente() cliente?: ClienteInfo,
   ) {
-    return this.coaService.historicoGeracao(unidadeId, periodo, data, user);
+    // Alimenta o gráfico (recarrega a cada 5 min) e o CSV montado no front: audita só a recusa.
+    return this.exportacoes.executar(
+      { user, cliente, tipo: 'geracao', unidadeIds: [unidadeId], periodo: { periodo: periodo ?? null, data: data ?? null } },
+      () => this.coaService.historicoGeracao(unidadeId, periodo, data, user),
+      { registrarSucesso: false },
+    );
   }
 }

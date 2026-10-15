@@ -1,6 +1,7 @@
 import { Body, Controller, ForbiddenException, Get, Post, Put, Query, Res, UseGuards } from '@nestjs/common';
 import type { Response } from 'express';
-import { JwtAuthGuard, CurrentUser } from '@/core';
+import { JwtAuthGuard, CurrentUser, Cliente, ExportacaoAuditoriaService } from '@/core';
+import type { ClienteInfo } from '@/core';
 import { RelatoriosService } from './relatorios.service';
 import { BoletimSemanalService } from './boletim-semanal.service';
 import { BoletimSemanalEnvioService, BoletimSemanalConfig } from './boletim-semanal-envio.service';
@@ -12,6 +13,7 @@ export class RelatoriosController {
     private readonly service: RelatoriosService,
     private readonly boletim: BoletimSemanalService,
     private readonly envio: BoletimSemanalEnvioService,
+    private readonly exportacoes: ExportacaoAuditoriaService,
   ) {}
 
   private assertAdmin(user: any) {
@@ -48,8 +50,12 @@ export class RelatoriosController {
     @Query('unidadeId') unidadeId: string,
     @Query('data') data: string,
     @CurrentUser() user: any,
+    @Cliente() cliente?: ClienteInfo,
   ) {
-    return this.boletim.montarPayload(unidadeId, data, user);
+    return this.exportacoes.executar(
+      { user, cliente, tipo: 'boletim_semanal', unidadeIds: [unidadeId], periodo: { data: data || null }, formato: 'json' },
+      () => this.boletim.montarPayload(unidadeId, data, user),
+    );
   }
 
   /**
@@ -63,9 +69,21 @@ export class RelatoriosController {
     @Query('data') data: string,
     @CurrentUser() user: any,
     @Res() res: Response,
+    @Cliente() cliente?: ClienteInfo,
   ) {
+    // Com unidade = dado real → auditado; sem unidade = exemplo, não audita.
     const dados = unidadeId
-      ? await this.boletim.montarPayload(unidadeId, data, user)
+      ? await this.exportacoes.executar(
+          {
+            user,
+            cliente,
+            tipo: 'boletim_semanal',
+            unidadeIds: [unidadeId],
+            periodo: { data: data || null },
+            formato: formato === 'pdf' ? 'pdf' : 'html',
+          },
+          () => this.boletim.montarPayload(unidadeId, data, user),
+        )
       : await this.service.dadosExemplo();
     if (formato === 'pdf') {
       const pdf = await this.service.gerarPdf(dados);

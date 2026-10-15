@@ -1,6 +1,7 @@
 import { Body, Controller, ForbiddenException, Get, Post, Put, Query, Res, UseGuards } from '@nestjs/common';
 import type { Response } from 'express';
-import { JwtAuthGuard, CurrentUser } from '@/core';
+import { JwtAuthGuard, CurrentUser, Cliente, ExportacaoAuditoriaService } from '@/core';
+import type { ClienteInfo } from '@/core';
 import { BoletimConsumoService } from './boletim-consumo.service';
 import { RelatoriosService } from './relatorios.service';
 import { BoletimConsumoEnvioService, BoletimConsumoConfig } from './boletim-consumo-envio.service';
@@ -18,6 +19,7 @@ export class RelatoriosConsumoController {
     private readonly consumo: BoletimConsumoService,
     private readonly relatorios: RelatoriosService,
     private readonly envio: BoletimConsumoEnvioService,
+    private readonly exportacoes: ExportacaoAuditoriaService,
   ) {}
 
   private assertAdmin(user: any) {
@@ -60,8 +62,13 @@ export class RelatoriosConsumoController {
     @Query('unidadeId') unidadeId: string,
     @Query('data') data: string,
     @CurrentUser() user: any,
+    @Cliente() cliente?: ClienteInfo,
   ) {
-    return { data: await this.consumo.montarPayload(unidadeId, data || undefined, user) };
+    const payload = await this.exportacoes.executar(
+      { user, cliente, tipo: 'consumo', unidadeIds: [unidadeId], periodo: { data: data || null }, formato: 'json' },
+      () => this.consumo.montarPayload(unidadeId, data || undefined, user),
+    );
+    return { data: payload };
   }
 
   /** PDF (ou HTML) do relatório de consumo da unidade — mesma via do de geração. */
@@ -72,8 +79,19 @@ export class RelatoriosConsumoController {
     @Query('formato') formato: string,
     @CurrentUser() user: any,
     @Res() res: Response,
+    @Cliente() cliente?: ClienteInfo,
   ) {
-    const dados = await this.consumo.montarPayload(unidadeId, data || undefined, user);
+    const dados = await this.exportacoes.executar(
+      {
+        user,
+        cliente,
+        tipo: 'consumo',
+        unidadeIds: [unidadeId],
+        periodo: { data: data || null },
+        formato: formato === 'pdf' ? 'pdf' : 'html',
+      },
+      () => this.consumo.montarPayload(unidadeId, data || undefined, user),
+    );
     if (formato === 'pdf') {
       const pdf = await this.relatorios.gerarPdfConsumo(dados);
       res.setHeader('Content-Type', 'application/pdf');

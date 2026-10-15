@@ -41,6 +41,9 @@ import { EquipamentoQueryDto } from '../equipamentos/dto/equipamento-query.dto';
 import { UserProprietarioId } from '../auth/decorators/user-proprietario.decorator';
 import { Permissions } from '../auth/decorators/permissions.decorator';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { PermissionScopeService } from '../auth/permission-scope.service';
+import { ExportacaoAuditoriaService } from '../usuarios/exportacao-auditoria.service';
+import { Cliente, type ClienteInfo } from '../../common/cliente-info';
 
 @ApiTags('unidades')
 @Controller('unidades')
@@ -51,6 +54,8 @@ export class UnidadesController {
     private readonly unidadesService: UnidadesService,
     private readonly equipamentosService: EquipamentosService,
     private readonly anexosService: AnexosUnidadesService,
+    private readonly scope: PermissionScopeService,
+    private readonly exportacoes: ExportacaoAuditoriaService,
   ) {}
 
   // ATENCAO a ordem: estas duas rotas precisam vir ANTES de @Get(':id') e
@@ -61,9 +66,28 @@ export class UnidadesController {
   @Permissions('unidades.view')
   @ApiOperation({ summary: 'Baixar anexo da instalação' })
   @ApiParam({ name: 'anexoId' })
-  async baixarAnexo(@Param('anexoId') anexoId: string, @Res() res: Response) {
+  async baixarAnexo(
+    @Param('anexoId') anexoId: string,
+    @Res() res: Response,
+    @CurrentUser() user?: any,
+    @Cliente() cliente?: ClienteInfo,
+  ) {
     const anexo = await this.anexosService.buscarAnexo(anexoId);
-    const caminho = await this.anexosService.obterCaminhoArquivo(anexoId);
+    const caminho = await this.exportacoes.executar(
+      {
+        user,
+        cliente,
+        tipo: 'anexo_unidade',
+        unidadeIds: [anexo.unidade_id],
+        formato: anexo.mime_type,
+        linhas: 1,
+        extra: { anexo_id: anexo.id?.trim(), arquivo: anexo.nome_original, tamanho: Number(anexo.tamanho) },
+      },
+      async () => {
+        await this.scope.assertEntityInScope('unidade', anexo.unidade_id, user);
+        return this.anexosService.obterCaminhoArquivo(anexoId);
+      },
+    );
 
     res.setHeader('Content-Type', anexo.mime_type);
     res.setHeader(
@@ -77,7 +101,9 @@ export class UnidadesController {
   @Permissions('unidades.manage')
   @ApiOperation({ summary: 'Remover anexo da instalação' })
   @ApiParam({ name: 'anexoId' })
-  removerAnexo(@Param('anexoId') anexoId: string) {
+  async removerAnexo(@Param('anexoId') anexoId: string, @CurrentUser() user?: any) {
+    const anexo = await this.anexosService.buscarAnexo(anexoId);
+    await this.scope.assertEntityInScope('unidade', anexo.unidade_id, user);
     return this.anexosService.removerAnexo(anexoId);
   }
 
@@ -87,11 +113,13 @@ export class UnidadesController {
   @ApiOperation({ summary: 'Enviar anexo da instalação (contrato, diagrama, laudo)' })
   @ApiConsumes('multipart/form-data')
   @ApiResponse({ status: 201, description: 'Anexo enviado' })
-  uploadAnexo(
+  async uploadAnexo(
     @Param('id') id: string,
     @UploadedFile() file: any,
     @Body('descricao') descricao?: string,
+    @CurrentUser() user?: any,
   ) {
+    await this.scope.assertEntityInScope('unidade', id, user);
     return this.anexosService.uploadAnexo(id, file, descricao);
   }
 
@@ -99,8 +127,15 @@ export class UnidadesController {
   @Permissions('unidades.view')
   @ApiOperation({ summary: 'Listar anexos da instalação' })
   @ApiParam({ name: 'id' })
-  listarAnexos(@Param('id') id: string) {
-    return this.anexosService.listarAnexos(id);
+  listarAnexos(@Param('id') id: string, @CurrentUser() user?: any, @Cliente() cliente?: ClienteInfo) {
+    return this.exportacoes.executar(
+      { user, cliente, tipo: 'lista_anexos', unidadeIds: [id] },
+      async () => {
+        await this.scope.assertEntityInScope('unidade', id, user);
+        return this.anexosService.listarAnexos(id);
+      },
+      { registrarSucesso: false },
+    );
   }
 
   @Post()

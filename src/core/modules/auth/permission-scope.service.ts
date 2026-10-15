@@ -29,17 +29,35 @@ export type ScopedEntityType =
   | 'log_mqtt';
 
 /**
+ * Papeis que veem TODAS as plantas (escopo nulo). Lista fechada de proposito:
+ * qualquer papel fora dela cai no escopo por vinculo (default-deny).
+ */
+export const PAPEIS_SEM_ESCOPO: readonly string[] = ['super_admin', 'admin', 'gerente', 'analista'];
+
+/** Normaliza o nome do papel: minusculo, sem espacos, e corrige o typo historico 'propietario'. */
+export function normalizarPapel(role?: string | null): string {
+  const r = String(role ?? '').trim().toLowerCase();
+  return r === 'propietario' ? 'proprietario' : r;
+}
+
+/** true quando o papel e administrativo (exporta/ve tudo). */
+export function isPapelSemEscopo(role?: string | null): boolean {
+  return PAPEIS_SEM_ESCOPO.includes(normalizarPapel(role));
+}
+
+/**
  * Resolve o conjunto de plantas que um usuario pode acessar, com base no seu role,
  * e fornece helpers para aplicar/validar o escopo em queries e endpoints.
  *
  * Convencao do escopo:
- * - `null`     -> SEM filtro (admin/gerente/analista/super_admin vem tudo)
+ * - `null`     -> SEM filtro (so PAPEIS_SEM_ESCOPO, ou chamada interna sem usuario)
  * - `string[]` -> lista de planta_ids permitidos (array vazio = nao ve nada)
  *
- * Mapeamento por role:
+ * Mapeamento por role (default-deny):
+ * - super_admin/admin/gerente/analista -> null (ve tudo)
  * - operador     -> plantas vinculadas via planta_operadores
- * - proprietario -> plantas onde plantas.proprietario_id = userId
- * - demais       -> null (sem filtro)
+ * - proprietario -> plantas onde plantas.proprietario_id = userId ('propietario' idem)
+ * - qualquer outro papel (ou sem papel) -> uniao dos dois vinculos acima; sem vinculo = []
  *
  * Convencao de resposta a recurso fora do escopo: ForbiddenException (consistente
  * em todos os modulos; ver docs/RBAC-SCOPE.md).
@@ -56,23 +74,32 @@ export class PermissionScopeService {
     const id = userId?.trim();
     if (!id) return null;
 
-    if (roleName === 'operador') {
-      const rows = await this.prisma.planta_operadores.findMany({
-        where: { usuario_id: id },
-        select: { planta_id: true },
-      });
-      return rows.map((r) => r.planta_id.trim());
-    }
+    const papel = normalizarPapel(roleName);
+    if (PAPEIS_SEM_ESCOPO.includes(papel)) return null;
 
-    if (roleName === 'proprietario') {
-      const rows = await this.prisma.plantas.findMany({
-        where: { proprietario_id: id, deleted_at: null },
-        select: { id: true },
-      });
-      return rows.map((r) => r.id.trim());
-    }
+    const comoOperador = async () =>
+      (
+        await this.prisma.planta_operadores.findMany({
+          where: { usuario_id: id },
+          select: { planta_id: true },
+        })
+      ).map((r) => r.planta_id.trim());
 
-    return null;
+    const comoProprietario = async () =>
+      (
+        await this.prisma.plantas.findMany({
+          where: { proprietario_id: id, deleted_at: null },
+          select: { id: true },
+        })
+      ).map((r) => r.id.trim());
+
+    if (papel === 'operador') return comoOperador();
+    if (papel === 'proprietario') return comoProprietario();
+
+    // Papel desconhecido (cativo, associado, consultor, sem papel...): so o que
+    // estiver vinculado a ele. Sem vinculo, escopo vazio — nunca "ve tudo".
+    const [op, prop] = await Promise.all([comoOperador(), comoProprietario()]);
+    return Array.from(new Set([...op, ...prop]));
   }
 
   /**

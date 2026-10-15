@@ -84,7 +84,7 @@ export class BombaCombustivelService {
       WHERE (${bombaId ?? null}::text IS NULL OR bomba_id = ${bombaId ?? null}
              OR (bomba_id IS NULL AND planta_id = ${plantaId ?? null}))
       ORDER BY ativo DESC, maquina_nome NULLS LAST, uid`;
-    return plantas ? rows.filter((r) => !r.planta_id || plantas.includes(String(r.planta_id).trim())) : rows;
+    return plantas ? rows.filter((r) => !!r.planta_id && plantas.includes(String(r.planta_id).trim())) : rows;
   }
 
   async salvarRfid(body: any, user?: ScopedUser): Promise<any> {
@@ -139,7 +139,7 @@ export class BombaCombustivelService {
       WHERE (${bombaId ?? null}::text IS NULL OR bomba_id = ${bombaId ?? null}
              OR (bomba_id IS NULL AND planta_id = ${plantaId ?? null}))
       ORDER BY ativo DESC, nome NULLS LAST, matricula`;
-    return plantas ? rows.filter((r) => !r.planta_id || plantas.includes(String(r.planta_id).trim())) : rows;
+    return plantas ? rows.filter((r) => !!r.planta_id && plantas.includes(String(r.planta_id).trim())) : rows;
   }
   async salvarOperador(body: any, user?: ScopedUser): Promise<any> {
     const matricula = String(body.matricula || '').trim();
@@ -269,7 +269,7 @@ export class BombaCombustivelService {
       FROM abastecimentos a
       WHERE (${bombaId ?? null}::text IS NULL OR TRIM(a.equipamento_id) = ${bombaId ?? null})
       ORDER BY a.created_at DESC LIMIT ${Math.min(Number(limite) || 100, 1000)}`;
-    return plantas ? rows.filter((r) => !r.planta_id || plantas.includes(String(r.planta_id).trim())) : rows;
+    return plantas ? rows.filter((r) => !!r.planta_id && plantas.includes(String(r.planta_id).trim())) : rows;
   }
 
   async listarEventos(user: ScopedUser | undefined, bombaId: string, limite = 50): Promise<any[]> {
