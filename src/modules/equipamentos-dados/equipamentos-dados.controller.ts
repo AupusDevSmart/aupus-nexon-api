@@ -11,6 +11,7 @@ import { CalculoCustosService } from './services/calculo-custos.service';
 import { ConfiguracaoCustoService } from './services/configuracao-custo.service';
 import { GatewayGraficosService } from './services/gateway-graficos.service';
 import { GatewayDashboardService } from './services/gateway-dashboard.service';
+import { MedidorResumoService } from './services/medidor-resumo.service';
 import { EquipamentoDadosQueryDto } from './dto/equipamento-dados-query.dto';
 import { CustosEnergiaQueryDto, PeriodoTipo } from './dto/custos-energia-query.dto';
 import { UpsertConfiguracaoCustoDto } from './dto/configuracao-custo.dto';
@@ -26,6 +27,7 @@ export class EquipamentosDadosController {
     private readonly configuracaoCustoService: ConfiguracaoCustoService,
     private readonly gatewayGraficosService: GatewayGraficosService,
     private readonly gatewayDashboardService: GatewayDashboardService,
+    private readonly medidorResumoService: MedidorResumoService,
     private readonly scopeService: PermissionScopeService,
   ) {}
 
@@ -157,6 +159,13 @@ export class EquipamentosDadosController {
     await this.assertEqInScope(id, user);
     const nNum = n ? Math.max(1, Math.min(50, Number(n))) : 5;
     return this.gatewayDashboardService.getDashboard(id, nNum);
+  }
+
+  /** Resumo do ciclo do medidor: geração da instalação, FP, reativo e excedente (modal web). */
+  @Get(':id/medidor/resumo')
+  async getMedidorResumo(@Param('id') id: string, @CurrentUser() user?: any) {
+    await this.assertEqInScope(id, user);
+    return this.medidorResumoService.resumo(id);
   }
 
   @Get(':id/gateway/tendencia')
