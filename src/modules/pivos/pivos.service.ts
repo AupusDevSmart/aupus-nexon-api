@@ -61,12 +61,33 @@ export class PivosService {
     } catch (e) {
       if (!colunaTrilhaAusente(e)) throw e;
     }
+    // parametros (SQL 2026-10-15_pivo_parametros): coluna à parte, tolerante a ausente.
+    let parametros: Record<string, unknown> = {};
+    try {
+      const pr = await this.prisma.$queryRaw<Array<{ parametros: unknown }>>`
+        SELECT parametros FROM pivo_config WHERE equipamento_id = ${eq.id}::bpchar LIMIT 1`;
+      if (pr[0]?.parametros && typeof pr[0].parametros === 'object') parametros = pr[0].parametros as Record<string, unknown>;
+    } catch (e) {
+      if (!colunaTrilhaAusente(e)) throw e;
+    }
     return {
       equipamento_id: eq.id,
       bloqueio_ponta: janelaOuPadrao(row?.bloqueio_ponta, PONTA_PADRAO),
       reservado: janelaOuPadrao(row?.reservado, RESERVADO_PADRAO),
       origem_ponta: eq.numero_uc || eq.concessionaria ? { numero_uc: eq.numero_uc, concessionaria: eq.concessionaria } : null,
       motobomba_equipamento_id: row?.motobomba_equipamento_id ?? null,
+      parametros: {
+        pressao_minima: num(parametros.pressao_minima),
+        lamina_100: num(parametros.lamina_100),
+        tempo_volta_100: num(parametros.tempo_volta_100),
+        correcao_angulo_zero: num(parametros.correcao_angulo_zero),
+        direcionamento: parametros.direcionamento === 'fisico' ? 'fisico' : 'valvula',
+        valvula_ton_id: typeof parametros.valvula_ton_id === 'string' ? parametros.valvula_ton_id : null,
+        valvula_bo: num(parametros.valvula_bo),
+      },
+      unidade_nome: eq.unidade_nome ?? null,
+      planta_nome: eq.planta_nome ?? null,
+      proprietario_nome: eq.proprietario_nome ?? null,
       updated_at: row?.updated_at ?? null,
     };
   }
@@ -99,6 +120,35 @@ export class PivosService {
         motobomba_equipamento_id = EXCLUDED.motobomba_equipamento_id,
         updated_at = now(),
         updated_by = EXCLUDED.updated_by`);
+
+    if (dto.parametros) {
+      const novo = { ...atual.parametros, ...Object.fromEntries(Object.entries(dto.parametros).filter(([, v]) => v !== undefined)) };
+      await this.escrever(() => this.prisma.$executeRaw`
+        UPDATE pivo_config SET parametros = ${JSON.stringify(novo)}::jsonb, updated_at = now(), updated_by = ${user?.id?.trim() ?? null}
+        WHERE equipamento_id = ${eq.id}::bpchar`);
+    }
+
+    // Trilha (logs_mqtt tipo comando): o que mudou e quem mudou.
+    const mudou: string[] = [];
+    if (dto.bloqueio_ponta) mudou.push(`ponta ${bloqueio.ativo ? 'bloqueada' : 'livre'} ${bloqueio.inicio}–${bloqueio.fim}`);
+    if (dto.motobomba_equipamento_id !== undefined) mudou.push(`motobomba ${motobomba ?? 'nenhuma'}`);
+    if (dto.parametros) {
+      for (const [k, v] of Object.entries(dto.parametros)) {
+        const antes = (atual.parametros as Record<string, unknown>)[k];
+        if (v !== undefined && v !== antes) mudou.push(`${k} ${antes ?? '—'} → ${v ?? '—'}`);
+      }
+    }
+    if (mudou.length) {
+      try {
+        await this.prisma.logs_mqtt.create({
+          data: {
+            tipo: 'comando', equipamento_id: eq.id, severidade: 'INFO', status: 'gravado',
+            mensagem: `Configuração do pivô alterada: ${mudou.join('; ')}`.slice(0, 500),
+            usuario_id: user?.id?.trim() || null, comando_semantico: 'pivo.config',
+          },
+        });
+      } catch { /* trilha nunca derruba a gravação */ }
+    }
     return this.getConfig(eq.id, user);
   }
 
@@ -195,12 +245,16 @@ export class PivosService {
     const eqId = (id ?? '').trim();
     const rows = await this.prisma.$queryRaw<Array<{
       id: string; nome: string; unidade_id: string | null; numero_uc: string | null; concessionaria: string | null;
+      unidade_nome: string | null; planta_nome: string | null; proprietario_nome: string | null;
     }>>`
-      SELECT TRIM(e.id) AS id, e.nome, TRIM(un.id) AS unidade_id, un.numero_uc, ce.nome AS concessionaria
+      SELECT TRIM(e.id) AS id, e.nome, TRIM(un.id) AS unidade_id, un.numero_uc, ce.nome AS concessionaria,
+             un.nome AS unidade_nome, pl.nome AS planta_nome, us.nome AS proprietario_nome
       FROM equipamentos e
       LEFT JOIN equipamentos pai ON pai.id = e.equipamento_pai_id
       LEFT JOIN unidades un ON un.id = COALESCE(e.unidade_id, pai.unidade_id)
       LEFT JOIN concessionarias_energia ce ON ce.id = un.concessionaria_id
+      LEFT JOIN plantas pl ON pl.id = un.planta_id
+      LEFT JOIN usuarios us ON us.id = pl.proprietario_id
       WHERE e.id = ${eqId}::bpchar AND e.deleted_at IS NULL
       LIMIT 1`;
     const eq = rows[0];
