@@ -356,7 +356,7 @@ export class PlantasService {
     }
   }
 
-  async findProprietarios(comUnidades?: boolean) {
+  async findProprietarios(comUnidades?: boolean, user?: ScopedUser) {
     const where: any = {
       is_active: true,
       deleted_at: null,
@@ -378,6 +378,15 @@ export class PlantasService {
             }
           }
         }
+      };
+    }
+
+    // Usuário com escopo só enxerga os donos das plantas dele (nome e CPF/CNPJ
+    // de outros proprietários não vazam pela lista).
+    const scope = await this.scopeService.getScope(user);
+    if (this.scopeService.isScoped(scope)) {
+      where.plantas_proprietario = {
+        some: { ...(where.plantas_proprietario?.some ?? { deleted_at: null }), id: { in: scope } },
       };
     }
 

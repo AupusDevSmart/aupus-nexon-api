@@ -10,7 +10,9 @@ import {
   Query,
   HttpStatus,
   Logger,
-  ValidationPipe
+  ValidationPipe,
+  UseGuards,
+  ForbiddenException,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -28,13 +30,43 @@ import { Planta, ProprietarioBasico } from './entities/planta.entity';
 import { UserProprietarioId } from '../auth/decorators/user-proprietario.decorator';
 import { Permissions } from '../auth/decorators/permissions.decorator';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { PermissionScopeService } from '../auth/permission-scope.service';
+import { PlantaScopeGuard } from '../auth/guards/planta-scope.guard';
+import { UsePlantaScope } from '../auth/decorators/planta-scope.decorator';
 
 @ApiTags('plantas')
+/**
+ * Escopo por planta: proprietário/operador só veem e mexem nas plantas deles.
+ * Rotas com id levam `@UsePlantaScope` (PlantaScopeGuard, antes de ler/gravar);
+ * dono informado no body é conferido no handler, antes do service.
+ */
 @Controller('plantas') // ✅ CORRIGIDO: Remover 'api/v1' - só deixar 'plantas'
+@UseGuards(PlantaScopeGuard)
 export class PlantasController {
   private readonly logger = new Logger(PlantasController.name);
 
-  constructor(private readonly plantasService: PlantasService) {}
+  constructor(
+    private readonly plantasService: PlantasService,
+    private readonly scope: PermissionScopeService,
+  ) {}
+
+  /**
+   * Usuário com escopo não escolhe dono alheio: cria planta só em nome próprio
+   * e não transfere a planta (dono diferente do atual = 403).
+   */
+  private async assertDonoPermitido(proprietarioId: string | undefined, user: any, donoAtual?: string | null) {
+    const novo = proprietarioId?.trim();
+    if (!this.scope.isScoped(await this.scope.getScope(user))) return;
+    if (donoAtual !== undefined) {
+      if (novo && novo !== (donoAtual ?? '').trim()) {
+        throw new ForbiddenException('Sem permissão para trocar o proprietário da planta');
+      }
+      return;
+    }
+    if (!novo || novo !== String(user?.id ?? '').trim()) {
+      throw new ForbiddenException('Planta nova só pode ser criada em nome do próprio usuário');
+    }
+  }
 
   // ✅ IMPORTANTE: Rota específica ANTES da rota genérica com parâmetro
   @Get('proprietarios')
@@ -48,11 +80,14 @@ export class PlantasController {
     description: 'Lista de proprietários retornada com sucesso',
     type: [ProprietarioBasico]
   })
-  async findProprietarios(@Query('comUnidades') comUnidades?: string): Promise<ProprietarioBasico[]> {
+  async findProprietarios(
+    @Query('comUnidades') comUnidades?: string,
+    @CurrentUser() user?: any,
+  ): Promise<ProprietarioBasico[]> {
     this.logger.log(`👥 [LIST PROPRIETARIOS] Buscando proprietários disponíveis (comUnidades: ${comUnidades})`);
 
     try {
-      const proprietarios = await this.plantasService.findProprietarios(comUnidades === 'true');
+      const proprietarios = await this.plantasService.findProprietarios(comUnidades === 'true', user);
       
       this.logger.log(`✅ [LIST PROPRIETARIOS] Encontrados ${proprietarios.length} proprietários`);
       return proprietarios;
@@ -88,7 +123,8 @@ export class PlantasController {
     status: HttpStatus.CONFLICT, 
     description: 'CNPJ já cadastrado no sistema' 
   })
-  async create(@Body() createPlantaDto: CreatePlantaDto): Promise<Planta> {
+  async create(@Body() createPlantaDto: CreatePlantaDto, @CurrentUser() user?: any): Promise<Planta> {
+    await this.assertDonoPermitido(createPlantaDto?.proprietarioId, user);
     this.logger.log(`🏭 [CREATE PLANTA] Iniciando criação de planta`);
     this.logger.log(`📝 [CREATE PLANTA] Dados recebidos:`, JSON.stringify(createPlantaDto, null, 2));
 
@@ -175,6 +211,7 @@ export class PlantasController {
     status: HttpStatus.BAD_REQUEST,
     description: 'ID inválido'
   })
+  @UsePlantaScope({ entity: 'planta' })
   async findOne(
     @Param('id') id: string,
     @CurrentUser() user: any
@@ -215,6 +252,7 @@ export class PlantasController {
     status: HttpStatus.NOT_FOUND,
     description: 'Planta não encontrada'
   })
+  @UsePlantaScope({ entity: 'planta', name: 'plantaId' })
   async findUnidadesByPlanta(
     @Param('plantaId') plantaId: string,
     @UserProprietarioId() autoProprietarioId: string | null,
@@ -272,10 +310,16 @@ export class PlantasController {
     status: HttpStatus.CONFLICT, 
     description: 'CNPJ já cadastrado por outra planta' 
   })
+  @UsePlantaScope({ entity: 'planta' })
   async update(
     @Param('id') id: string,
-    @Body() updatePlantaDto: UpdatePlantaDto
+    @Body() updatePlantaDto: UpdatePlantaDto,
+    @CurrentUser() user?: any,
   ): Promise<Planta> {
+    if (updatePlantaDto?.proprietarioId) {
+      const atual = await this.plantasService.findOne(id, user);
+      await this.assertDonoPermitido(updatePlantaDto.proprietarioId, user, atual.proprietarioId ?? null);
+    }
     this.logger.log(`🔄 [UPDATE PLANTA] Atualizando planta ${id}`);
     this.logger.log(`📝 [UPDATE PLANTA] Dados recebidos:`, JSON.stringify(updatePlantaDto, null, 2));
 
@@ -315,6 +359,7 @@ export class PlantasController {
     status: HttpStatus.CONFLICT,
     description: 'Planta possui dependências que impedem a exclusão'
   })
+  @UsePlantaScope({ entity: 'planta' })
   async remove(@Param('id') id: string): Promise<{ message: string; deletedUnits?: number; deletedEquipments?: number }> {
     // Fazer trim do ID para garantir que não há espaços
     const plantaId = id.trim();
