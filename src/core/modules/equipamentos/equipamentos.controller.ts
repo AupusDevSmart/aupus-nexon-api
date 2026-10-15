@@ -37,6 +37,9 @@ import { ReplicarAnexosDto } from './dto/replicar-anexos.dto';
 import { UserProprietarioId } from '../auth/decorators/user-proprietario.decorator';
 import { Permissions } from '../auth/decorators/permissions.decorator';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { PermissionScopeService } from '../auth/permission-scope.service';
+import { ExportacaoAuditoriaService } from '../usuarios/exportacao-auditoria.service';
+import { Cliente, type ClienteInfo } from '../../common/cliente-info';
 
 @ApiTags('Equipamentos')
 @Controller('equipamentos')
@@ -45,6 +48,8 @@ export class EquipamentosController {
     private readonly equipamentosService: EquipamentosService,
     private readonly equipamentosDataService: EquipamentosDataService,
     private readonly anexosService: AnexosEquipamentosService,
+    private readonly scope: PermissionScopeService,
+    private readonly exportacoes: ExportacaoAuditoriaService,
   ) {}
 
   @Post()
@@ -174,9 +179,25 @@ export class EquipamentosController {
   async downloadAnexo(
     @Param('anexoId') anexoId: string,
     @Res({ passthrough: true }) res: Response,
+    @CurrentUser() user?: any,
+    @Cliente() cliente?: ClienteInfo,
   ) {
     const anexo = await this.anexosService.buscarAnexo(anexoId);
-    const caminho = await this.anexosService.obterCaminhoArquivo(anexoId);
+    const caminho = await this.exportacoes.executar(
+      {
+        user,
+        cliente,
+        tipo: 'anexo_equipamento',
+        equipamentoIds: [anexo.equipamento_id],
+        formato: anexo.mime_type,
+        linhas: 1,
+        extra: { anexo_id: anexo.id?.trim(), arquivo: anexo.nome_original, tamanho: Number(anexo.tamanho) },
+      },
+      async () => {
+        await this.scope.assertEntityInScope('equipamento', anexo.equipamento_id, user);
+        return this.anexosService.obterCaminhoArquivo(anexoId);
+      },
+    );
 
     res.set({
       'Content-Type': anexo.mime_type,
@@ -191,7 +212,9 @@ export class EquipamentosController {
   @Permissions('equipamentos.manage')
   @ApiOperation({ summary: 'Remover anexo do equipamento' })
   @ApiResponse({ status: 200, description: 'Anexo removido' })
-  removerAnexo(@Param('anexoId') anexoId: string) {
+  async removerAnexo(@Param('anexoId') anexoId: string, @CurrentUser() user?: any) {
+    const anexo = await this.anexosService.buscarAnexo(anexoId);
+    await this.scope.assertEntityInScope('equipamento', anexo.equipamento_id, user);
     return this.anexosService.removerAnexo(anexoId);
   }
 
@@ -205,7 +228,10 @@ export class EquipamentosController {
       'independente, sem multiplicar o arquivo no servidor.',
   })
   @ApiResponse({ status: 201, description: 'Anexos replicados' })
-  replicarAnexos(@Body() dto: ReplicarAnexosDto) {
+  async replicarAnexos(@Body() dto: ReplicarAnexosDto, @CurrentUser() user?: any) {
+    for (const id of [dto.origem_equipamento_id, ...(dto.destino_equipamento_ids ?? [])]) {
+      await this.scope.assertEntityInScope('equipamento', id, user);
+    }
     return this.anexosService.replicarAnexos(dto.origem_equipamento_id, dto.destino_equipamento_ids);
   }
 
@@ -215,11 +241,13 @@ export class EquipamentosController {
   @ApiOperation({ summary: 'Enviar anexo (manual, datasheet, documento) do equipamento' })
   @ApiConsumes('multipart/form-data')
   @ApiResponse({ status: 201, description: 'Anexo enviado' })
-  uploadAnexo(
+  async uploadAnexo(
     @Param('id') id: string,
     @UploadedFile() file: any,
     @Body('descricao') descricao?: string,
+    @CurrentUser() user?: any,
   ) {
+    await this.scope.assertEntityInScope('equipamento', id, user);
     return this.anexosService.uploadAnexo(id, file, descricao);
   }
 
@@ -227,8 +255,15 @@ export class EquipamentosController {
   @Permissions('equipamentos.view')
   @ApiOperation({ summary: 'Listar anexos do equipamento' })
   @ApiResponse({ status: 200, description: 'Lista de anexos' })
-  listarAnexos(@Param('id') id: string) {
-    return this.anexosService.listarAnexos(id);
+  listarAnexos(@Param('id') id: string, @CurrentUser() user?: any, @Cliente() cliente?: ClienteInfo) {
+    return this.exportacoes.executar(
+      { user, cliente, tipo: 'lista_anexos', equipamentoIds: [id] },
+      async () => {
+        await this.scope.assertEntityInScope('equipamento', id, user);
+        return this.anexosService.listarAnexos(id);
+      },
+      { registrarSucesso: false },
+    );
   }
 
   @Get(':id')
@@ -372,8 +407,16 @@ export class EquipamentosController {
   @ApiOperation({ summary: 'Obter último dado recebido do equipamento' })
   @ApiResponse({ status: 200, description: 'Dado atual do equipamento' })
   @ApiResponse({ status: 404, description: 'Equipamento ou dado não encontrado' })
-  obterDadoAtual(@Param('id') id: string) {
-    return this.equipamentosDataService.obterDadoAtual(id);
+  obterDadoAtual(@Param('id') id: string, @CurrentUser() user?: any, @Cliente() cliente?: ClienteInfo) {
+    // Tela (polling do supervisório): audita só a recusa.
+    return this.exportacoes.executar(
+      { user, cliente, tipo: 'telemetria_atual', equipamentoIds: [id] },
+      async () => {
+        await this.scope.assertEntityInScope('equipamento', id, user);
+        return this.equipamentosDataService.obterDadoAtual(id);
+      },
+      { registrarSucesso: false },
+    );
   }
 
   @Get(':id/dados/historico')
@@ -391,13 +434,30 @@ export class EquipamentosController {
     @Query('fim') fim?: string,
     @Query('limite') limite?: string,
     @Query('intervalo') intervalo?: 'raw' | '1min' | '5min' | '1hour' | '1day',
+    @CurrentUser() user?: any,
+    @Cliente() cliente?: ClienteInfo,
   ) {
-    return this.equipamentosDataService.obterHistorico(id, {
-      inicio: inicio ? new Date(inicio) : undefined,
-      fim: fim ? new Date(fim) : undefined,
-      limite: limite ? parseInt(limite, 10) : undefined,
-      intervalo: intervalo || 'raw',
-    });
+    return this.exportacoes.executar(
+      {
+        user,
+        cliente,
+        tipo: 'leituras',
+        equipamentoIds: [id],
+        periodo: { inicio: inicio ?? null, fim: fim ?? null },
+        formato: 'json',
+        extra: { limite: limite ? parseInt(limite, 10) : null, intervalo: intervalo || 'raw' },
+      },
+      async () => {
+        await this.scope.assertEntityInScope('equipamento', id, user);
+        return this.equipamentosDataService.obterHistorico(id, {
+          inicio: inicio ? new Date(inicio) : undefined,
+          fim: fim ? new Date(fim) : undefined,
+          limite: limite ? parseInt(limite, 10) : undefined,
+          intervalo: intervalo || 'raw',
+        });
+      },
+      { resumo: (r) => ({ linhas: r?.data?.length ?? 0 }) },
+    );
   }
 
   @Post(':id/upload-foto')

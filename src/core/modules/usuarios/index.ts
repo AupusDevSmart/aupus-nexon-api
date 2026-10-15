@@ -4,3 +4,4 @@ export * from "./usuarios.service";
 export * from "./auditoria-acessos.service";
 export * from "./notificacoes-push.service";
 export * from "./acesso-operador.util";
+export * from "./exportacao-auditoria.service";

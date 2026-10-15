@@ -1,6 +1,6 @@
-import { Controller, Get, Query, Res } from '@nestjs/common';
-import type { Response } from 'express';
-import { Public } from '@/core';
+import { Controller, Get, Query, Req, Res } from '@nestjs/common';
+import type { Request, Response } from 'express';
+import { Public, ExportacaoAuditoriaService, extrairClienteInfo } from '@/core';
 import { BoletimConsumoEnvioService } from './boletim-consumo-envio.service';
 import { BoletimConsumoService } from './boletim-consumo.service';
 import { RelatoriosService } from './relatorios.service';
@@ -17,13 +17,19 @@ export class RelatoriosConsumoPublicController {
     private readonly envio: BoletimConsumoEnvioService,
     private readonly consumo: BoletimConsumoService,
     private readonly gerador: RelatoriosService,
+    private readonly exportacoes: ExportacaoAuditoriaService,
   ) {}
 
   @Public()
   @Get('pdf')
-  async pdf(@Query('token') token: string, @Res() res: Response) {
+  async pdf(@Query('token') token: string, @Req() req: Request, @Res() res: Response) {
+    const cliente = extrairClienteInfo(req as any);
     const v = this.envio.verifyToken(token || '');
     if (!v) {
+      await this.exportacoes.negada(
+        { cliente, tipo: 'consumo', via: 'link_assinado', formato: 'pdf' },
+        'link inválido ou expirado',
+      );
       res.status(403).send('Link inválido ou expirado.');
       return;
     }
@@ -33,6 +39,14 @@ export class RelatoriosConsumoPublicController {
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', 'inline; filename="relatorio-consumo.pdf"');
       res.send(pdf);
+      await this.exportacoes.registrar({
+        cliente,
+        tipo: 'consumo',
+        via: 'link_assinado',
+        unidadeIds: [v.u],
+        periodo: { data: v.d || null },
+        formato: 'pdf',
+      });
     } catch (e: any) {
       res.status(500).send('Não foi possível gerar o relatório de consumo.');
     }
