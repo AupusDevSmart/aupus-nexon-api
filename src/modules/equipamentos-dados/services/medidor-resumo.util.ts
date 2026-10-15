@@ -10,7 +10,14 @@
  *  - Só blocos com consumo entram em FP (bloco de pura injeção não tem FP de carga).
  *  - Reativo excedente do bloco com FP < 0,92 = kWh × (0,92 / FP − 1).
  *  - FP médio do ciclo = Σ kWh / √(Σ kWh² + Σ kvarh²) (kvarh resultante).
+ *  - Horário (REN 1000 art. 297): reativo capacitivo só conta das 00h às 06h; indutivo,
+ *    das 06h às 24h. Fora disso o bloco não entra no FP mínimo nem no excedente.
  */
+
+/** Hora local (0–23) em que o bloco aconteceu (o timestamp é o FIM da janela). */
+export function horaDoBloco(t: number, tz = 'America/Sao_Paulo'): number {
+  return Number(new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: '2-digit', hourCycle: 'h23' }).format(new Date(t - 60_000))) % 24;
+}
 
 export interface Bloco15 { t: number; kWc: number; kWi: number; kvarInd: number; kvarCap: number }
 
@@ -32,7 +39,7 @@ export const FP_LIMITE = 0.92;
 /** Consumo mínimo (kW) para o bloco entrar nas contas de FP: ruído de medidor parado fica fora. */
 const KW_MIN_FP = 0.5;
 
-export function resumoBlocos(blocos: Bloco15[], limite = FP_LIMITE): ResumoReativo {
+export function resumoBlocos(blocos: Bloco15[], limite = FP_LIMITE, hora: (t: number) => number = horaDoBloco): ResumoReativo {
   const r: ResumoReativo = {
     injecao_max: null, consumo_max: null, fp_min_ind: null, fp_min_cap: null, fp_medio: null, reativo_max: null,
     energia_reativa_kvarh: 0, reativo_excedente_kvarh: 0, consumo_kwh: 0, injecao_kwh: 0, blocos: blocos.length,
@@ -53,6 +60,9 @@ export function resumoBlocos(blocos: Bloco15[], limite = FP_LIMITE): ResumoReati
     if (kWc < KW_MIN_FP) continue;
     sp += kWc * 0.25; sq += q * 0.25;
     const fp = kWc / Math.sqrt(kWc ** 2 + q ** 2);
+    const madrugada = hora(b.t) < 6;
+    const conta = q >= 0 ? !madrugada : madrugada;
+    if (!conta) continue;
     if (q >= 0) { if (!r.fp_min_ind || fp < r.fp_min_ind.fp) r.fp_min_ind = { fp, t: b.t }; }
     else if (!r.fp_min_cap || fp < r.fp_min_cap.fp) r.fp_min_cap = { fp, t: b.t };
     if (fp < limite) r.reativo_excedente_kvarh += kWc * 0.25 * (limite / fp - 1);
