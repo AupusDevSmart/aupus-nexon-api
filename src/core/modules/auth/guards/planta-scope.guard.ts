@@ -32,28 +32,35 @@ export class PlantaScopeGuard implements CanActivate {
     ]);
     if (isPublic) return true;
 
-    const meta = this.reflector.getAllAndOverride<PlantaScopeMetadata>(PLANTA_SCOPE_KEY, [
+    const raw = this.reflector.getAllAndOverride<PlantaScopeMetadata | PlantaScopeMetadata[]>(PLANTA_SCOPE_KEY, [
       context.getHandler(),
       context.getClass(),
     ]);
-    if (!meta) return true;
+    if (!raw) return true;
+    const metas = Array.isArray(raw) ? raw : [raw];
 
     const req = context.switchToHttp().getRequest();
     const user = req.user;
-    const from = meta.from ?? 'param';
-    const name = meta.name ?? 'id';
 
-    const source =
-      from === 'param' ? req.params :
-      from === 'body' ? req.body :
-      req.query;
+    // Roda ANTES de interceptors (multer grava o upload no disco) e do handler:
+    // nada é lido nem gravado para quem está fora do escopo.
+    for (const meta of metas) {
+      const from = meta.from ?? 'param';
+      const name = meta.name ?? 'id';
+      const source = from === 'param' ? req.params : from === 'body' ? req.body : req.query;
+      const valor = source?.[name];
+      const ids = (Array.isArray(valor) ? valor : [valor])
+        .map((v) => (typeof v === 'string' ? v.trim() : ''))
+        .filter(Boolean);
 
-    const id: string | undefined = source?.[name];
-    if (!id) {
-      throw new NotFoundException(`${meta.entity} nao encontrado`);
+      if (ids.length === 0) {
+        if (meta.optional) continue;
+        throw new NotFoundException(`${meta.entity} nao encontrado`);
+      }
+      for (const id of ids) {
+        await this.scopeService.assertEntityInScope(meta.entity, id, user);
+      }
     }
-
-    await this.scopeService.assertEntityInScope(meta.entity, id, user);
     return true;
   }
 }

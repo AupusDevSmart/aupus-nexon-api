@@ -14,6 +14,7 @@ import {
   Res,
   UseInterceptors,
   UploadedFile,
+  UseGuards,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Response } from 'express';
@@ -42,11 +43,14 @@ import { UserProprietarioId } from '../auth/decorators/user-proprietario.decorat
 import { Permissions } from '../auth/decorators/permissions.decorator';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { PermissionScopeService } from '../auth/permission-scope.service';
+import { PlantaScopeGuard } from '../auth/guards/planta-scope.guard';
+import { UsePlantaScope } from '../auth/decorators/planta-scope.decorator';
 import { ExportacaoAuditoriaService } from '../usuarios/exportacao-auditoria.service';
 import { Cliente, type ClienteInfo } from '../../common/cliente-info';
 
 @ApiTags('unidades')
 @Controller('unidades')
+@UseGuards(PlantaScopeGuard)
 export class UnidadesController {
   private readonly logger = new Logger(UnidadesController.name);
 
@@ -72,21 +76,15 @@ export class UnidadesController {
     @CurrentUser() user?: any,
     @Cliente() cliente?: ClienteInfo,
   ) {
-    const anexo = await this.anexosService.buscarAnexo(anexoId);
-    const caminho = await this.exportacoes.executar(
-      {
-        user,
-        cliente,
-        tipo: 'anexo_unidade',
-        unidadeIds: [anexo.unidade_id],
-        formato: anexo.mime_type,
-        linhas: 1,
-        extra: { anexo_id: anexo.id?.trim(), arquivo: anexo.nome_original, tamanho: Number(anexo.tamanho) },
-      },
+    // 1º escopo (dono resolvido pelo anexo no banco), depois metadados e arquivo.
+    const { anexo, caminho } = await this.exportacoes.executar(
+      { user, cliente, tipo: 'anexo_unidade', anexo: { tipo: 'unidade', id: anexoId }, linhas: 1 },
       async () => {
-        await this.scope.assertEntityInScope('unidade', anexo.unidade_id, user);
-        return this.anexosService.obterCaminhoArquivo(anexoId);
+        await this.scope.assertEntityInScope('anexo_unidade', anexoId, user);
+        const anexo = await this.anexosService.buscarAnexo(anexoId);
+        return { anexo, caminho: await this.anexosService.obterCaminhoArquivo(anexoId) };
       },
+      { resumo: ({ anexo }) => ({ formato: anexo.mime_type, extra: { tamanho: Number(anexo.tamanho) } }) },
     );
 
     res.setHeader('Content-Type', anexo.mime_type);
@@ -98,16 +96,17 @@ export class UnidadesController {
   }
 
   @Delete('anexos/:anexoId')
+  @UsePlantaScope({ entity: 'anexo_unidade', name: 'anexoId' })
   @Permissions('unidades.manage')
   @ApiOperation({ summary: 'Remover anexo da instalação' })
   @ApiParam({ name: 'anexoId' })
   async removerAnexo(@Param('anexoId') anexoId: string, @CurrentUser() user?: any) {
-    const anexo = await this.anexosService.buscarAnexo(anexoId);
-    await this.scope.assertEntityInScope('unidade', anexo.unidade_id, user);
+    await this.scope.assertEntityInScope('anexo_unidade', anexoId, user); // redundante com o guard, de propósito
     return this.anexosService.removerAnexo(anexoId);
   }
 
   @Post(':id/anexos')
+  @UsePlantaScope({ entity: 'unidade' })
   @Permissions('unidades.manage')
   @UseInterceptors(FileInterceptor('file'))
   @ApiOperation({ summary: 'Enviar anexo da instalação (contrato, diagrama, laudo)' })

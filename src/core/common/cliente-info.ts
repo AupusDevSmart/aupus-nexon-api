@@ -14,8 +14,31 @@ export interface ClienteInfo {
   aparelho: string | null;
   /** Rótulo pronto para a trilha: "iPhone 15 Pro · iOS", "Chrome no Windows", "Web". */
   dispositivo: string;
+  /**
+   * IP do cliente para a trilha: `req.ip` do Express, que só considera
+   * X-Forwarded-For vindo de proxy confiável (`trust proxy` = loopback, o nginx
+   * da própria VPS — ver main.ts). Sem req.ip, cai no socket. NUNCA o XFF cru.
+   */
   ip: string | null;
+  /** Endereço do socket TCP (no servidor, o nginx = 127.0.0.1). */
+  ipSocket: string | null;
+  /** X-Forwarded-For bruto, saneado — só pista para investigação, falsificável. */
+  xff: string | null;
   userAgent: string | null;
+}
+
+/** Tira caracteres de controle (quebra de linha, NUL, ESC) e corta no tamanho. */
+export function sanear(v: unknown, max: number): string | null {
+  if (typeof v !== 'string') return null;
+  // eslint-disable-next-line no-control-regex
+  const t = v.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, max);
+  return t || null;
+}
+
+/** Aceita só texto com cara de IP (v4/v6); qualquer outra coisa vira null. */
+function ipValido(v: unknown): string | null {
+  const t = sanear(typeof v === 'string' ? v.replace(/^::ffff:/, '') : v, 64);
+  return t && /^[0-9a-fA-F:.]+$/.test(t) ? t : null;
 }
 
 function header(headers: Record<string, any> | undefined, nome: string, max = 80): string | null {
@@ -23,8 +46,7 @@ function header(headers: Record<string, any> | undefined, nome: string, max = 80
   const v = headers[nome] ?? headers[nome.toLowerCase()];
   const s = Array.isArray(v) ? v[0] : v;
   if (typeof s !== 'string') return null;
-  const t = s.trim().slice(0, max);
-  return t || null;
+  return sanear(s, max);
 }
 
 /** "Chrome no Windows" a partir do User-Agent (web). Sem UA → "Web". */
@@ -62,7 +84,8 @@ export function extrairClienteInfo(req: { headers?: Record<string, any>; ip?: st
   const aparelho = header(headers, 'x-client-device');
   const userAgent = header(headers, 'user-agent', 255);
   const xff = header(headers, 'x-forwarded-for', 255);
-  const ip = (xff ? xff.split(',')[0].trim() : null) || req?.ip || req?.socket?.remoteAddress || null;
+  const ipSocket = ipValido(req?.socket?.remoteAddress);
+  const ip = ipValido(req?.ip) ?? ipSocket;
 
   let dispositivo: string;
   if (aparelho && plataforma) dispositivo = `${aparelho} · ${plataforma}`;
@@ -74,8 +97,10 @@ export function extrairClienteInfo(req: { headers?: Record<string, any>; ip?: st
     plataforma: plataforma ?? (aparelho ? null : 'Web'),
     aparelho,
     dispositivo: dispositivo.slice(0, 120),
-    ip: ip ? String(ip).replace(/^::ffff:/, '').slice(0, 64) : null,
-    userAgent: userAgent ? userAgent.slice(0, 255) : null,
+    ip,
+    ipSocket,
+    xff,
+    userAgent,
   };
 }
 

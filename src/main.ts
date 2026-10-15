@@ -18,6 +18,12 @@ async function bootstrap() {
     bufferLogs: true,
   });
 
+  // IP real do cliente: confia no X-Forwarded-For só quando quem conecta é o
+  // nginx da própria VPS (loopback). Assim req.ip = o $remote_addr que o nginx
+  // anexou, e um XFF forjado pelo cliente não vira o IP da trilha.
+  // TRUST_PROXY sobrescreve (ex.: '127.0.0.1,10.0.0.0/8').
+  app.set('trust proxy', process.env.TRUST_PROXY?.trim() || 'loopback');
+
   // POST /ota/compilar-e-publicar envia 21+ arquivos C++ (~120KB+) — default 100KB estoura.
   app.use(json({ limit: '10mb' }));
   app.use(urlencoded({ extended: true, limit: '10mb' }));

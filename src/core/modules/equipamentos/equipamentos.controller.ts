@@ -11,6 +11,7 @@ import {
   HttpStatus,
   HttpCode,
   UseInterceptors,
+  UseGuards,
   UploadedFile,
   BadRequestException,
   Res,
@@ -38,11 +39,21 @@ import { UserProprietarioId } from '../auth/decorators/user-proprietario.decorat
 import { Permissions } from '../auth/decorators/permissions.decorator';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { PermissionScopeService } from '../auth/permission-scope.service';
+import { PlantaScopeGuard } from '../auth/guards/planta-scope.guard';
+import { UsePlantaScope } from '../auth/decorators/planta-scope.decorator';
 import { ExportacaoAuditoriaService } from '../usuarios/exportacao-auditoria.service';
 import { Cliente, type ClienteInfo } from '../../common/cliente-info';
 
+/**
+ * Escopo por planta: TODA rota que recebe id de equipamento, anexo ou unidade
+ * declara @UsePlantaScope e o PlantaScopeGuard valida ANTES de pipes,
+ * interceptors (multer grava upload no disco) e do handler. As rotas de export
+ * auditadas (anexo download, dados atual/histórico, lista de anexos) checam
+ * dentro do handler, primeiro passo, para gravar também a recusa na trilha.
+ */
 @ApiTags('Equipamentos')
 @Controller('equipamentos')
+@UseGuards(PlantaScopeGuard)
 export class EquipamentosController {
   constructor(
     private readonly equipamentosService: EquipamentosService,
@@ -53,6 +64,10 @@ export class EquipamentosController {
   ) {}
 
   @Post()
+  @UsePlantaScope(
+    { entity: 'unidade', from: 'body', name: 'unidade_id', optional: true },
+    { entity: 'equipamento', from: 'body', name: 'equipamento_pai_id', optional: true },
+  )
   @Permissions('equipamentos.manage')
   @ApiOperation({ summary: 'Criar novo equipamento/componente' })
   @ApiResponse({ status: 201, description: 'Equipamento criado com sucesso' })
@@ -62,6 +77,10 @@ export class EquipamentosController {
   }
 
   @Post('lote')
+  @UsePlantaScope(
+    { entity: 'unidade', from: 'body', name: 'unidade_id', optional: true },
+    { entity: 'equipamento', from: 'body', name: 'equipamento_pai_id', optional: true },
+  )
   @Permissions('equipamentos.manage')
   @ApiOperation({
     summary: 'Cadastrar vários equipamentos iguais de uma vez',
@@ -78,6 +97,7 @@ export class EquipamentosController {
   }
 
   @Post('rapido')
+  @UsePlantaScope({ entity: 'unidade', from: 'body', name: 'unidade_id' })
   @Permissions('equipamentos.manage')
   @ApiOperation({
     summary: 'Criar equipamento rapidamente com dados mínimos',
@@ -128,6 +148,7 @@ export class EquipamentosController {
   }
 
   @Get('proximo-sequencial')
+  @UsePlantaScope({ entity: 'unidade', from: 'query', name: 'unidade_id', optional: true })
   @Permissions('equipamentos.view')
   @ApiOperation({
     summary: 'De onde continuar a numeração de nomes e TAGs',
@@ -149,6 +170,7 @@ export class EquipamentosController {
   }
 
   @Get('proxima-tag')
+  @UsePlantaScope({ entity: 'unidade', from: 'query', name: 'unidade_id', optional: true })
   @Permissions('equipamentos.view')
   @ApiOperation({ summary: 'Prévia da próxima TAG (sigla do tipo + sequencial por unidade)' })
   proximaTag(
@@ -162,8 +184,8 @@ export class EquipamentosController {
   @Permissions('equipamentos.view')
   @ApiOperation({ summary: 'Listar equipamentos UC disponíveis para serem pais de UAR' })
   @ApiResponse({ status: 200, description: 'Lista de equipamentos UC' })
-  findEquipamentosUC() {
-    return this.equipamentosService.findEquipamentosUC();
+  findEquipamentosUC(@CurrentUser() user?: any) {
+    return this.equipamentosService.findEquipamentosUC(user);
   }
 
   // ==================== ANEXOS ====================
@@ -182,21 +204,15 @@ export class EquipamentosController {
     @CurrentUser() user?: any,
     @Cliente() cliente?: ClienteInfo,
   ) {
-    const anexo = await this.anexosService.buscarAnexo(anexoId);
-    const caminho = await this.exportacoes.executar(
-      {
-        user,
-        cliente,
-        tipo: 'anexo_equipamento',
-        equipamentoIds: [anexo.equipamento_id],
-        formato: anexo.mime_type,
-        linhas: 1,
-        extra: { anexo_id: anexo.id?.trim(), arquivo: anexo.nome_original, tamanho: Number(anexo.tamanho) },
-      },
+    // 1º escopo (dono resolvido pelo anexo no banco), depois metadados e arquivo.
+    const { anexo, caminho } = await this.exportacoes.executar(
+      { user, cliente, tipo: 'anexo_equipamento', anexo: { tipo: 'equipamento', id: anexoId }, linhas: 1 },
       async () => {
-        await this.scope.assertEntityInScope('equipamento', anexo.equipamento_id, user);
-        return this.anexosService.obterCaminhoArquivo(anexoId);
+        await this.scope.assertEntityInScope('anexo_equipamento', anexoId, user);
+        const anexo = await this.anexosService.buscarAnexo(anexoId);
+        return { anexo, caminho: await this.anexosService.obterCaminhoArquivo(anexoId) };
       },
+      { resumo: ({ anexo }) => ({ formato: anexo.mime_type, extra: { tamanho: Number(anexo.tamanho) } }) },
     );
 
     res.set({
@@ -209,16 +225,20 @@ export class EquipamentosController {
   }
 
   @Delete('anexos/:anexoId')
+  @UsePlantaScope({ entity: 'anexo_equipamento', name: 'anexoId' })
   @Permissions('equipamentos.manage')
   @ApiOperation({ summary: 'Remover anexo do equipamento' })
   @ApiResponse({ status: 200, description: 'Anexo removido' })
   async removerAnexo(@Param('anexoId') anexoId: string, @CurrentUser() user?: any) {
-    const anexo = await this.anexosService.buscarAnexo(anexoId);
-    await this.scope.assertEntityInScope('equipamento', anexo.equipamento_id, user);
+    await this.scope.assertEntityInScope('anexo_equipamento', anexoId, user); // redundante com o guard, de propósito
     return this.anexosService.removerAnexo(anexoId);
   }
 
   @Post('anexos/replicar')
+  @UsePlantaScope(
+    { entity: 'equipamento', from: 'body', name: 'origem_equipamento_id' },
+    { entity: 'equipamento', from: 'body', name: 'destino_equipamento_ids' },
+  )
   @Permissions('equipamentos.manage')
   @ApiOperation({
     summary: 'Copiar os anexos de um equipamento para outros',
@@ -236,6 +256,7 @@ export class EquipamentosController {
   }
 
   @Post(':id/anexos')
+  @UsePlantaScope({ entity: 'equipamento' })
   @Permissions('equipamentos.manage')
   @UseInterceptors(FileInterceptor('file'))
   @ApiOperation({ summary: 'Enviar anexo (manual, datasheet, documento) do equipamento' })
@@ -267,6 +288,7 @@ export class EquipamentosController {
   }
 
   @Get(':id')
+  @UsePlantaScope({ entity: 'equipamento' })
   @Permissions('equipamentos.view')
   @ApiOperation({ summary: 'Buscar equipamento por ID' })
   @ApiResponse({ status: 200, description: 'Equipamento encontrado' })
@@ -276,6 +298,7 @@ export class EquipamentosController {
   }
 
   @Get(':id/componentes')
+  @UsePlantaScope({ entity: 'equipamento' })
   @Permissions('equipamentos.view')
   @ApiOperation({ summary: 'Listar componentes UAR de um equipamento UC' })
   @ApiResponse({ status: 200, description: 'Lista de componentes' })
@@ -285,6 +308,7 @@ export class EquipamentosController {
   }
 
   @Get(':id/cadastro-unifilar')
+  @UsePlantaScope({ entity: 'equipamento' })
   @Permissions('equipamentos.view')
   @ApiOperation({ summary: 'Valores atuais do cadastro simplificado do unifilar (pra edição)' })
   getCadastroUnifilar(@Param('id') id: string) {
@@ -292,6 +316,7 @@ export class EquipamentosController {
   }
 
   @Patch(':id/cadastro-unifilar')
+  @UsePlantaScope({ entity: 'equipamento' })
   @Permissions('equipamentos.manage')
   @ApiOperation({ summary: 'Editar cadastro simplificado do unifilar (tag, localização, checks SCS)' })
   editarCadastroUnifilar(
@@ -306,6 +331,12 @@ export class EquipamentosController {
   }
 
   @Patch(':id')
+  @UsePlantaScope(
+    { entity: 'equipamento' },
+    // mover para unidade/pai de outra planta também é barrado
+    { entity: 'unidade', from: 'body', name: 'unidade_id', optional: true },
+    { entity: 'equipamento', from: 'body', name: 'equipamento_pai_id', optional: true },
+  )
   @Permissions('equipamentos.manage')
   @ApiOperation({ summary: 'Atualizar equipamento' })
   @ApiResponse({ status: 200, description: 'Equipamento atualizado' })
@@ -315,6 +346,7 @@ export class EquipamentosController {
   }
 
   @Delete(':id')
+  @UsePlantaScope({ entity: 'equipamento' })
   @Permissions('equipamentos.manage')
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Remover equipamento (soft delete)' })
@@ -325,6 +357,7 @@ export class EquipamentosController {
   }
 
   @Get('uar/:id/detalhes')
+  @UsePlantaScope({ entity: 'equipamento' })
   @Permissions('equipamentos.view')
   @ApiOperation({ summary: 'Buscar detalhes completos de um componente UAR' })
   @ApiResponse({ status: 200, description: 'Detalhes do componente UAR' })
@@ -334,6 +367,7 @@ export class EquipamentosController {
   }
 
   @Get(':ucId/componentes/gerenciar')
+  @UsePlantaScope({ entity: 'equipamento', name: 'ucId' })
   @Permissions('equipamentos.manage')
   @ApiOperation({ summary: 'Listar componentes UAR para gerenciamento de uma UC' })
   @ApiResponse({ status: 200, description: 'Lista de componentes com dados completos' })
@@ -343,17 +377,24 @@ export class EquipamentosController {
   }
 
   @Put(':ucId/componentes/batch')
+  @UsePlantaScope({ entity: 'equipamento', name: 'ucId' })
   @Permissions('equipamentos.manage')
   @ApiOperation({ summary: 'Salvar múltiplos componentes UAR de uma vez' })
   @ApiResponse({ status: 200, description: 'Componentes salvos com sucesso' })
-  salvarComponentesUAR(
+  async salvarComponentesUAR(
     @Param('ucId') ucId: string,
-    @Body() componentesDto: { componentes: CreateComponenteUARDto[] }
+    @Body() componentesDto: { componentes: CreateComponenteUARDto[] },
+    @CurrentUser() user?: any,
   ) {
+    for (const c of componentesDto?.componentes ?? []) {
+      if (c?.unidade_id) await this.scope.assertEntityInScope('unidade', c.unidade_id, user);
+      if (c?.equipamento_pai_id) await this.scope.assertEntityInScope('equipamento', c.equipamento_pai_id, user);
+    }
     return this.equipamentosService.salvarComponentesUARLote(ucId, componentesDto.componentes);
   }
 
   @Get('unidade/:unidadeId/equipamentos')
+  @UsePlantaScope({ entity: 'unidade', name: 'unidadeId' })
   @Permissions('equipamentos.view')
   @ApiOperation({ summary: 'Listar equipamentos de uma unidade específica' })
   @ApiResponse({ status: 200, description: 'Lista de equipamentos da unidade' })
@@ -366,6 +407,7 @@ export class EquipamentosController {
   }
 
   @Get('unidades/:unidadeId/estatisticas')
+  @UsePlantaScope({ entity: 'unidade', name: 'unidadeId' })
   @Permissions('equipamentos.view')
   @ApiOperation({ summary: 'Estatísticas dos equipamentos de uma unidade' })
   @ApiResponse({ status: 200, description: 'Estatísticas da unidade' })
@@ -378,6 +420,7 @@ export class EquipamentosController {
   // ==========================================
 
   @Post('virtual/:unidadeId/:tipo')
+  @UsePlantaScope({ entity: 'unidade', name: 'unidadeId' })
   @Permissions('equipamentos.manage')
   @ApiOperation({ summary: 'Criar componente visual (BARRAMENTO ou PONTO) para diagramas' })
   @ApiResponse({ status: 201, description: 'Componente visual criado' })
@@ -391,6 +434,7 @@ export class EquipamentosController {
   }
 
   @Patch(':id/mqtt')
+  @UsePlantaScope({ entity: 'equipamento' })
   @Permissions('equipamentos.manage')
   @ApiOperation({ summary: 'Configurar tópico MQTT de um equipamento' })
   @ApiResponse({ status: 200, description: 'Configuração MQTT atualizada' })
@@ -461,6 +505,7 @@ export class EquipamentosController {
   }
 
   @Post(':id/upload-foto')
+  @UsePlantaScope({ entity: 'equipamento' })
   @Permissions('equipamentos.manage')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Upload de foto do equipamento' })
@@ -499,6 +544,7 @@ export class EquipamentosController {
   }
 
   @Delete(':id/foto')
+  @UsePlantaScope({ entity: 'equipamento' })
   @Permissions('equipamentos.manage')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Remover foto do equipamento' })

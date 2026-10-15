@@ -42,6 +42,8 @@ export interface ContextoExportacao {
   equipamentoIds?: Array<string | null | undefined>;
   unidadeIds?: Array<string | null | undefined>;
   plantaIds?: Array<string | null | undefined>;
+  /** Anexo pedido: o dono (equipamento/unidade) e o nome do arquivo são lidos do banco. */
+  anexo?: { tipo: 'equipamento' | 'unidade'; id: string } | null;
   periodo?: Record<string, string | number | null | undefined> | null;
   formato?: string | null;
   linhas?: number | null;
@@ -145,8 +147,12 @@ export class ExportacaoAuditoriaService {
           periodo: ctx.periodo ?? null,
           formato: ctx.formato ?? null,
           linhas: ctx.linhas ?? null,
+          // ip = socket/req.ip (proxy confiável); xff só como pista, nunca verdade.
           ip: ctx.cliente?.ip ?? null,
+          ip_socket: ctx.cliente?.ipSocket ?? null,
+          xff: ctx.cliente?.xff ?? null,
           user_agent: ctx.cliente?.userAgent ?? null,
+          ...(nomes.anexo ? { anexo_id: nomes.anexo.id, arquivo: nomes.anexo.arquivo } : {}),
           ...(ctx.extra ?? {}),
         },
       });
@@ -159,6 +165,26 @@ export class ExportacaoAuditoriaService {
   private async resolverNomes(ctx: ContextoExportacao) {
     const equipIds = limpar(ctx.equipamentoIds);
     const unidadeIds = limpar(ctx.unidadeIds);
+
+    let anexo: { id: string; arquivo: string | null } | null = null;
+    const anexoId = ctx.anexo?.id?.trim();
+    if (anexoId) {
+      if (ctx.anexo!.tipo === 'equipamento') {
+        const a = await this.prisma.anexos_equipamentos.findFirst({
+          where: { id: anexoId },
+          select: { equipamento_id: true, nome_original: true },
+        });
+        if (a?.equipamento_id && !equipIds.includes(a.equipamento_id.trim())) equipIds.push(a.equipamento_id.trim());
+        anexo = { id: anexoId, arquivo: a?.nome_original ?? null };
+      } else {
+        const a = await this.prisma.anexos_unidades.findFirst({
+          where: { id: anexoId },
+          select: { unidade_id: true, nome_original: true },
+        });
+        if (a?.unidade_id) unidadeIds.push(a.unidade_id.trim());
+        anexo = { id: anexoId, arquivo: a?.nome_original ?? null };
+      }
+    }
     const plantaIds = limpar(ctx.plantaIds);
 
     const equipamentos: Array<{ id: string; nome: string | null }> = [];
@@ -202,6 +228,6 @@ export class ExportacaoAuditoriaService {
       }
     }
 
-    return { equipamentos, unidades, plantas };
+    return { equipamentos, unidades, plantas, anexo };
   }
 }
