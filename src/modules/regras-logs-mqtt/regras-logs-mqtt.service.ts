@@ -125,6 +125,24 @@ export class RegrasLogsMqttService {
     return result;
   }
 
+  /** Exclusão em lote: cada id passa pelo mesmo escopo do remove (dono só apaga as próprias). */
+  async removeMany(ids: string[], user?: ScopedUser) {
+    const lista = [...new Set((ids ?? []).map((i) => String(i).trim()).filter(Boolean))];
+    let removidas = 0;
+    const falhas: string[] = [];
+    for (const id of lista) {
+      try {
+        await this.findOne(id, user);
+        await this.prisma.regras_logs_mqtt.update({ where: { id }, data: { deleted_at: new Date() } });
+        removidas++;
+      } catch {
+        falhas.push(id);
+      }
+    }
+    if (removidas) await this.engine.recarregarCache();
+    return { removidas, falhas };
+  }
+
   async getCamposEquipamento(equipamentoId: string) {
     const ultimoDado = await this.prisma.equipamentos_dados.findFirst({
       where: { equipamento_id: equipamentoId.trim() },

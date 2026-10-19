@@ -46,6 +46,12 @@ export class RegrasLogsMqttController {
     return this.service.update(id, dto, user);
   }
 
+  @Post('excluir-lote')
+  @HttpCode(HttpStatus.OK)
+  removeMany(@Body() body: { ids: string[] }, @CurrentUser() user?: any) {
+    return this.service.removeMany(body?.ids ?? [], user);
+  }
+
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
   remove(@Param('id') id: string, @CurrentUser() user?: any) {
