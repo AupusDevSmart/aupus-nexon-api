@@ -36,6 +36,7 @@ import { TonBoModule } from './modules/ton-bo/ton-bo.module';
 import { VinculosMirrorModule } from './modules/iot-vinculos/vinculos-mirror.module';
 import { SinopticoModule } from './modules/sinoptico/sinoptico.module';
 import { PivosModule } from './modules/pivos/pivos.module';
+import { InversorStringsModule } from './modules/inversor-strings/inversor-strings.module';
 import { TonBiModule } from './modules/ton-bi/ton-bi.module';
 import { TonAiModule } from './modules/ton-ai/ton-ai.module';
 import { MonitoramentoFvModule } from './modules/monitoramento-fv/monitoramento-fv.module';
@@ -107,6 +108,7 @@ import { IotCatalogModule } from './modules/iot-catalog/iot-catalog.module';
     TonBoModule,
     SinopticoModule,
     PivosModule,
+    InversorStringsModule,
     TonBiModule,
     TonAiModule,
     MonitoramentoFvModule,
