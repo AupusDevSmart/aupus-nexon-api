@@ -3,6 +3,7 @@ import { Cron } from '@nestjs/schedule';
 import { randomUUID } from 'node:crypto';
 import * as nodemailer from 'nodemailer';
 import { PrismaService, ScopedUser } from '@/core';
+import { isGlobal, papelCanonico } from '@/core/modules/auth/papeis';
 import { WhatsappService } from '../monitoramento-fv/notificacao/whatsapp.service';
 
 /**
@@ -26,7 +27,6 @@ import { WhatsappService } from '../monitoramento-fv/notificacao/whatsapp.servic
  */
 
 type Familia = 'ton' | 'inversor' | 'medidor' | 'gateway' | 'rele' | 'outro';
-const PAPEIS_ADMIN = ['super_admin', 'admin'];
 const FAMILIA_LABEL: Record<Familia, string> = {
   ton: 'TON', inversor: 'Inversor', medidor: 'Medidor', gateway: 'Gateway/A966', rele: 'Relé', outro: 'Equipamento',
 };
@@ -107,9 +107,24 @@ export class AlarmesComunicacaoService implements OnModuleInit {
     setTimeout(() => this.tick().catch(() => undefined), 30_000);
   }
 
+  /**
+   * Mexe no que dispara WhatsApp/e-mail para cliente (config, destinatários,
+   * envio do resumo): só admin, de propósito — analista não muda isso.
+   */
   assertAdmin(user?: ScopedUser) {
-    if (!user?.role || !PAPEIS_ADMIN.includes(user.role)) {
+    if (papelCanonico(user?.role) !== 'admin') {
       throw new ForbiddenException('Somente administradores configuram os alarmes de comunicação.');
+    }
+  }
+
+  /**
+   * Ver e operar os alarmes (abertos, ignorar, limiar, unidade fora): equipe
+   * Aupus (admin e analistas). Proprietário e operador nunca veem comunicação
+   * (PER-22) — 403 sem dizer se o recurso existe.
+   */
+  assertEquipe(user?: ScopedUser) {
+    if (!isGlobal(papelCanonico(user?.role))) {
+      throw new ForbiddenException('Recurso fora do escopo do usuario');
     }
   }
 

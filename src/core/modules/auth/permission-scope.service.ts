@@ -1,5 +1,6 @@
 import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { isGlobal, papelCanonico } from './papeis';
 
 export type PlantaScope = string[] | null;
 
@@ -34,7 +35,32 @@ export type ScopedEntityType =
  * Papeis que veem TODAS as plantas (escopo nulo). Lista fechada de proposito:
  * qualquer papel fora dela cai no escopo por vinculo (default-deny).
  */
-export const PAPEIS_SEM_ESCOPO: readonly string[] = ['super_admin', 'admin', 'gerente', 'analista'];
+export const PAPEIS_SEM_ESCOPO: readonly string[] = [
+  'super_admin',
+  'admin',
+  'gerente',
+  'analista',
+  'analista_automacao',
+  'analista_operacao',
+];
+
+/**
+ * O que o operador alcança pelos vínculos ativos (NEXON-20, PER-12..24):
+ * equipamentos liberados (e os filhos deles, que andam junto), as instalações e
+ * plantas que os contêm e as permissões extras.
+ */
+export interface AcessoOperador {
+  equipamentos: Set<string>;
+  unidades: Set<string>;
+  plantas: Set<string>;
+  /** Equipamentos com "Ver valores em R$". */
+  verRs: Set<string>;
+  /** Instalações com "Ver geração" (análise de geração). */
+  verGeracao: Set<string>;
+}
+
+/** Cache curto: várias checagens na mesma requisição sem refazer a consulta; PER-21f (vale na próxima). */
+const TTL_ACESSO_MS = 3000;
 
 /** Normaliza o nome do papel: minusculo, sem espacos, e corrige o typo historico 'propietario'. */
 export function normalizarPapel(role?: string | null): string {
@@ -44,7 +70,11 @@ export function normalizarPapel(role?: string | null): string {
 
 /** true quando o papel e administrativo (exporta/ve tudo). */
 export function isPapelSemEscopo(role?: string | null): boolean {
-  return PAPEIS_SEM_ESCOPO.includes(normalizarPapel(role));
+  return PAPEIS_SEM_ESCOPO.includes(normalizarPapel(role)) || isGlobal(papelCanonico(role));
+}
+
+function tabelaVinculoAusente(e: unknown): boolean {
+  return /operador_vinculo\w* .*does not exist|relation "operador_vinculo/i.test((e as Error)?.message ?? '');
 }
 
 /**
@@ -57,7 +87,8 @@ export function isPapelSemEscopo(role?: string | null): boolean {
  *
  * Mapeamento por role (default-deny):
  * - super_admin/admin/gerente/analista -> null (ve tudo)
- * - operador     -> plantas vinculadas via planta_operadores
+ * - operador     -> plantas com algum equipamento liberado nos vinculos ativos
+ *                   (operador_vinculos; sem a tabela, cai no legado planta_operadores)
  * - proprietario -> plantas onde plantas.proprietario_id = userId ('propietario' idem)
  * - qualquer outro papel (ou sem papel) -> uniao dos dois vinculos acima; sem vinculo = []
  *
@@ -66,7 +97,143 @@ export function isPapelSemEscopo(role?: string | null): boolean {
  */
 @Injectable()
 export class PermissionScopeService {
+  private cacheAcesso = new Map<string, { em: number; valor: AcessoOperador | null }>();
+
   constructor(private prisma: PrismaService) {}
+
+  // -------------------------------------------------------------------------
+  // Acesso do operador por equipamento (vinculos)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Equipamentos/instalações/plantas que o operador alcança pelos vínculos
+   * ativos (não removidos e dentro da validade, fuso de São Paulo). Filhos de um
+   * equipamento liberado (equipamento_pai_id) andam junto.
+   *
+   * `null` = tabela de vínculos ainda não existe (SQL 2026-10-20c não aplicado):
+   * o operador segue no escopo legado por planta, sem recorte por equipamento.
+   */
+  async getAcessoOperador(userId: string): Promise<AcessoOperador | null> {
+    const id = userId?.trim();
+    if (!id) return null;
+    const c = this.cacheAcesso.get(id);
+    if (c && Date.now() - c.em < TTL_ACESSO_MS) return c.valor;
+
+    let valor: AcessoOperador | null;
+    try {
+      const [linhas, extras] = await Promise.all([
+        this.prisma.$queryRaw<Array<{ id: string; planta_id: string | null; unidade_id: string | null; ver_rs: boolean }>>`
+          WITH RECURSIVE lib AS (
+            -- Só vale enquanto a planta do equipamento for do proprietário do vínculo
+            -- (planta que troca de dono não leva junto o operador do dono antigo).
+            SELECT ve.equipamento_id AS id, bool_or(ve.ver_rs) AS ver_rs
+            FROM operador_vinculo_equipamentos ve
+            JOIN operador_vinculos v ON v.id = ve.vinculo_id
+            JOIN equipamentos e0 ON e0.id = ve.equipamento_id
+            LEFT JOIN unidades u0 ON u0.id = e0.unidade_id
+            JOIN plantas p0 ON p0.id = COALESCE(e0.planta_id, u0.planta_id) AND p0.proprietario_id = v.proprietario_id
+            WHERE v.operador_id = ${id}::bpchar AND v.removido_em IS NULL
+              AND (v.validade IS NULL OR v.validade >= (now() AT TIME ZONE 'America/Sao_Paulo')::date)
+            GROUP BY ve.equipamento_id
+          ), arv AS (
+            SELECT e.id, lib.ver_rs, 0 AS nivel FROM equipamentos e JOIN lib ON lib.id = e.id WHERE e.deleted_at IS NULL
+            UNION ALL
+            SELECT f.id, arv.ver_rs, arv.nivel + 1 FROM equipamentos f JOIN arv ON f.equipamento_pai_id = arv.id
+            WHERE f.deleted_at IS NULL AND arv.nivel < 6
+          )
+          SELECT TRIM(e.id) AS id, TRIM(COALESCE(e.planta_id, u.planta_id)) AS planta_id,
+                 TRIM(e.unidade_id) AS unidade_id, bool_or(arv.ver_rs) AS ver_rs
+          FROM arv JOIN equipamentos e ON e.id = arv.id
+          LEFT JOIN unidades u ON u.id = e.unidade_id
+          GROUP BY e.id, e.planta_id, u.planta_id, e.unidade_id`,
+        this.prisma.$queryRaw<Array<{ unidade_id: string }>>`
+          SELECT DISTINCT TRIM(vu.unidade_id) AS unidade_id
+          FROM operador_vinculo_unidades vu
+          JOIN operador_vinculos v ON v.id = vu.vinculo_id
+          JOIN unidades u1 ON u1.id = vu.unidade_id
+          JOIN plantas p1 ON p1.id = u1.planta_id AND p1.proprietario_id = v.proprietario_id
+          WHERE v.operador_id = ${id}::bpchar AND v.removido_em IS NULL AND vu.ver_geracao
+            AND (v.validade IS NULL OR v.validade >= (now() AT TIME ZONE 'America/Sao_Paulo')::date)`,
+      ]);
+      valor = {
+        equipamentos: new Set(linhas.map((l) => l.id)),
+        // "Ver geração" também abre a instalação (a análise mora nela).
+        unidades: new Set([
+          ...linhas.map((l) => l.unidade_id).filter((x): x is string => !!x),
+          ...extras.map((x) => x.unidade_id),
+        ]),
+        plantas: new Set(linhas.map((l) => l.planta_id).filter((x): x is string => !!x)),
+        verRs: new Set(linhas.filter((l) => l.ver_rs).map((l) => l.id)),
+        verGeracao: new Set(extras.map((x) => x.unidade_id)),
+      };
+    } catch (e) {
+      if (!tabelaVinculoAusente(e)) throw e;
+      valor = null;
+    }
+    this.cacheAcesso.set(id, { em: Date.now(), valor });
+    if (this.cacheAcesso.size > 500) this.cacheAcesso.clear();
+    return valor;
+  }
+
+  /** Esquece o acesso guardado (depois de gravar vínculo, para valer já). */
+  invalidarAcesso(userId?: string | null): void {
+    if (userId?.trim()) this.cacheAcesso.delete(userId.trim());
+    else this.cacheAcesso.clear();
+  }
+
+  /** true quando o usuário é operador com recorte por equipamento ativo. */
+  async acessoPorEquipamento(user?: ScopedUser | null): Promise<AcessoOperador | null> {
+    if (!user?.id || papelCanonico(user.role) !== 'operador') return null;
+    return this.getAcessoOperador(user.id);
+  }
+
+  /**
+   * Ids de equipamento que o usuário pode ver. `null` = sem recorte por
+   * equipamento (vale só o escopo de planta). Array vazio = nenhum.
+   */
+  async getEquipamentosScope(user?: ScopedUser | null): Promise<string[] | null> {
+    const a = await this.acessoPorEquipamento(user);
+    return a ? [...a.equipamentos] : null;
+  }
+
+  /** Ids de instalação (unidade) visíveis. `null` = sem recorte além da planta. */
+  async getUnidadesScope(user?: ScopedUser | null): Promise<string[] | null> {
+    const a = await this.acessoPorEquipamento(user);
+    return a ? [...a.unidades] : null;
+  }
+
+  /**
+   * Filtro Prisma por equipamento (mesma convenção de `applyPlantaFilter`):
+   * `path` = 'id' na própria tabela de equipamentos, 'equipamento_id' nas dependentes.
+   */
+  applyEquipamentoFilter<T extends Record<string, any>>(where: T, eqScope: string[] | null, path = 'id'): T {
+    if (!Array.isArray(eqScope)) return where;
+    return this.applyPlantaFilter(where, eqScope, path);
+  }
+
+  /** Operador sem o equipamento liberado → 403 (PER-23). Demais papéis passam. */
+  async assertEquipamentoLiberado(equipamentoId: string | null | undefined, user?: ScopedUser | null): Promise<void> {
+    const a = await this.acessoPorEquipamento(user);
+    if (!a) return;
+    const id = equipamentoId?.trim();
+    if (!id || !a.equipamentos.has(id)) throw new ForbiddenException('Recurso fora do escopo do usuario');
+  }
+
+  /** "Ver valores em R$" (seção 6.4): operador só com a permissão extra no equipamento. */
+  async podeVerValores(equipamentoId: string | null | undefined, user?: ScopedUser | null): Promise<boolean> {
+    const a = await this.acessoPorEquipamento(user);
+    if (!a) return true;
+    const id = equipamentoId?.trim();
+    return !!id && a.verRs.has(id);
+  }
+
+  /** Análise de geração (PER-40): operador só com "Ver geração" na instalação. */
+  async podeVerGeracao(unidadeId: string | null | undefined, user?: ScopedUser | null): Promise<boolean> {
+    const a = await this.acessoPorEquipamento(user);
+    if (!a) return true;
+    const id = unidadeId?.trim();
+    return !!id && a.verGeracao.has(id);
+  }
 
   // -------------------------------------------------------------------------
   // Resolucao do scope
@@ -77,15 +244,20 @@ export class PermissionScopeService {
     if (!id) return null;
 
     const papel = normalizarPapel(roleName);
-    if (PAPEIS_SEM_ESCOPO.includes(papel)) return null;
+    if (isPapelSemEscopo(papel)) return null;
 
-    const comoOperador = async () =>
+    const comoOperadorLegado = async () =>
       (
         await this.prisma.planta_operadores.findMany({
           where: { usuario_id: id },
           select: { planta_id: true },
         })
       ).map((r) => r.planta_id.trim());
+
+    const comoOperador = async () => {
+      const a = await this.getAcessoOperador(id);
+      return a ? [...a.plantas] : comoOperadorLegado();
+    };
 
     const comoProprietario = async () =>
       (
@@ -218,6 +390,55 @@ export class PermissionScopeService {
     const plantaId = await this.resolveEntityPlantaId(type, id);
     if (plantaId === null) throw new NotFoundException(`${type} nao encontrado`);
     this.assertPlantaInScopeSync(plantaId, scope);
+
+    // Operador: além da planta, só o equipamento/instalação liberado (PER-23).
+    const acesso = await this.acessoPorEquipamento(user);
+    if (!acesso) return;
+    if (type === 'planta') return;
+    if (type === 'unidade' || type === 'anexo_unidade') {
+      const unidadeId = type === 'unidade' ? id : await this.resolveUnidadeDoAnexo(id);
+      if (!unidadeId || !acesso.unidades.has(unidadeId)) {
+        throw new ForbiddenException('Recurso fora do escopo do usuario');
+      }
+      return;
+    }
+    const equipamentoId = type === 'equipamento' ? id : await this.resolveEntityEquipamentoId(type, id);
+    // Registro sem equipamento (anomalia/OS da planta): basta a planta.
+    if (equipamentoId === undefined) return;
+    if (!equipamentoId || !acesso.equipamentos.has(equipamentoId)) {
+      throw new ForbiddenException('Recurso fora do escopo do usuario');
+    }
+  }
+
+  private async resolveUnidadeDoAnexo(anexoId: string): Promise<string | null> {
+    const row = await this.prisma.anexos_unidades.findFirst({
+      where: { id: anexoId, deleted_at: null },
+      select: { unidade_id: true },
+    });
+    return row?.unidade_id?.trim() ?? null;
+  }
+
+  /**
+   * Equipamento de uma entidade dependente. `undefined` = a entidade não tem
+   * equipamento (vale só a planta); `null` = não achou.
+   */
+  private async resolveEntityEquipamentoId(type: ScopedEntityType, id: string): Promise<string | null | undefined> {
+    const tabela: Partial<Record<ScopedEntityType, string>> = {
+      anomalia: 'anomalias',
+      tarefa: 'tarefas',
+      ordem_servico: 'ordens_servico',
+      programacao_os: 'programacoes_os',
+      regra_log_mqtt: 'regras_logs_mqtt',
+      log_mqtt: 'logs_mqtt',
+      anexo_equipamento: 'anexos_equipamentos',
+      solicitacao_servico: 'solicitacoes_servico',
+    };
+    const t = tabela[type];
+    if (!t) return undefined;
+    const row = await (this.prisma as any)[t]?.findFirst?.({ where: { id }, select: { equipamento_id: true } }).catch(() => null);
+    if (!row) return type === 'solicitacao_servico' ? undefined : null;
+    const eq = row.equipamento_id?.trim?.();
+    return eq ? eq : undefined;
   }
 
   /**

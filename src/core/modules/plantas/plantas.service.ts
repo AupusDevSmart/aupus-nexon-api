@@ -493,13 +493,18 @@ export class PlantasService {
       if (tipo) whereClause.tipo = tipo;
       if (status) whereClause.status = status;
 
+      // Operador (PER-21e): só instalações com equipamento liberado, e a
+      // contagem só dos liberados.
+      const eqScope = await this.scopeService.getEquipamentosScope(user);
+      if (eqScope) whereClause.id = { in: (await this.scopeService.getUnidadesScope(user)) ?? [] };
+
       const unidades = await this.prisma.unidades.findMany({
         where: whereClause,
         include: {
           _count: {
             select: {
               equipamentos: {
-                where: { deleted_at: null }
+                where: { deleted_at: null, ...(eqScope && { id: { in: eqScope } }) }
               }
             }
           }

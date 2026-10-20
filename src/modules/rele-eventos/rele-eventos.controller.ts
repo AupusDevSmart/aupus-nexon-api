@@ -34,6 +34,7 @@ export class ReleEventosController {
       data: await this.service.listar(
         { device, equipamentoId, desde, limit: limit ? Number(limit) : undefined },
         scope,
+        await this.scope.getEquipamentosScope(user),
       ),
     };
   }

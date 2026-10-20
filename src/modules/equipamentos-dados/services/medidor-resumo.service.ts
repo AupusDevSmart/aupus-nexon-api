@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { PrismaService } from '@/core';
+import { PermissionScopeService, PrismaService, ScopedUser } from '@/core';
 import { calcularBucket, getNum } from './gateway-dashboard.service';
 import { Bloco15, resumoBlocos } from './medidor-resumo.util';
 
@@ -23,7 +23,10 @@ const CAP_INV_KW = 5000;
  */
 @Injectable()
 export class MedidorResumoService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly scope: PermissionScopeService,
+  ) {}
 
   private inicioMesBRT(agora = new Date()) {
     const [ano, mes] = agora.toLocaleDateString('en-CA', { timeZone: TZ }).split('-').map(Number);
@@ -34,13 +37,14 @@ export class MedidorResumoService {
     return new Date(Date.UTC(ano, mes - 1, dia, 3, 0, 0, 0));
   }
 
-  async resumo(equipamentoId: string) {
+  async resumo(equipamentoId: string, user?: ScopedUser) {
     const id = equipamentoId.trim();
     const desde = this.inicioMesBRT();
     const hoje = this.inicioDiaBRT();
     const blocos = await this.blocos(id, desde);
     const r = resumoBlocos(blocos);
-    const geracao = await this.geracao(id, desde, hoje);
+    // Geração soma os inversores da instalação: operador só com "Ver geração" nela (PER-40).
+    const geracao = (await this.podeVerGeracao(id, user)) ? await this.geracao(id, desde, hoje) : null;
     const iso = (t?: number | null) => (t ? new Date(t).toISOString() : null);
     return {
       ciclo_inicio: desde.toISOString(),
@@ -59,6 +63,16 @@ export class MedidorResumoService {
         ? { ...geracao, autoconsumo_kwh: geracao.ciclo_kwh != null ? round(Math.max(0, geracao.ciclo_kwh - r.injecao_kwh), 0) : null }
         : null,
     };
+  }
+
+  /** "Ver geração" na instalação do medidor (a dele ou a do equipamento pai). */
+  private async podeVerGeracao(id: string, user?: ScopedUser): Promise<boolean> {
+    if (!user || !(await this.scope.acessoPorEquipamento(user))) return true;
+    const u = await this.prisma.$queryRaw<Array<{ unidade_id: string | null }>>`
+      SELECT TRIM(COALESCE(m.unidade_id, pai.unidade_id)) AS unidade_id FROM equipamentos m
+      LEFT JOIN equipamentos pai ON pai.id = m.equipamento_pai_id
+      WHERE m.id = ${id}::bpchar`;
+    return this.scope.podeVerGeracao(u[0]?.unidade_id ?? null, user);
   }
 
   /** Blocos de 15 min do período (SSU ou PM). */

@@ -1,5 +1,5 @@
 import { Injectable, Logger, NotFoundException, ForbiddenException } from '@nestjs/common';
-import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
+import { PrismaService, PermissionScopeService, ScopedUser, Prisma } from '@/core';
 import { CalculoCustosService } from '../equipamentos-dados/services/calculo-custos.service';
 
 /**
@@ -56,7 +56,9 @@ export class BoletimConsumoService {
     if (!user) return rows;
     const escopo = await this.scope.getScope(user);
     if (!this.scope.isScoped(escopo)) return rows;
-    return rows.filter((r) => escopo.includes(r.planta_id));
+    // Operador: só instalações com equipamento liberado (o payload ainda exige o medidor).
+    const unidades = await this.scope.getUnidadesScope(user);
+    return rows.filter((r) => escopo.includes(r.planta_id) && (!unidades || unidades.includes(r.id)));
   }
 
   async montarPayload(unidadeId: string, dataRef?: string, user?: ScopedUser): Promise<any> {
@@ -90,6 +92,14 @@ export class BoletimConsumoService {
     const medidor = await this.acharMedidor(uid);
     if (!medidor) {
       throw new NotFoundException('Unidade sem medidor (M160/A966) — relatório de consumo não se aplica.');
+    }
+    // Operador: o boletim é do medidor e traz R$ em todo lado; exige o medidor
+    // liberado com "Ver valores em R$" (seção 6.4). Sem isso, 403 sem pista.
+    if (user) {
+      await this.scope.assertEquipamentoLiberado(medidor.id, user);
+      if (!(await this.scope.podeVerValores(medidor.id, user))) {
+        throw new ForbiddenException('Recurso fora do escopo do usuario');
+      }
     }
 
     const dSemIni = this.brtToUtcDate(sIni, 0);
@@ -134,7 +144,7 @@ export class BoletimConsumoService {
     const tsMes = await this.timestampsPeriodo(medidor.id, dMesIni, dMesFim);
     const dispMes = this.analisarDisponibilidade(tsMes, dMesIni, dMesFim);
     const qualidade = await this.qualidade(medidor.id);
-    const eventos = await this.eventos(uid, sIni, sFim);
+    const eventos = await this.eventos(uid, sIni, sFim, user ? await this.scope.getEquipamentosScope(user) : null);
     const consumoMes = this.num(custoMes?.agregacao?.energia_total_kwh);
 
     const pctPonta = consumoTotal ? (this.num(ag.energia_ponta_kwh) / consumoTotal) * 100 : 0;
@@ -344,7 +354,7 @@ export class BoletimConsumoService {
     };
   }
 
-  private async eventos(uid: string, sIni: string, sFim: string): Promise<Array<{ evento: string; qtd: number; severidade: string }>> {
+  private async eventos(uid: string, sIni: string, sFim: string, eqScope: string[] | null = null): Promise<Array<{ evento: string; qtd: number; severidade: string }>> {
     try {
       const rows = await this.prisma.$queryRaw<Array<{ tipo: string; qtd: number; sev: string }>>`
         SELECT COALESCE(NULLIF(TRIM(r.nome), ''), 'Alarme') AS tipo, COUNT(*)::int AS qtd,
@@ -354,6 +364,7 @@ export class BoletimConsumoService {
         LEFT JOIN regras_logs_mqtt r ON r.id = l.regra_id
         WHERE TRIM(e.unidade_id) = ${uid} AND l.tipo = 'alerta'
           AND l.created_at >= ${sIni}::date AND l.created_at < (${sFim}::date + 1)
+          ${eqScope ? Prisma.sql`AND TRIM(e.id) = ANY(${eqScope}::text[])` : Prisma.empty}
         GROUP BY 1 ORDER BY 2 DESC LIMIT 6`;
       return rows.map((r) => ({ evento: r.tipo, qtd: Number(r.qtd), severidade: r.sev === 'CRITICA' ? 'alta' : 'media' }));
     } catch (e) {

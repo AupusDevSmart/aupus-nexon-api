@@ -1,5 +1,7 @@
-import { Injectable, CanActivate, ExecutionContext } from '@nestjs/common';
+import { Injectable, CanActivate, ExecutionContext, Optional } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
+import { AuditoriaAcessosService } from '../../usuarios/auditoria-acessos.service';
+import { registrarAcessoNegado } from '../acesso-negado';
 import { PERMISSIONS_KEY } from '../decorators/permissions.decorator';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
 
@@ -11,7 +13,10 @@ import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
  */
 @Injectable()
 export class PermissionsGuard implements CanActivate {
-  constructor(private reflector: Reflector) {}
+  constructor(
+    private reflector: Reflector,
+    @Optional() private auditoria?: AuditoriaAcessosService,
+  ) {}
 
   canActivate(context: ExecutionContext): boolean {
     // Rotas marcadas com @Public() nao passam por validacao de permissao
@@ -35,10 +40,12 @@ export class PermissionsGuard implements CanActivate {
     }
 
     // Extrair usuário do request (injetado pelo JwtAuthGuard)
-    const { user } = context.switchToHttp().getRequest();
+    const req = context.switchToHttp().getRequest();
+    const { user } = req;
 
     if (!user || !user.permissions) {
       console.log(`❌ [PERMISSIONS GUARD] Usuário sem permissões`);
+      void registrarAcessoNegado(this.auditoria, req, 'usuário sem permissões');
       return false;
     }
 
@@ -48,6 +55,7 @@ export class PermissionsGuard implements CanActivate {
     );
 
     if (!hasPermission) {
+      void registrarAcessoNegado(this.auditoria, req, `requer ${requiredPermissions.join(' ou ')}`);
       console.log(
         `❌ [PERMISSIONS GUARD] Usuário ${user.id} não tem permissão. Requerido: [${requiredPermissions.join(', ')}], Possui: [${user.permissions.join(', ')}]`,
       );

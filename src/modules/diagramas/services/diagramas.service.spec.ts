@@ -40,6 +40,9 @@ describe('DiagramasService', () => {
     canAccessPlanta: jest.fn().mockResolvedValue(true),
     getUserAccessibleUnidades: jest.fn().mockResolvedValue([]),
     getUserAccessiblePlantas: jest.fn().mockResolvedValue([]),
+    // Sem usuário operador: sem recorte por equipamento (NEXON-20).
+    acessoPorEquipamento: jest.fn().mockResolvedValue(null),
+    getEquipamentosScope: jest.fn().mockResolvedValue(null),
   };
 
   beforeEach(async () => {

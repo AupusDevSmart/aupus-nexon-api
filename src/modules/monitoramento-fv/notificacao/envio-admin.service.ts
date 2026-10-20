@@ -1,9 +1,9 @@
 import { ForbiddenException, Injectable, BadRequestException } from '@nestjs/common';
 import { randomBytes } from 'crypto';
 import { PrismaService, ScopedUser } from '@/core';
+import { papelCanonico } from '@/core/modules/auth/papeis';
 
 const CFG_ID = 'cfgdefault0000000000000000';
-const PAPEIS_ADMIN = ['super_admin', 'admin'];
 
 export interface DestinatarioInput {
   unidade_id?: string;
@@ -29,7 +29,8 @@ export class EnvioAdminService {
   constructor(private readonly prisma: PrismaService) {}
 
   assertAdmin(user?: ScopedUser): void {
-    if (!user?.role || !PAPEIS_ADMIN.includes(user.role)) {
+    // Só admin de propósito (ver acima): analista não dispara WhatsApp pra cliente.
+    if (papelCanonico(user?.role) !== 'admin') {
       throw new ForbiddenException('Apenas administradores configuram o envio.');
     }
   }

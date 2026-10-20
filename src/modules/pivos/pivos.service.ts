@@ -3,7 +3,15 @@ import { Prisma, PrismaService, PermissionScopeService, ScopedUser } from '@/cor
 import { novoId26 } from '../../core/common/cliente-info';
 import { colunaTrilhaAusente } from '../logs-mqtt/logs-mqtt-filtros';
 import { PivoConfigDto, ProgramacaoPivoDto } from './dto/pivos.dto';
-import { agruparConjugados, janelaOuPadrao, LinhaConjugado, PONTA_PADRAO, RESERVADO_PADRAO } from './pivo-config.util';
+import { capacidades, isGlobal, MSG_SOMENTE_LEITURA, papelCanonico } from '../../core/modules/auth/papeis';
+import {
+  agruparConjugados,
+  camposTecnicosAlterados,
+  janelaOuPadrao,
+  LinhaConjugado,
+  PONTA_PADRAO,
+  RESERVADO_PADRAO,
+} from './pivo-config.util';
 
 interface ProgramacaoRow {
   id: string;
@@ -95,6 +103,12 @@ export class PivosService {
     const eq = await this.carregarEquipamento(equipamentoId, user);
     await this.exigirComandoNaUnidade(eq.unidade_id, user);
     const atual = await this.getConfig(eq.id, user);
+
+    // PER-33a: lâmina, ponta e reservado são operacionais (todos com acesso);
+    // pressão, tempo de volta, ângulo zero, válvula e motobomba são técnicos.
+    if (user && !capacidades(papelCanonico(user.role)).configTecnica) {
+      if (camposTecnicosAlterados(dto, atual).length) throw new ForbiddenException(MSG_SOMENTE_LEITURA);
+    }
 
     let motobomba = atual.motobomba_equipamento_id;
     if (dto.motobomba_equipamento_id !== undefined) {
@@ -229,7 +243,9 @@ export class PivosService {
         JOIN equipamentos mb ON mb.id = c.motobomba_equipamento_id AND mb.deleted_at IS NULL
         LEFT JOIN equipamentos pai ON pai.id = p.equipamento_pai_id
         WHERE COALESCE(p.unidade_id, pai.unidade_id) = ${uid}::bpchar`;
-      return agruparConjugados(linhas);
+      // Operador: só os pivôs liberados a ele entram no grupo (PER-23).
+      const eqs = user ? await this.scope.getEquipamentosScope(user) : null;
+      return agruparConjugados(eqs ? linhas.filter((l) => eqs.includes(l.pivo_id.trim())) : linhas);
     } catch (e) {
       if (colunaTrilhaAusente(e)) return [];
       throw e;
@@ -265,10 +281,16 @@ export class PivosService {
   /**
    * Operador com permissão por instalação (usuario_unidade_permissoes) só mexe na
    * programação/config se puder COMANDAR ali — mesma regra do acionar.
+   *
+   * NEXON-20 (6.2): Admin, analistas e proprietário comandam tudo do próprio
+   * escopo; o recorte do operador é o equipamento liberado (assertEntityInScope).
+   * A tabela legada só vale para os demais papéis e pode nem existir.
    */
   private async exigirComandoNaUnidade(unidadeId: string | null, user?: ScopedUser) {
     const userId = user?.id?.trim();
     if (!userId) return;
+    const papel = papelCanonico(user?.role);
+    if (isGlobal(papel) || papel === 'proprietario') return;
     try {
       const rows = await this.prisma.$queryRaw<Array<{ linhas: number; comandar: boolean | null }>>`
         SELECT (SELECT COUNT(*) FROM usuario_unidade_permissoes WHERE usuario_id = ${userId}::bpchar)::int AS linhas,

@@ -1,5 +1,6 @@
 import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
 import { PrismaService, Prisma, ScopedUser } from '@/core';
+import { capacidades, papelCanonico } from '@/core/modules/auth/papeis';
 import { FusionSolarService } from '../integracoes/fusion-solar/fusion-solar.service';
 import { IsolarCloudService } from '../integracoes/isolarcloud/isolarcloud.service';
 import { DeyeCloudService } from '../integracoes/deye-cloud/deye-cloud.service';
@@ -10,7 +11,6 @@ import { DeyeCloudService } from '../integracoes/deye-cloud/deye-cloud.service';
  * (limite da API iSolarCloud etc.) — bloqueia salvar config que estoure. RBAC: super_admin/
  * admin/analista (mesmo gate da curadoria manual).
  */
-const PAPEIS_EDITORES = ['super_admin', 'admin', 'analista'];
 const PROVEDORES = ['isolarcloud', 'fusion_solar', 'deye'];
 const FREQ_MIN_MINUTOS = 5; // não deixa configurar mais rápido que 5 min
 
@@ -64,7 +64,8 @@ export class ConfigFvService {
   }
 
   assertEditor(user?: ScopedUser): void {
-    if (!user?.role || !PAPEIS_EDITORES.includes(user.role)) {
+    // Grupo "Usina" (PER-41): equipe Aupus (admin e analistas); proprietário/operador não.
+    if (!capacidades(papelCanonico(user?.role)).configUsina) {
       throw new ForbiddenException('Apenas analistas e administradores podem gerenciar o sync FV.');
     }
   }

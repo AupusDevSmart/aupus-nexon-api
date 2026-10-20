@@ -1,6 +1,7 @@
-import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { PrismaService, PermissionScopeService, ScopedUser, ClienteInfo } from '@/core';
 import { novoId26 } from '../../core/common/cliente-info';
+import { capacidades, MSG_SOMENTE_LEITURA, papelCanonico } from '../../core/modules/auth/papeis';
 import { EquipamentosCmdService } from '../equipamentos-cmd/equipamentos-cmd.service';
 import { FUSO_OPERACAO, JanelaComAtivo, janelaValida, momentoEmSaoPaulo } from '../../shared/util/janela-horario';
 import { dentroDaPonta, duracaoParadaMs, Irrigacao, normalizarIrrigacao, OrigemSequencia, resumoIrrigacao } from './pivo-automacao.util';
@@ -102,6 +103,9 @@ export class PivoSequenciaService implements OnModuleInit {
 
   async salvarConfig(pivoId: string, body: { bombeamento?: Partial<Bombeamento> | null; sequencia?: Partial<SequenciaCfg> }, user?: Autor) {
     const id = await this.assertPivo(pivoId, user);
+    // Bombeamento e tempos da sequência = configuração técnica (PER-33a): Admin e
+    // analistas (inclusive o de operação, que não tem equipamentos.manage).
+    if (user && !capacidades(papelCanonico(user.role)).configTecnica) throw new ForbiddenException(MSG_SOMENTE_LEITURA);
     let bomb: Bombeamento | null = null;
     if (body.bombeamento && body.bombeamento.ativo !== false) {
       const b = body.bombeamento;
@@ -168,6 +172,12 @@ export class PivoSequenciaService implements OnModuleInit {
       WHERE c.bombeamento IS NOT NULL AND c.equipamento_id <> ${id}::bpchar
         AND u.planta_id = (SELECT u2.planta_id FROM equipamentos p2 JOIN unidades u2 ON u2.id = p2.unidade_id WHERE p2.id = ${id}::bpchar)
       ORDER BY e.nome`;
+    // Operador: só TONs e pivôs liberados a ele (PER-23), não os da planta inteira.
+    const eqs = user ? await this.scope.getEquipamentosScope(user) : null;
+    if (eqs) {
+      const lib = new Set(eqs);
+      return { tons: tons.filter((t) => lib.has(t.id)), bombeamentos: outros.filter((o) => lib.has(o.pivo_id)) };
+    }
     return { tons, bombeamentos: outros };
   }
 

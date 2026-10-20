@@ -1,4 +1,5 @@
 import {
+  ForbiddenException,
   Body,
   Controller,
   Delete,
@@ -18,7 +19,8 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
-import { JwtAuthGuard, CurrentUser } from '@/core';
+import { JwtAuthGuard, CurrentUser, ScopedUser } from '@/core';
+import { papelCanonico } from '@/core/modules/auth/papeis';
 
 import { IoTService } from './iot.service';
 import { MqttService } from '../../shared/mqtt/mqtt.service';
@@ -56,6 +58,17 @@ export class IoTController {
   ) {}
 
   /**
+   * Projeto IoT, TON, gateway e SCS são cadastro técnico e comunicação: operador
+   * nunca vê (PER-22). 403 sem dizer se existe. Ficam abertas a ele só as rotas
+   * de equipamento (comandos, sheet do DJ, cards da Visão), recortadas no service.
+   */
+  private semOperador(user?: ScopedUser): void {
+    if (user && papelCanonico(user.role) === 'operador') {
+      throw new ForbiddenException('Recurso fora do escopo do usuario');
+    }
+  }
+
+  /**
    * Lista os boards de bancada vivos no namespace TESTE/ (modo simulação) —
    * MACs vistos publicando em TESTE/.../satellite/<MAC>/... nos últimos ~90s.
    * O painel de teste usa pro remap: você escolhe qual board físico de bancada
@@ -64,9 +77,10 @@ export class IoTController {
   @Get('sim/bench-satellites')
   @ApiOperation({ summary: 'Lista boards de bancada vivos no TESTE/ (simulação)' })
   @ApiResponse({ status: 200, description: 'Array de { mac, base, ageMs }' })
-  async benchSatellites(): Promise<{
+  async benchSatellites(@CurrentUser() user?: any): Promise<{
     data: Array<{ mac: string; base: string; ageMs: number; label: string | null }>;
   }> {
+    this.semOperador(user);
     return { data: this.mqtt.getBenchSatellites() };
   }
 
@@ -77,6 +91,7 @@ export class IoTController {
     @Query() query: ListIotProjetosQueryDto,
     @CurrentUser() user?: any,
   ): Promise<{ data: IotProjetoRow[] }> {
+    this.semOperador(user);
     const data = await this.iotService.getProjetosByUnidade(query.unidade_id, user);
     return { data };
   }
@@ -88,6 +103,7 @@ export class IoTController {
     @Param('id') id: string,
     @CurrentUser() user?: any,
   ): Promise<{ data: IotProjetoRow | null }> {
+    this.semOperador(user);
     const data = await this.iotService.getProjetoById(id, user);
     return { data };
   }
@@ -99,6 +115,7 @@ export class IoTController {
     @Param('id') id: string,
     @CurrentUser() user?: any,
   ): Promise<{ data: Record<string, Record<string, unknown>> }> {
+    this.semOperador(user);
     const data = await this.iotService.projetarVinculosBo(id, user);
     return { data };
   }
@@ -111,6 +128,7 @@ export class IoTController {
     @Body() body: { bo?: Record<string, unknown> },
     @CurrentUser() user?: any,
   ): Promise<{ data: { escritos: number } }> {
+    this.semOperador(user);
     const data = await this.iotService.escreverVinculosBo(id, body?.bo ?? {}, user);
     return { data };
   }
@@ -123,6 +141,7 @@ export class IoTController {
     @Body() dto: CreateIotProjetoDto,
     @CurrentUser() user?: any,
   ): Promise<{ data: IotProjetoRow }> {
+    this.semOperador(user);
     const data = await this.iotService.createProjeto(dto.unidade_id, dto.nome, user);
     return { data };
   }
@@ -136,6 +155,7 @@ export class IoTController {
     @Body() dto: UpdateIotProjetoDto,
     @CurrentUser() user?: any,
   ): Promise<{ data: IotProjetoRow }> {
+    this.semOperador(user);
     const data = await this.iotService.updateProjeto(id, dto, user);
     return { data };
   }
@@ -145,7 +165,9 @@ export class IoTController {
   @ApiResponse({ status: 200, description: '{ equipamento_id, nome } do PM associado, ou null' })
   async powerMeterByDisjuntor(
     @Param('disjuntorId') disjuntorId: string,
+    @CurrentUser() user?: any,
   ): Promise<{ data: { equipamento_id: string; nome: string | null } | null }> {
+    this.semOperador(user);
     const data = await this.iotService.powerMeterByDisjuntor(disjuntorId);
     return { data };
   }
@@ -199,12 +221,14 @@ export class IoTController {
     @Body() body: { scs?: boolean; scs_comando?: boolean; scs_status?: boolean; scs_medicao?: string },
     @CurrentUser() user?: any,
   ) {
+    this.semOperador(user);
     return { data: await this.iotService.setDisjuntorScs(disjuntorId, body ?? {}, user) };
   }
 
   @Get('ton/:tonId/elementos-scs')
   @ApiOperation({ summary: 'Elementos do unifilar com comando/status/medição + seus pontos lógicos' })
   async elementosScs(@Param('tonId') tonId: string, @CurrentUser() user?: any) {
+    this.semOperador(user);
     return { data: await this.iotService.elementosScs(tonId, user) };
   }
 
@@ -217,6 +241,7 @@ export class IoTController {
   @Get('ton/:tonId/scs-config')
   @ApiOperation({ summary: 'Configurações SCS da TON: dispositivos conectados + associação + elementos SCS' })
   async tonScsConfig(@Param('tonId') tonId: string, @CurrentUser() user?: any) {
+    this.semOperador(user);
     return { data: await this.iotService.tonScsConfig(tonId, user) };
   }
 
@@ -227,6 +252,7 @@ export class IoTController {
     @Body() body: { comp_id: string; elemento_equipamento_id: string | null },
     @CurrentUser() user?: any,
   ) {
+    this.semOperador(user);
     return { data: await this.iotService.associarScs(body.comp_id, body.elemento_equipamento_id ?? null, user) };
   }
 
@@ -237,6 +263,7 @@ export class IoTController {
     @Body() body: { comp_id: string; overrides: Record<string, string> },
     @CurrentUser() user?: any,
   ) {
+    this.semOperador(user);
     return { data: await this.iotService.savePontosOverride(body.comp_id, body.overrides ?? {}, user) };
   }
 
@@ -249,6 +276,7 @@ export class IoTController {
     @Param('id') id: string,
     @CurrentUser() user?: any,
   ): Promise<{ success: true }> {
+    this.semOperador(user);
     await this.iotService.deleteProjeto(id, user);
     return { success: true };
   }

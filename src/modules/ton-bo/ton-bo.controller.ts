@@ -18,6 +18,7 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import { JwtAuthGuard, Permissions, CurrentUser } from '@/core';
+import { SemOperadorGuard } from '@/core/modules/auth/guards/sem-operador.guard';
 
 import { TonBoService } from './ton-bo.service';
 import {
@@ -38,7 +39,7 @@ import {
 @ApiTags('TON · Binary Outputs')
 @ApiBearerAuth()
 @Controller('equipamentos/:tonId/bos')
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, SemOperadorGuard)
 export class TonBoController {
   constructor(private readonly service: TonBoService) {}
 

@@ -19,6 +19,7 @@ describe('UsuariosController', () => {
   const mockUsuariosService = {
     findAll: jest.fn(),
     findOne: jest.fn(),
+    assertPodeGerir: jest.fn().mockResolvedValue({ papel: 'operador', role: 'operador' }),
     create: jest.fn(),
     update: jest.fn(),
     remove: jest.fn(),

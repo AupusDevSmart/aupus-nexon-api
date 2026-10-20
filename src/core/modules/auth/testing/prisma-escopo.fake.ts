@@ -1,7 +1,8 @@
 /**
  * Prisma falso, só com o que o escopo por planta e a trilha de exportação leem.
  * Duas plantas (P1 do proprietário "dono1", P2 de "dono2"), uma unidade e um
- * equipamento em cada, e o operador "op1" vinculado só à P1.
+ * equipamento em cada, e o operador "op1" vinculado só à P1 (vínculo com
+ * "dono1" liberando o E1, como a migração de planta_operadores deixa).
  */
 export const FIXTURE = {
   plantas: [
@@ -17,6 +18,10 @@ export const FIXTURE = {
     { id: 'E2', nome: 'Medidor Dois', planta_id: 'P2', unidade_id: 'U2', deleted_at: null },
   ],
   planta_operadores: [{ usuario_id: 'op1', planta_id: 'P1' }],
+  /** operador_vinculo_equipamentos achatado: operador → equipamentos liberados. */
+  vinculo_equipamentos: [{ operador_id: 'op1', equipamento_id: 'E1', ver_rs: false }],
+  /** operador_vinculo_unidades com ver_geracao. */
+  vinculo_ver_geracao: [] as Array<{ operador_id: string; unidade_id: string }>,
   anexos_equipamentos: [
     { id: 'AX1', equipamento_id: 'E1', nome_original: 'manual-um.pdf', deleted_at: null },
     { id: 'AX2', equipamento_id: 'E2', nome_original: 'manual.pdf', deleted_at: null },
@@ -65,6 +70,22 @@ export function prismaEscopoFake() {
       findFirst: jest.fn(async ({ where }: any) => FIXTURE.anexos_unidades.find((a) => casa(a, where)) ?? null),
     },
     $executeRaw: jest.fn(async () => 1),
-    $queryRaw: jest.fn(async () => []),
+    // Só as duas consultas do acesso do operador (PermissionScopeService.getAcessoOperador).
+    $queryRaw: jest.fn(async (strings: TemplateStringsArray | string[], ...values: any[]) => {
+      const sql = Array.isArray(strings) ? strings.join('?') : String(strings);
+      const operador = String(values[0] ?? '').trim();
+      if (sql.includes('WITH RECURSIVE lib')) {
+        return FIXTURE.vinculo_equipamentos
+          .filter((v) => v.operador_id === operador)
+          .map((v) => {
+            const e = comUnidade(FIXTURE.equipamentos.find((x) => x.id === v.equipamento_id));
+            return { id: e.id, planta_id: e.planta_id ?? e.unidade?.planta_id ?? null, unidade_id: e.unidade_id, ver_rs: v.ver_rs };
+          });
+      }
+      if (sql.includes('operador_vinculo_unidades')) {
+        return FIXTURE.vinculo_ver_geracao.filter((v) => v.operador_id === operador).map((v) => ({ unidade_id: v.unidade_id }));
+      }
+      return [];
+    }),
   };
 }

@@ -46,6 +46,9 @@ export class ChamadosService {
     const where: Prisma.chamadosWhereInput = { deleted_at: null };
     const scope = await this.scopeService.getScope(user);
     if (this.scopeService.isScoped(scope)) where.planta_id = { in: scope.map((p) => p.trim()) };
+    // Operador: só chamados dos equipamentos liberados (NEXON-20, PER-23).
+    const eqs = await this.scopeService.getEquipamentosScope(user);
+    if (eqs) where.equipamento_id = { in: eqs };
     return where;
   }
 
@@ -134,6 +137,7 @@ export class ChamadosService {
     const ctx = await this.contexto(equipamentoId, null);
     if (!ctx.equipamento) throw new NotFoundException('Equipamento não encontrado');
     if (user) await this.scopeService.assertPlantaInScope(ctx.planta?.id ?? null, user);
+    await this.scopeService.assertEquipamentoLiberado(equipamentoId, user);
 
     const chamado = await this.prisma.chamados.create({
       data: {
@@ -267,6 +271,7 @@ export class ChamadosService {
       if (this.scopeService.isScoped(scope) && !scope.map((p) => p.trim()).includes(c.planta_id ?? '')) {
         throw new ForbiddenException('Recurso fora do escopo do usuario');
       }
+      await this.scopeService.assertEquipamentoLiberado(c.equipamento_id, user);
     }
     return c;
   }

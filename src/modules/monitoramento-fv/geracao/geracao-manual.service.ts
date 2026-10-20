@@ -1,6 +1,7 @@
 import { ForbiddenException, Injectable, BadRequestException } from '@nestjs/common';
 import { randomBytes } from 'crypto';
 import { PrismaService, Prisma, ScopedUser } from '@/core';
+import { capacidades, papelCanonico } from '@/core/modules/auth/papeis';
 
 /**
  * Entrada/correção MANUAL da geração diária (igual ao fluxo de xlsx do BDO). Analistas e
@@ -13,7 +14,6 @@ import { PrismaService, Prisma, ScopedUser } from '@/core';
  * e consultor (técnico de equipamento) NÃO editam geração. Ajustar aqui se criarem um papel
  * "analista" dedicado.
  */
-const PAPEIS_EDITORES = ['super_admin', 'admin', 'analista'];
 
 export interface LinhaManual {
   unidadeId?: string;
@@ -28,7 +28,8 @@ export class GeracaoManualService {
   constructor(private readonly prisma: PrismaService) {}
 
   assertEditor(user?: ScopedUser): void {
-    if (!user?.role || !PAPEIS_EDITORES.includes(user.role)) {
+    // Grupo "Usina" (PER-41): equipe Aupus (admin e analistas); proprietário/operador não.
+    if (!capacidades(papelCanonico(user?.role)).configUsina) {
       throw new ForbiddenException('Apenas analistas e administradores podem editar a geração.');
     }
   }

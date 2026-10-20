@@ -52,6 +52,29 @@ export class BombaCombustivelService {
   private async assertBombaNoEscopo(user: ScopedUser | undefined, bombaId: string) {
     const plantaId = await this.plantaDaBomba(bombaId);
     await this.assertPlantaNoEscopo(user, plantaId || '');
+    // Operador: só a bomba liberada a ele (PER-23), não todas da planta.
+    if (user) await this.scope.assertEquipamentoLiberado(bombaId, user);
+  }
+
+  /**
+   * Recorte do operador (PER-23): bombas liberadas e as plantas delas (para as
+   * tags/matrículas "da planta inteira", sem bomba_id). `null` = sem recorte.
+   */
+  private async recorteOperador(user?: ScopedUser): Promise<{ bombas: Set<string>; plantas: Set<string> } | null> {
+    const eqs = user ? await this.scope.getEquipamentosScope(user) : null;
+    if (!eqs) return null;
+    const bombas = (await this.listarBombas(user)) as Array<{ id: string; planta_id: string | null }>;
+    return {
+      bombas: new Set(bombas.map((b) => b.id)),
+      plantas: new Set(bombas.map((b) => String(b.planta_id ?? '').trim()).filter(Boolean)),
+    };
+  }
+
+  /** Linha de cadastro (tag/matrícula) visível ao operador: da bomba liberada ou da planta dela. */
+  private visivelAoOperador(r: { bomba_id?: string | null; planta_id?: string | null }, rec: { bombas: Set<string>; plantas: Set<string> }): boolean {
+    const b = String(r.bomba_id ?? '').trim();
+    if (b) return rec.bombas.has(b);
+    return rec.plantas.has(String(r.planta_id ?? '').trim());
   }
 
   // ===== Bombas (equipamentos do tipo bomba) =====
@@ -69,12 +92,14 @@ export class BombaCombustivelService {
         AND (e.tipo_equipamento ILIKE '%bomba%combust%' OR e.tipo_equipamento ILIKE '%fuel%pump%'
              OR te.codigo ILIKE '%BOMBA%COMBUST%' OR te.nome ILIKE '%bomba%combust%')
       ORDER BY e.nome`;
-    return plantas ? rows.filter((r) => plantas.includes(r.planta_id)) : rows;
+    const eqs = user ? await this.scope.getEquipamentosScope(user) : null;
+    return rows.filter((r) => (!plantas || plantas.includes(r.planta_id)) && (!eqs || eqs.includes(r.id)));
   }
 
   // ===== Tags RFID (máquinas) =====
   async listarRfid(user?: ScopedUser, bombaId?: string): Promise<any[]> {
     const plantas = await this.plantasDoUsuario(user);
+    const rec = await this.recorteOperador(user);
     const plantaId = bombaId ? await this.plantaDaBomba(bombaId) : null;
     const rows = await this.prisma.$queryRaw<any[]>`
       SELECT id, uid, maquina_id, maquina_nome, operador, bomba_id, planta_id, ativo,
@@ -84,7 +109,9 @@ export class BombaCombustivelService {
       WHERE (${bombaId ?? null}::text IS NULL OR bomba_id = ${bombaId ?? null}
              OR (bomba_id IS NULL AND planta_id = ${plantaId ?? null}))
       ORDER BY ativo DESC, maquina_nome NULLS LAST, uid`;
-    return plantas ? rows.filter((r) => !!r.planta_id && plantas.includes(String(r.planta_id).trim())) : rows;
+    return rows.filter((r) =>
+      (!plantas || (!!r.planta_id && plantas.includes(String(r.planta_id).trim()))) &&
+      (!rec || this.visivelAoOperador(r, rec)));
   }
 
   async salvarRfid(body: any, user?: ScopedUser): Promise<any> {
@@ -132,6 +159,7 @@ export class BombaCombustivelService {
   // ===== Operadores (matrículas) =====
   async listarOperadores(user?: ScopedUser, bombaId?: string): Promise<any[]> {
     const plantas = await this.plantasDoUsuario(user);
+    const rec = await this.recorteOperador(user);
     const plantaId = bombaId ? await this.plantaDaBomba(bombaId) : null;
     const rows = await this.prisma.$queryRaw<any[]>`
       SELECT id, matricula, nome, bomba_id, planta_id, ativo, to_char(updated_at,'YYYY-MM-DD HH24:MI') AS updated_at
@@ -139,7 +167,9 @@ export class BombaCombustivelService {
       WHERE (${bombaId ?? null}::text IS NULL OR bomba_id = ${bombaId ?? null}
              OR (bomba_id IS NULL AND planta_id = ${plantaId ?? null}))
       ORDER BY ativo DESC, nome NULLS LAST, matricula`;
-    return plantas ? rows.filter((r) => !!r.planta_id && plantas.includes(String(r.planta_id).trim())) : rows;
+    return rows.filter((r) =>
+      (!plantas || (!!r.planta_id && plantas.includes(String(r.planta_id).trim()))) &&
+      (!rec || this.visivelAoOperador(r, rec)));
   }
   async salvarOperador(body: any, user?: ScopedUser): Promise<any> {
     const matricula = String(body.matricula || '').trim();
@@ -261,6 +291,9 @@ export class BombaCombustivelService {
   // ===== Abastecimentos, eventos e estado (modal/relatório) =====
   async listarAbastecimentos(user?: ScopedUser, bombaId?: string, limite = 100): Promise<any[]> {
     const plantas = await this.plantasDoUsuario(user);
+    // Operador: só abastecimentos das bombas liberadas. Escopo vai no SQL, antes
+    // do LIMIT (filtrar depois devolvia a lista curta ou vazia).
+    const eqs = user ? await this.scope.getEquipamentosScope(user) : null;
     const rows = await this.prisma.$queryRaw<any[]>`
       SELECT a.id, TRIM(a.equipamento_id) AS equipamento_id, a.uid, a.maquina_nome, a.matricula, a.operador_nome,
              a.litros, a.nivel_antes, a.nivel_depois, a.status, a.fim_motivo, a.validacao, a.planta_id,
@@ -268,8 +301,10 @@ export class BombaCombustivelService {
              to_char(a.created_at,'DD/MM HH24:MI') AS created_at, a.created_at AS created_at_raw
       FROM abastecimentos a
       WHERE (${bombaId ?? null}::text IS NULL OR TRIM(a.equipamento_id) = ${bombaId ?? null})
+        AND (${plantas === null}::boolean OR TRIM(a.planta_id) = ANY(${plantas ?? []}::text[]))
+        AND (${eqs === null}::boolean OR TRIM(a.equipamento_id) = ANY(${eqs ?? []}::text[]))
       ORDER BY a.created_at DESC LIMIT ${Math.min(Number(limite) || 100, 1000)}`;
-    return plantas ? rows.filter((r) => !!r.planta_id && plantas.includes(String(r.planta_id).trim())) : rows;
+    return rows;
   }
 
   async listarEventos(user: ScopedUser | undefined, bombaId: string, limite = 50): Promise<any[]> {

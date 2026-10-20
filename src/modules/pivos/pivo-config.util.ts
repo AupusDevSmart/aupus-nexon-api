@@ -56,3 +56,61 @@ export function agruparConjugados(linhas: LinhaConjugado[]): GrupoConjugado[] {
     .map((g) => ({ ...g, pivos: g.pivos.sort((a, b) => cmp(a.nome, b.nome)) }))
     .sort((a, b) => cmp(a.motobomba.nome, b.motobomba.nome));
 }
+
+// ============================================================================
+// Classe dos campos da configuração (NEXON-20, PER-33a)
+// ============================================================================
+
+/**
+ * Parâmetros TÉCNICOS do pivô (só Admin e analistas alteram; proprietário e
+ * operador só leem): tempo de volta, pressão mínima, ângulo zero e o
+ * direcionamento da água (válvula). Lâmina, bloqueio de ponta e horário
+ * reservado são OPERACIONAIS (quem tem acesso ao pivô altera).
+ */
+export const PARAMETROS_TECNICOS_PIVO = [
+  'pressao_minima',
+  'tempo_volta_100',
+  'correcao_angulo_zero',
+  'direcionamento',
+  'valvula_ton_id',
+  'valvula_bo',
+] as const;
+
+/** Vínculo com a motobomba (sistema conjugado) também é técnico. */
+export const CAMPO_MOTOBOMBA = 'motobomba_equipamento_id';
+
+export interface ConfigPivoAtual {
+  parametros: Record<string, unknown>;
+  motobomba_equipamento_id: string | null;
+}
+
+export interface DtoConfigPivo {
+  parametros?: object | null;
+  motobomba_equipamento_id?: string | null;
+}
+
+const igual = (a: unknown, b: unknown): boolean => {
+  const n = (v: unknown) => (v === undefined || v === '' ? null : typeof v === 'string' ? v.trim() : v);
+  const x = n(a);
+  const y = n(b);
+  if (x === null || y === null) return x === y;
+  if (typeof x === 'number' || typeof y === 'number') return Number(x) === Number(y);
+  return x === y;
+};
+
+/**
+ * Campos técnicos que o PUT de config MUDA de fato. O app manda o bloco
+ * `parametros` inteiro ao salvar a lâmina: valor técnico igual ao gravado não
+ * conta (o proprietário salva a lâmina sem esbarrar na pressão que nem mexeu).
+ */
+export function camposTecnicosAlterados(dto: DtoConfigPivo, atual: ConfigPivoAtual): string[] {
+  const out: string[] = [];
+  const p = (dto.parametros ?? {}) as Record<string, unknown>;
+  for (const k of PARAMETROS_TECNICOS_PIVO) {
+    if (p[k] !== undefined && !igual(p[k], atual.parametros?.[k])) out.push(k);
+  }
+  if (dto.motobomba_equipamento_id !== undefined && !igual(dto.motobomba_equipamento_id, atual.motobomba_equipamento_id)) {
+    out.push(CAMPO_MOTOBOMBA);
+  }
+  return out;
+}

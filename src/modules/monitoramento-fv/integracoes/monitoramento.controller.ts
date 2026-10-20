@@ -1,9 +1,10 @@
-import { Body, Controller, Delete, Get, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, ForbiddenException, Get, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { JwtAuthGuard, Permissions, PermissionScopeService, CurrentUser, ScopedUser } from '@/core';
 import { MonitoramentoSyncService } from './sync.service';
 import { MonitoramentoSyncHorarioService } from './sync-horario.service';
 import { FusionInverterFallbackService } from './fusion-inverter-fallback.service';
+import { isGlobal, papelCanonico } from '@/core/modules/auth/papeis';
 
 /**
  * Sync manual das APIs de nuvem → `geracao_diaria_plantas`. SÓ trigger manual (sem cron
@@ -26,15 +27,28 @@ export class MonitoramentoController {
     private readonly scope: PermissionScopeService,
   ) {}
 
+  /** Operador (PER-40): geração só das instalações com "Ver geração". `null` = sem recorte. */
+  private async unidadesGeracao(user?: ScopedUser): Promise<string[] | null> {
+    const a = await this.scope.acessoPorEquipamento(user);
+    return a ? [...a.verGeracao] : null;
+  }
+
+  /** Sync mexe em todas as usinas: só equipe Aupus dispara. */
+  private exigirEquipe(user?: ScopedUser) {
+    if (user && !isGlobal(papelCanonico(user.role))) throw new ForbiddenException('Recurso fora do escopo do usuario');
+  }
+
   @Post('sync')
   @ApiOperation({ summary: 'Dispara sync das nuvens → geracao_diaria_plantas (manual, ?data=YYYY-MM-DD)' })
-  async syncManual(@Query('data') data?: string) {
+  async syncManual(@Query('data') data?: string, @CurrentUser() user?: ScopedUser) {
+    this.exigirEquipe(user);
     return { data: await this.sync.syncAll(data) };
   }
 
   @Post('sync-horario')
   @ApiOperation({ summary: 'Dispara snapshot horário do acumulado → geracao_horaria_plantas (manual)' })
-  async syncHorarioManual() {
+  async syncHorarioManual(@CurrentUser() user?: ScopedUser) {
+    this.exigirEquipe(user);
     return { data: await this.syncHorario.snapshotTodos() };
   }
 
@@ -42,21 +56,21 @@ export class MonitoramentoController {
   @ApiOperation({ summary: 'Geração consolidada do dia (realizado × meta × %) por unidade, p/ o COA' })
   async geracaoDia(@Query('data') data?: string, @CurrentUser() user?: ScopedUser) {
     const scope = await this.scope.getScope(user);
-    return { data: await this.sync.listarGeracaoDia(data, scope) };
+    return { data: await this.sync.listarGeracaoDia(data, scope, await this.unidadesGeracao(user)) };
   }
 
   @Get('resumo')
   @ApiOperation({ summary: 'Resumo do parque FV (KPIs hoje + ranking + série diária) p/ o painel do COA' })
   async resumo(@Query('dias') dias?: string, @CurrentUser() user?: ScopedUser) {
     const scope = await this.scope.getScope(user);
-    return { data: await this.sync.getResumo(dias ? Number(dias) : 30, scope) };
+    return { data: await this.sync.getResumo(dias ? Number(dias) : 30, scope, await this.unidadesGeracao(user)) };
   }
 
   @Get('registros')
   @ApiOperation({ summary: 'Registros diários crus (por unidade, últimos N meses) p/ filtro/agregação no front' })
   async registros(@Query('meses') meses?: string, @CurrentUser() user?: ScopedUser) {
     const scope = await this.scope.getScope(user);
-    return { data: await this.sync.getRegistros(meses ? Number(meses) : 12, scope) };
+    return { data: await this.sync.getRegistros(meses ? Number(meses) : 12, scope, await this.unidadesGeracao(user)) };
   }
 
   // --- Fallback por-inversor (nuvem Fusion → modal "Dados em Tempo Real") ---

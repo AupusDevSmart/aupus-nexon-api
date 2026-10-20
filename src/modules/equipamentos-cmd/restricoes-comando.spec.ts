@@ -1,4 +1,4 @@
-import { avaliarRestricoes, ContextoComando } from './restricoes-comando';
+import { avaliarRestricoes, ContextoComando, ehMedidor, sujeitoPermissaoPorUnidade } from './restricoes-comando';
 
 const base: ContextoComando = {
   comandarNaUnidade: null,
@@ -54,5 +54,28 @@ describe('avaliarRestricoes (acionar)', () => {
     };
     expect(avaliarRestricoes(tudo)?.code).toBe('SEM_PERMISSAO_UNIDADE');
     expect(avaliarRestricoes({ ...tudo, comandarNaUnidade: true })?.code).toBe('COMANDO_FORA_JANELA');
+  });
+});
+
+describe('sujeitoPermissaoPorUnidade (NEXON-20, 6.2)', () => {
+  it('Admin, analistas e proprietário comandam sem a permissão por instalação', () => {
+    for (const p of ['admin', 'analista_automacao', 'analista_operacao', 'proprietario'] as const) {
+      expect(sujeitoPermissaoPorUnidade(p)).toBe(false);
+    }
+  });
+  it('operador e papéis sem nome seguem sujeitos', () => {
+    expect(sujeitoPermissaoPorUnidade('operador')).toBe(true);
+    expect(sujeitoPermissaoPorUnidade('outro')).toBe(true);
+  });
+});
+
+describe('ehMedidor', () => {
+  it('medidor não recebe comando; inversor, disjuntor e pivô sim', () => {
+    expect(ehMedidor('MEDIDOR')).toBe(true);
+    expect(ehMedidor('medidor_ssu')).toBe(true);
+    expect(ehMedidor('INVERSOR')).toBe(false);
+    expect(ehMedidor('DISJUNTOR')).toBe(false);
+    expect(ehMedidor('PIVO')).toBe(false);
+    expect(ehMedidor(null)).toBe(false);
   });
 });

@@ -1,10 +1,15 @@
 import { Body, Controller, ForbiddenException, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard, CurrentUser, PrismaService, PermissionScopeService } from '@/core';
 import { OcppService } from './ocpp.service';
+import { isGlobal, papelCanonico } from '../../core/modules/auth/papeis';
 
 /**
  * CSMS OCPP — visão e comando das estações. Listagem owner-scoped por planta do CP
- * (CP sem planta atribuída = só admin). Comandos remotos (start/stop/reset): admin.
+ * (CP sem planta atribuída = só a equipe Aupus).
+ *
+ * NEXON-20 (6.2): iniciar/parar recarga = Admin, analistas e o proprietário da
+ * planta do CP. O operador fica de fora: o CP não é equipamento do cadastro, então
+ * não há como saber se foi liberado a ele. Reset da estação é técnico (equipe Aupus).
  */
 @Controller('ocpp')
 @UseGuards(JwtAuthGuard)
@@ -15,11 +20,23 @@ export class OcppController {
     private readonly scope: PermissionScopeService,
   ) {}
 
+  /** Equipe Aupus (Admin e analistas, inclusive os papéis novos do NEXON-20). */
   private assertAdmin(user: any) {
-    const role = String(user?.role || '').toLowerCase();
-    if (!['super_admin', 'admin', 'gerente'].includes(role)) {
+    if (!isGlobal(papelCanonico(user?.role))) {
       throw new ForbiddenException('Apenas administradores comandam estações OCPP.');
     }
+  }
+
+  /** Iniciar/parar recarga: equipe Aupus ou o proprietário, só em CP com planta no escopo dele. */
+  private async assertComandoRecarga(user: any, cpId: string) {
+    const papel = papelCanonico(user?.role);
+    if (isGlobal(papel)) return;
+    if (papel !== 'proprietario') throw new ForbiddenException('Sem permissão para comandar esta estação.');
+    const cp = await this.prisma.$queryRaw<Array<{ planta_id: string | null }>>`
+      SELECT TRIM(planta_id) AS planta_id FROM ocpp_charge_points WHERE charge_point_id = ${String(cpId ?? '').trim()} LIMIT 1`;
+    const plantaId = cp[0]?.planta_id;
+    if (!plantaId) throw new ForbiddenException('Estação sem planta atribuída: só a equipe Aupus comanda.');
+    await this.scope.assertEntityInScope('planta', plantaId, user);
   }
 
   /** Estações registradas + estado ao vivo (conectado agora). */
@@ -49,12 +66,18 @@ export class OcppController {
     @CurrentUser() user: any,
   ) {
     const n = Math.min(Number(limite) || 100, 500);
+    // Mesmo recorte da lista de estações: escopado só vê transação de CP da planta
+    // dele. O filtro vai no SQL, antes do LIMIT (depois, a lista vinha curta ou vazia).
+    const escopo = await this.scope.getScope(user);
+    const plantas = this.scope.isScoped(escopo) ? escopo.map((x) => String(x).trim()) : null;
     const rows = await this.prisma.$queryRaw<Array<any>>`
       SELECT t.transaction_id, t.charge_point_id, t.connector_id, t.id_tag,
              TRIM(t.morador_id) AS morador_id, t.meter_start, t.meter_stop, t.energia_kwh,
-             t.inicio, t.fim, t.motivo_fim, t.status
+             t.inicio, t.fim, t.motivo_fim, t.status, TRIM(cp.planta_id) AS planta_id
       FROM ocpp_transactions t
+      LEFT JOIN ocpp_charge_points cp ON cp.charge_point_id = t.charge_point_id
       WHERE (${cpId || null}::text IS NULL OR t.charge_point_id = ${cpId || null})
+        AND (${plantas === null}::boolean OR TRIM(cp.planta_id) = ANY(${plantas ?? []}::text[]))
       ORDER BY t.inicio DESC NULLS LAST
       LIMIT ${n}
     `;
@@ -64,14 +87,14 @@ export class OcppController {
   /** Inicia recarga remotamente (CSMS → carregador). */
   @Post(':cpId/remote-start')
   async remoteStart(@Param('cpId') cpId: string, @Body() body: any, @CurrentUser() user: any) {
-    this.assertAdmin(user);
+    await this.assertComandoRecarga(user, cpId);
     return { data: await this.svc.remoteStart(cpId, String(body?.idTag || ''), body?.connectorId ? Number(body.connectorId) : undefined) };
   }
 
   /** Para recarga remotamente. */
   @Post(':cpId/remote-stop')
   async remoteStop(@Param('cpId') cpId: string, @Body() body: any, @CurrentUser() user: any) {
-    this.assertAdmin(user);
+    await this.assertComandoRecarga(user, cpId);
     return { data: await this.svc.remoteStop(cpId, Number(body?.transactionId)) };
   }
 

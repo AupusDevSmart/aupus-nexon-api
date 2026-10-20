@@ -5,6 +5,7 @@ import { NotificacaoService } from './notificacao.service';
 import { EnvioAdminService, ConfigInput, DestinatarioInput } from './envio-admin.service';
 import { NotificacaoDispatcherService } from './dispatcher.service';
 import { WhatsappService } from './whatsapp.service';
+import { isGlobal, papelCanonico } from '@/core/modules/auth/papeis';
 
 /**
  * Notificações (Monitoramento FV) — FASE 0. Só leitura: lista de tipos + PREVIEW do
@@ -48,8 +49,14 @@ export class NotificacaoController {
     // RBAC: só pode pré-visualizar alvo que está no escopo do usuário.
     if (unidadeId?.trim()) await this.scope.assertEntityInScope('unidade', unidadeId.trim(), user);
     if (plantaId?.trim()) await this.scope.assertEntityInScope('planta', plantaId.trim(), user);
-    // Boletim por dono: proprietário só pode ver o próprio; staff (escopo nulo) vê qualquer um.
-    if (proprietarioId?.trim() && user?.role === 'proprietario' && proprietarioId.trim() !== user?.id) {
+    const papel = papelCanonico(user?.role);
+    // Operador (PER-40): boletim é geração; só de instalação com "Ver geração", nunca da planta/dono.
+    if (user && papel === 'operador') {
+      const ok = !!unidadeId?.trim() && !plantaId?.trim() && !proprietarioId?.trim() && (await this.scope.podeVerGeracao(unidadeId, user));
+      if (!ok) throw new ForbiddenException('Recurso fora do escopo do usuario');
+    }
+    // Boletim por dono: fora da equipe Aupus, só o próprio; staff (escopo nulo) vê qualquer um.
+    if (user && proprietarioId?.trim() && !isGlobal(papel) && proprietarioId.trim() !== user.id?.trim()) {
       throw new ForbiddenException('Você só pode pré-visualizar o boletim das suas próprias usinas.');
     }
     return { data: await this.service.preview(tipo, { unidadeId, plantaId, proprietarioId, data }) };

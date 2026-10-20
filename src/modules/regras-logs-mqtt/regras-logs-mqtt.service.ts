@@ -65,6 +65,9 @@ export class RegrasLogsMqttService {
         ? [{ id: '__NEVER__' }]
         : [{ equipamento: { unidade: { planta_id: { in: scope } } } }];
     }
+    // Operador: só regras dos equipamentos liberados (PER-23).
+    const eqScope = await this.scopeService.getEquipamentosScope(user);
+    if (eqScope) where.AND = [...(where.AND ?? []), { equipamento_id: { in: eqScope } }];
 
     const [data, total] = await Promise.all([
       this.prisma.regras_logs_mqtt.findMany({
@@ -143,7 +146,8 @@ export class RegrasLogsMqttService {
     return { removidas, falhas };
   }
 
-  async getCamposEquipamento(equipamentoId: string) {
+  async getCamposEquipamento(equipamentoId: string, user?: ScopedUser) {
+    if (user) await this.scopeService.assertEntityInScope('equipamento', equipamentoId.trim(), user);
     const ultimoDado = await this.prisma.equipamentos_dados.findFirst({
       where: { equipamento_id: equipamentoId.trim() },
       orderBy: { created_at: 'desc' },

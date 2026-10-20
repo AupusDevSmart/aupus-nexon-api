@@ -315,11 +315,11 @@ export class UnidadesController {
     description: 'Unidade não encontrada',
   })
   @UsePlantaScope({ entity: 'unidade' })
-  async getEstatisticas(@Param('id') id: string) {
+  async getEstatisticas(@Param('id') id: string, @CurrentUser() user: any) {
     this.logger.log(`📊 [ESTATISTICAS UNIDADE] Unidade: ${id}`);
 
     try {
-      const stats = await this.unidadesService.getEstatisticas(id);
+      const stats = await this.unidadesService.getEstatisticas(id, user);
       this.logger.log(`✅ [ESTATISTICAS UNIDADE] Estatísticas geradas`);
       return stats;
     } catch (error) {
@@ -481,11 +481,11 @@ export class UnidadesController {
     description: 'Unidade não encontrada',
   })
   @UsePlantaScope({ entity: 'unidade' })
-  async getEstatisticasEquipamentos(@Param('id') id: string) {
+  async getEstatisticasEquipamentos(@Param('id') id: string, @CurrentUser() user: any) {
     this.logger.log(`📊 [ESTATISTICAS EQUIPAMENTOS UNIDADE] Unidade: ${id}`);
 
     try {
-      const stats = await this.equipamentosService.getEstatisticasUnidade(id);
+      const stats = await this.equipamentosService.getEstatisticasUnidade(id, user);
       this.logger.log(`✅ [ESTATISTICAS EQUIPAMENTOS UNIDADE] Estatísticas geradas`);
       return stats;
     } catch (error) {

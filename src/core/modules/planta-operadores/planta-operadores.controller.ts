@@ -3,6 +3,7 @@ import { ApiTags, ApiOperation, ApiParam } from '@nestjs/swagger';
 import { PlantaOperadoresService } from './planta-operadores.service';
 import { Permissions } from '../auth/decorators/permissions.decorator';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { isGlobal, papelCanonico } from '../auth/papeis';
 
 @ApiTags('plantas-operadores')
 @Controller()
@@ -17,8 +18,7 @@ export class PlantaOperadoresController {
   @ApiOperation({ summary: 'Listar plantas onde o usuario eh operador' })
   @ApiParam({ name: 'usuarioId', description: 'ID do usuario' })
   async listByOperador(@Param('usuarioId') usuarioId: string, @CurrentUser() user?: any) {
-    const role = user?.role;
-    const isAdminLike = ['analista', 'gerente', 'admin', 'super_admin'].includes(role ?? '');
+    const isAdminLike = isGlobal(papelCanonico(user?.role));
     const isSelf = user?.id?.trim() === usuarioId.trim();
     if (!isAdminLike && !isSelf) {
       throw new ForbiddenException('Voce so pode consultar suas proprias plantas');

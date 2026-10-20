@@ -1,5 +1,5 @@
 import { createHash } from 'crypto';
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger } from '@nestjs/common';
 import { PrismaService, Prisma, PermissionScopeService, ScopedUser } from '@/core';
 import {
   classificarIntervalo, energiaPrevista, fechamentoDoMes, InversorIntervalo, INTERVALO_H, INTERVALO_MS,
@@ -342,6 +342,10 @@ export class GeracaoAnaliseService {
     const uid = (unidadeId ?? '').trim();
     if (!uid) throw new BadRequestException('unidadeId obrigatório');
     if (user) await this.scope.assertEntityInScope('unidade', uid, user);
+    // PER-40: operador só com "Ver geração" na instalação; 403 sem dar pista.
+    if (user && !(await this.scope.podeVerGeracao(uid, user))) {
+      throw new ForbiddenException('Recurso fora do escopo do usuario');
+    }
     const periodo: Periodo = PERIODOS.includes(periodoQ as Periodo) ? (periodoQ as Periodo) : 'dia';
     const hoje = diaLocal(agora);
     // Data real (somarDias normaliza 2026-02-31 → 03-03) e de 2000 em diante.

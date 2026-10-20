@@ -1,14 +1,15 @@
 import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService, Prisma, ScopedUser } from '@/core';
+import { capacidades, papelCanonico } from '@/core/modules/auth/papeis';
 
 /**
  * Grupo "Usina" da configuração da instalação (NEXON-16, seção 7). Tabela `unidade_usina_config`.
- * Edição: super_admin, admin e analista ("Analista de automação"). Toda gravação deixa trilha
+ * Ver e editar: só a equipe Aupus (admin e analistas, PER-41); proprietário e operador nem
+ * recebem o grupo (403 no controller). Toda gravação deixa trilha
  * campo a campo em `unidade_usina_config_historico` e um evento no Registro (`logs_mqtt`,
  * comando_semantico = 'usina.config').
  */
 
-export const PAPEIS_EDITORES_USINA = ['super_admin', 'admin', 'analista'];
 export const FONTES = ['satelite', 'solarimetro', 'nenhuma'] as const;
 export type FonteIrradiancia = (typeof FONTES)[number];
 
@@ -176,8 +177,7 @@ export class GeracaoConfigService {
   constructor(private readonly prisma: PrismaService) {}
 
   podeEditar(user?: ScopedUser): boolean {
-    const papel = String(user?.role ?? '').trim().toLowerCase().replace(/-/g, '_');
-    return PAPEIS_EDITORES_USINA.includes(papel);
+    return capacidades(papelCanonico(user?.role)).configUsina;
   }
 
   async unidade(unidadeId: string): Promise<UnidadeUsina> {
@@ -370,7 +370,7 @@ export class GeracaoConfigService {
    */
   async salvar(unidadeId: string, input: ConfigUsinaInput, user?: ScopedUser): Promise<Record<string, { de: any; para: any }>> {
     if (!this.podeEditar(user)) {
-      throw new ForbiddenException('Só analista de automação e administradores alteram a configuração da usina.');
+      throw new ForbiddenException('Recurso fora do escopo do usuario');
     }
     const ctx = await this.contexto(unidadeId);
     const uid = ctx.unidade.id;

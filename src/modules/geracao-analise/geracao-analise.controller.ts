@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Put, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, ForbiddenException, Get, Param, Put, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard, CurrentUser, ScopedUser, PermissionScopeService } from '@/core';
 import { GeracaoAnaliseService } from './geracao-analise.service';
@@ -32,9 +32,15 @@ export class GeracaoAnaliseController {
     return this.analise.analise(unidadeId, periodo, data, user);
   }
 
+  /** Grupo "Usina" (PER-41): só equipe Aupus; proprietário/operador nem leem. */
+  private exigirConfigUsina(user?: ScopedUser) {
+    if (user && !this.configs.podeEditar(user)) throw new ForbiddenException('Recurso fora do escopo do usuario');
+  }
+
   @Get(':unidadeId/config')
   @ApiOperation({ summary: 'Configuração "Usina" da instalação, faixas e opções' })
   async config(@Param('unidadeId') unidadeId: string, @CurrentUser() user?: ScopedUser) {
+    this.exigirConfigUsina(user);
     if (user) await this.scope.assertEntityInScope('unidade', unidadeId.trim(), user);
     return this.configs.obter(unidadeId, user);
   }
@@ -42,13 +48,15 @@ export class GeracaoAnaliseController {
   @Get(':unidadeId/config/historico')
   @ApiOperation({ summary: 'Histórico de alterações da configuração "Usina"' })
   async historico(@Param('unidadeId') unidadeId: string, @CurrentUser() user?: ScopedUser) {
+    this.exigirConfigUsina(user);
     if (user) await this.scope.assertEntityInScope('unidade', unidadeId.trim(), user);
     return this.configs.historico(unidadeId);
   }
 
   @Put(':unidadeId/config')
-  @ApiOperation({ summary: 'Grava a configuração "Usina" (analista de automação e admin)' })
+  @ApiOperation({ summary: 'Grava a configuração "Usina" (admin e analistas)' })
   async salvar(@Param('unidadeId') unidadeId: string, @Body() body: ConfigUsinaInput, @CurrentUser() user?: ScopedUser) {
+    this.exigirConfigUsina(user);
     if (user) await this.scope.assertEntityInScope('unidade', unidadeId.trim(), user);
     const alteracoes = await this.configs.salvar(unidadeId, body, user);
     if (Object.keys(alteracoes).length) {
