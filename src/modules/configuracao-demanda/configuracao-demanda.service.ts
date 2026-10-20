@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, ForbiddenException, Logger } from '@nestjs/common';
 import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
 import { AuditoriaAcessosService } from '@/core/modules/usuarios/auditoria-acessos.service';
 import { normalizarPapel } from '@/core/modules/auth/permission-scope.service';
@@ -336,7 +336,7 @@ export class ConfiguracaoDemandaService {
     unidadeId: string,
     data: UpdateConfiguracaoDemandaDto,
     userId?: string,
-    user?: ScopedUser & { nome?: string | null; email?: string | null },
+    user?: ScopedUser & { nome?: string | null; email?: string | null; permissions?: string[] },
     cliente?: ClienteInfo,
   ) {
     const uid = unidadeId.trim();
@@ -348,6 +348,15 @@ export class ConfiguracaoDemandaService {
       where: { id: uid },
       select: { nome: true, demanda_geracao: true, demanda_carga: true, planta: { select: { id: true, nome: true } } },
     });
+
+    // Demanda contratada é dado da unidade: mudar exige a mesma permissão do PUT /unidades/:id.
+    const num = (v: unknown) => (v === null || v === undefined ? null : Number(v));
+    const mudaDemanda =
+      (demanda_geracao !== undefined && num(demanda_geracao) !== num(unidadeAntes?.demanda_geracao)) ||
+      (demanda_carga !== undefined && num(demanda_carga) !== num(unidadeAntes?.demanda_carga));
+    if (mudaDemanda && !user?.permissions?.includes('unidades.manage')) {
+      throw new ForbiddenException('Sem permissão para alterar a demanda contratada da unidade');
+    }
 
     const resultado = await this.salvarPorUnidade(uid, dataConfig, userId);
 
@@ -381,7 +390,10 @@ export class ConfiguracaoDemandaService {
 
       const idsCitados = [...diff.adicionados, ...diff.removidos];
       const equipamentos = idsCitados.length
-        ? await this.prisma.equipamentos.findMany({ where: { id: { in: idsCitados } }, select: { id: true, nome: true } })
+        ? await this.prisma.equipamentos.findMany({
+            where: { id: { in: idsCitados }, unidade_id: unidadeId },
+            select: { id: true, nome: true },
+          })
         : [];
       const nomes = Object.fromEntries(equipamentos.map((e) => [e.id.trim(), e.nome]));
       const comNome = (ids: string[]) => ids.map((id) => ({ id, nome: nomes[id] ?? null }));
