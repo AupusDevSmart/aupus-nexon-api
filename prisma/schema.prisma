@@ -3495,3 +3495,53 @@ model sincronizacao_no {
   travar Boolean @id @default(true)
   origem String  @db.VarChar(20)
 }
+
+/// NEXON-24 — chamados de reparo de equipamento. Tabela criada por
+/// db/manual-migrations/2026-10-20c_chamados.sql. Ids sem padding (varchar).
+model chamados {
+  id                String                     @id @db.VarChar(26)
+  numero            Int                        @unique @default(autoincrement())
+  equipamento_id    String                     @db.VarChar(26)
+  unidade_id        String?                    @db.VarChar(26)
+  planta_id         String?                    @db.VarChar(26)
+  proprietario_id   String?                    @db.VarChar(26)
+  titulo            String                     @db.VarChar(200)
+  descricao         String
+  motivo            String                     @default("FALHA") @db.VarChar(20)
+  prioridade        String                     @default("MEDIA") @db.VarChar(10)
+  status            String                     @default("ABERTO") @db.VarChar(12)
+  canal             String                     @default("WEB") @db.VarChar(10)
+  autor_id          String?                    @db.VarChar(26)
+  autor_nome        String?                    @db.VarChar(255)
+  fechado_em        DateTime?                  @db.Timestamp(0)
+  fechado_por_id    String?                    @db.VarChar(26)
+  fechado_por_nome  String?                    @db.VarChar(255)
+  motivo_fechamento String?                    @db.VarChar(500)
+  created_at        DateTime                   @default(now()) @db.Timestamp(0)
+  updated_at        DateTime                   @default(now()) @updatedAt @db.Timestamp(0)
+  deleted_at        DateTime?                  @db.Timestamp(0)
+  encaminhamentos   chamados_encaminhamentos[]
+
+  @@index([planta_id])
+  @@index([equipamento_id])
+}
+
+model chamados_encaminhamentos {
+  id                 String    @id @db.VarChar(26)
+  chamado_id         String    @db.VarChar(26)
+  destino            String    @db.VarChar(15)
+  contato            String?   @db.VarChar(255)
+  observacao         String?   @db.VarChar(1000)
+  status             String    @default("PENDENTE") @db.VarChar(25)
+  tentativas         Int       @default(0)
+  ultimo_erro        String?   @db.VarChar(500)
+  referencia_externa String?   @db.VarChar(100)
+  enviado_em         DateTime? @db.Timestamp(0)
+  autor_id           String?   @db.VarChar(26)
+  autor_nome         String?   @db.VarChar(255)
+  created_at         DateTime  @default(now()) @db.Timestamp(0)
+  updated_at         DateTime  @default(now()) @updatedAt @db.Timestamp(0)
+  chamado            chamados  @relation(fields: [chamado_id], references: [id], onDelete: Cascade)
+
+  @@index([chamado_id])
+}

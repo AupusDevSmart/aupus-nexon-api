@@ -19,6 +19,7 @@ import { AlarmesComunicacaoModule } from './modules/alarmes-comunicacao/alarmes-
 import { DiagramasModule } from './modules/diagramas/diagramas.module';
 import { EquipamentosDadosModule } from './modules/equipamentos-dados/equipamentos-dados.module';
 import { ConfiguracaoDemandaModule } from './modules/configuracao-demanda/configuracao-demanda.module';
+import { ChamadosModule } from './modules/chamados/chamados.module';
 import { CoaModule } from './modules/coa/coa.module';
 import { LogsMqttModule } from './modules/logs-mqtt/logs-mqtt.module';
 import { RegrasLogsMqttModule } from './modules/regras-logs-mqtt/regras-logs-mqtt.module';
@@ -96,6 +97,7 @@ import { IotCatalogModule } from './modules/iot-catalog/iot-catalog.module';
     DiagramasModule,
     EquipamentosDadosModule,
     ConfiguracaoDemandaModule,
+    ChamadosModule,
     CoaModule,
     LogsMqttModule,
     RegrasLogsMqttModule,
