@@ -14,7 +14,8 @@ export type TipoExportacao =
   | 'carregador' // export mensal do carregador elétrico
   | 'boletim_semanal' // relatório de geração (boletim semanal)
   | 'consumo' // relatório de consumo
-  | 'geracao'; // histórico de geração da unidade (só negada)
+  | 'geracao' // histórico de geração da unidade (só negada)
+  | 'relatorio_operacao'; // relatórios de operação dos equipamentos (NEXON-33)
 
 export const ROTULO_EXPORTACAO: Record<TipoExportacao, string> = {
   leituras: 'leituras do equipamento',
@@ -26,6 +27,7 @@ export const ROTULO_EXPORTACAO: Record<TipoExportacao, string> = {
   boletim_semanal: 'boletim semanal de geração',
   consumo: 'relatório de consumo',
   geracao: 'histórico de geração',
+  relatorio_operacao: 'relatório de operação',
 };
 
 export interface UsuarioExportacao {

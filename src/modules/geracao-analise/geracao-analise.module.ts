@@ -22,6 +22,6 @@ import { OpenMeteoProvider } from './irradiancia/open-meteo.provider';
     GeracaoAnaliseJobs,
     { provide: IRRADIANCE_PROVIDER, useClass: OpenMeteoProvider },
   ],
-  exports: [GeracaoAnaliseService],
+  exports: [GeracaoAnaliseService, GeracaoConfigService],
 })
 export class GeracaoAnaliseModule {}
