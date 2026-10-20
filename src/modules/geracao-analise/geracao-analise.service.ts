@@ -344,7 +344,10 @@ export class GeracaoAnaliseService {
     if (user) await this.scope.assertEntityInScope('unidade', uid, user);
     const periodo: Periodo = PERIODOS.includes(periodoQ as Periodo) ? (periodoQ as Periodo) : 'dia';
     const hoje = diaLocal(agora);
-    if (dataQ && !/^\d{4}-\d{2}-\d{2}$/.test(dataQ)) throw new BadRequestException('data deve ser YYYY-MM-DD');
+    // Data real (somarDias normaliza 2026-02-31 → 03-03) e de 2000 em diante.
+    if (dataQ && (!/^\d{4}-\d{2}-\d{2}$/.test(dataQ) || somarDias(dataQ, 0) !== dataQ || dataQ < '2000-01-01')) {
+      throw new BadRequestException('data deve ser um dia válido no formato YYYY-MM-DD');
+    }
     const referencia = dataQ && dataQ <= hoje ? dataQ : hoje;
     const janela = janelaDoPeriodo(periodo, referencia, hoje);
 
