@@ -23,6 +23,7 @@ import { ChamadosModule } from './modules/chamados/chamados.module';
 import { CoaModule } from './modules/coa/coa.module';
 import { LogsMqttModule } from './modules/logs-mqtt/logs-mqtt.module';
 import { RegrasLogsMqttModule } from './modules/regras-logs-mqtt/regras-logs-mqtt.module';
+import { RegrasNotificacaoModule } from './modules/regras-notificacao/regras-notificacao.module';
 import { RelatoriosModule } from './modules/relatorios/relatorios.module';
 import { BombaCombustivelModule } from './modules/bomba-combustivel/bomba-combustivel.module';
 import { CarregadorEletricoModule } from './modules/carregador-eletrico/carregador-eletrico.module';
@@ -101,6 +102,7 @@ import { IotCatalogModule } from './modules/iot-catalog/iot-catalog.module';
     CoaModule,
     LogsMqttModule,
     RegrasLogsMqttModule,
+    RegrasNotificacaoModule,
     UploadsModule,
     IoTModule,
     OtaModule,

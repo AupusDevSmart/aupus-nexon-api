@@ -3139,6 +3139,31 @@ model regras_logs_mqtt {
   @@map("regras_logs_mqtt")
 }
 
+/// NEXON-25 — Regras de notificação (Configurações › Notificações). DDL em
+/// db/manual-migrations/2026-10-20c_regras_notificacao.sql. Quem recebe = papéis
+/// (limitados a planta_ids; vazio = todas) + usuario_ids. Disparo é fase 2.
+model regras_notificacao {
+  id                String    @id @default(cuid()) @db.Char(26)
+  nome              String    @db.VarChar(100)
+  evento            String    @db.VarChar(40)
+  limite_minutos    Int?
+  antecedencia_dias Int?
+  canais            String[]  @default([])
+  papeis            String[]  @default([])
+  planta_ids        String[]  @default([])
+  usuario_ids       String[]  @default([])
+  ativo             Boolean   @default(true)
+  created_by        String?   @db.Char(26)
+  updated_by        String?   @db.Char(26)
+  created_at        DateTime  @default(now()) @db.Timestamp(0)
+  updated_at        DateTime  @default(now()) @updatedAt @db.Timestamp(0)
+  deleted_at        DateTime? @db.Timestamp(0)
+
+  @@index([evento], map: "regras_notificacao_evento_idx")
+  @@index([planta_ids], map: "regras_notificacao_planta_ids_idx", type: Gin)
+  @@map("regras_notificacao")
+}
+
 /// Log polivalente do dominio MQTT — guarda tanto alertas baseados em regra
 /// (telemetria que cruza limiar) quanto comandos enviados aos equipamentos.
 /// Discriminado pelo campo `tipo`:
