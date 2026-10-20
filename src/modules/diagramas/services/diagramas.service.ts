@@ -783,6 +783,7 @@ export class DiagramasService {
                 criados: dados.diffGrupos.criados.map((g) => ({ id: g.id, nome: g.nome, equipamento_ids: g.equipamentoIds })),
                 removidos: dados.diffGrupos.removidos.map((g) => ({ id: g.id, nome: g.nome })),
                 renomeados: dados.diffGrupos.renomeados,
+                recoloridos: dados.diffGrupos.recoloridos,
                 membros_alterados: dados.diffGrupos.membrosAlterados,
               }
             : null,

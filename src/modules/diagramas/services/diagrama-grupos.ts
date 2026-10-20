@@ -17,6 +17,7 @@ export interface DiffGrupos {
   criados: GrupoDiagrama[];
   removidos: GrupoDiagrama[];
   renomeados: { id: string; de: string; para: string }[];
+  recoloridos: { id: string; nome: string; de: string | null; para: string | null }[];
   membrosAlterados: { id: string; nome: string; entraram: string[]; sairam: string[] }[];
 }
 
@@ -69,7 +70,7 @@ export function gruposDaConfiguracao(configuracoes: unknown): GrupoDiagrama[] {
 export function diffGrupos(antes: GrupoDiagrama[], depois: GrupoDiagrama[]): DiffGrupos {
   const porIdAntes = new Map(antes.map((g) => [g.id, g]));
   const porIdDepois = new Map(depois.map((g) => [g.id, g]));
-  const diff: DiffGrupos = { criados: [], removidos: [], renomeados: [], membrosAlterados: [] };
+  const diff: DiffGrupos = { criados: [], removidos: [], renomeados: [], recoloridos: [], membrosAlterados: [] };
 
   for (const g of depois) {
     const velho = porIdAntes.get(g.id);
@@ -78,6 +79,9 @@ export function diffGrupos(antes: GrupoDiagrama[], depois: GrupoDiagrama[]): Dif
       continue;
     }
     if (velho.nome !== g.nome) diff.renomeados.push({ id: g.id, de: velho.nome, para: g.nome });
+    if ((velho.cor ?? null) !== (g.cor ?? null)) {
+      diff.recoloridos.push({ id: g.id, nome: g.nome, de: velho.cor ?? null, para: g.cor ?? null });
+    }
     const a = new Set(velho.equipamentoIds);
     const d = new Set(g.equipamentoIds);
     const entraram = g.equipamentoIds.filter((e) => !a.has(e));
@@ -91,7 +95,13 @@ export function diffGrupos(antes: GrupoDiagrama[], depois: GrupoDiagrama[]): Dif
 }
 
 export function gruposMudaram(diff: DiffGrupos): boolean {
-  return !!(diff.criados.length || diff.removidos.length || diff.renomeados.length || diff.membrosAlterados.length);
+  return !!(
+    diff.criados.length ||
+    diff.removidos.length ||
+    diff.renomeados.length ||
+    diff.recoloridos.length ||
+    diff.membrosAlterados.length
+  );
 }
 
 /** Uma linha legível para a mensagem do log ("criado X (5); renomeado Y → Z"). */
@@ -99,6 +109,7 @@ export function resumirGrupos(diff: DiffGrupos): string {
   const partes: string[] = [];
   for (const g of diff.criados) partes.push(`grupo criado "${g.nome}" (${g.equipamentoIds.length} equip.)`);
   for (const r of diff.renomeados) partes.push(`grupo renomeado "${r.de}" → "${r.para}"`);
+  for (const c of diff.recoloridos) partes.push(`cor do grupo "${c.nome}" ${c.de ?? 'padrão'} → ${c.para ?? 'padrão'}`);
   for (const m of diff.membrosAlterados) {
     const mud = [m.entraram.length ? `+${m.entraram.length}` : '', m.sairam.length ? `-${m.sairam.length}` : '']
       .filter(Boolean)

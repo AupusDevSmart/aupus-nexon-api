@@ -50,6 +50,13 @@ describe('diagrama-grupos (NEXON-31)', () => {
     expect(resumirGrupos(d)).toBe('grupo criado "C" (1 equip.); grupo renomeado "A" → "A1"; grupo "A1" +1 -1 equip.; grupo desfeito "B"');
   });
 
+  it('troca de cor entra no diff e no resumo', () => {
+    const d = diffGrupos([{ id: 'g1', nome: 'A', equipamentoIds: ['e1'], cor: '#70C04B' }], [{ id: 'g1', nome: 'A', equipamentoIds: ['e1'], cor: '#3B82F6' }]);
+    expect(d.recoloridos).toEqual([{ id: 'g1', nome: 'A', de: '#70C04B', para: '#3B82F6' }]);
+    expect(gruposMudaram(d)).toBe(true);
+    expect(resumirGrupos(d)).toBe('cor do grupo "A" #70C04B → #3B82F6');
+  });
+
   it('sem mudança não gera diff', () => {
     const g = [{ id: 'g1', nome: 'A', equipamentoIds: ['e1'] }];
     expect(gruposMudaram(diffGrupos(g, g))).toBe(false);
