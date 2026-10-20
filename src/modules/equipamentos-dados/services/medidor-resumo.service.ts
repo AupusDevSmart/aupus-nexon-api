@@ -75,11 +75,15 @@ export class MedidorResumoService {
     return this.scope.podeVerGeracao(u[0]?.unidade_id ?? null, user);
   }
 
-  /** Blocos de 15 min do período (SSU ou PM). */
-  private async blocos(id: string, desde: Date): Promise<Array<Bloco15 & { fonte: string }>> {
+  /**
+   * Blocos de 15 min do período (SSU ou PM), de `desde` até `ate` (exclusivo; sem `ate` = até
+   * agora). Público: o relatório de operação (NEXON-33) usa a mesma leitura do medidor.
+   */
+  async blocos(id: string, desde: Date, ate?: Date): Promise<Array<Bloco15 & { fonte: string }>> {
+    const fim = ate ?? new Date('9999-12-31T00:00:00Z');
     const ssu = await this.prisma.$queryRaw<Array<{ t: Date; dados: any }>>`
       SELECT timestamp_dados AS t, dados FROM equipamentos_dados
-      WHERE equipamento_id = ${id}::bpchar AND timestamp_dados >= ${desde}
+      WHERE equipamento_id = ${id}::bpchar AND timestamp_dados >= ${desde} AND timestamp_dados < ${fim}
         AND (dados ? 'NSU' OR dados->'data' ? 'phf') AND potencia_ativa_kw IS NOT NULL
       ORDER BY timestamp_dados`;
     if (ssu.length) {
@@ -93,7 +97,7 @@ export class MedidorResumoService {
       SELECT to_timestamp(floor(extract(epoch FROM timestamp_dados) / 900) * 900 + 900) AT TIME ZONE 'UTC' AS t,
              AVG(NULLIF(dados->>'Pt','')::float) AS p, AVG(NULLIF(dados->>'Qt','')::float) AS q
       FROM equipamentos_dados
-      WHERE equipamento_id = ${id}::bpchar AND timestamp_dados >= ${desde} AND dados ? 'Pt'
+      WHERE equipamento_id = ${id}::bpchar AND timestamp_dados >= ${desde} AND timestamp_dados < ${fim} AND dados ? 'Pt'
       GROUP BY 1 ORDER BY 1`;
     return pm.filter((x) => x.p != null).map((x) => {
       const p = Number(x.p) / 1000, q = Number(x.q ?? 0) / 1000;

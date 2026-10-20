@@ -33,6 +33,9 @@ import { PrismaModule } from '@/core';
     CalculoCustosService,
     ClassificacaoHorariosService,
     ConfiguracaoCustoService,
+    FeriadosNacionaisService,
+    MedidorResumoService,
+    AgregadoDiarioService,
   ],
 })
 export class EquipamentosDadosModule {}
