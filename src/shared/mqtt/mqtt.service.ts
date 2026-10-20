@@ -2682,6 +2682,10 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       }
       if (dadosAgregados.power?.active_total !== undefined) {
         potenciaAtivaKw = dadosAgregados.power.active_total / 1000; // W para kW
+      } else if (typeof dadosAgregados.Pt === 'number' && Number.isFinite(dadosAgregados.Pt)) {
+        // Power Meter (M160/PD666, flat): Pt em W. Sem isto a coluna ficava nula e o
+        // gráfico de demanda (que lê potencia_ativa_kw) não tinha a curva de consumo.
+        potenciaAtivaKw = dadosAgregados.Pt / 1000;
       }
 
       // PRODUÇÃO: Salvar normalmente no banco
