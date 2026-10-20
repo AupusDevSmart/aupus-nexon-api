@@ -444,7 +444,7 @@ export class EquipamentosCmdService {
     if (!bo) {
       throw new BadRequestException(
         `Ponto "${ponto.nome}" nao esta mapeado em nenhum BO ativo de TON. ` +
-          `Configure no editor IoT (modal da TON -> Configurar BOs).`,
+          `Configure na Topologia (modal da TON -> Configurar BOs).`,
       );
     }
 
@@ -468,7 +468,7 @@ export class EquipamentosCmdService {
     // de quando criar TON no unifilar exigia tópico; ele só faz sentido pro comando REAL.
     if (!sim && !ton.mqtt_habilitado) {
       throw new BadRequestException(
-        `A TON "${ton.nome}" ainda não tem Tópico Base: no editor IoT, abra a ${ton.nome}, preencha o "Tópico Base", salve o diagrama e grave o firmware nela.`,
+        `A TON "${ton.nome}" ainda não tem Tópico Base: na Topologia, abra a ${ton.nome}, preencha o "Tópico Base", salve o diagrama e grave o firmware nela.`,
       );
     }
     // Base do tópico: em produção usa o topico_mqtt; em SIM, se não houver tópico, usa o
@@ -476,7 +476,7 @@ export class EquipamentosCmdService {
     const baseTopico = ton.topico_mqtt?.trim() || (sim ? ton.nome?.trim() : '');
     if (!baseTopico) {
       throw new BadRequestException(
-        `A TON "${ton.nome}" ainda não tem Tópico Base: no editor IoT, abra a ${ton.nome}, preencha o "Tópico Base", salve o diagrama e grave o firmware nela.`,
+        `A TON "${ton.nome}" ainda não tem Tópico Base: na Topologia, abra a ${ton.nome}, preencha o "Tópico Base", salve o diagrama e grave o firmware nela.`,
       );
     }
     // Modo SIMULAÇÃO/LAB: o pulso ON->OFF vai pra TESTE/<base>/cmd (firmware de
