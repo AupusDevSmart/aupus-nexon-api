@@ -36,10 +36,12 @@ com espera de 2 min por tentativa; na 5ª vira `FALHOU`.
 
 - `EMAIL`: `MailService` (SMTP do NexON).
 - `WHATSAPP`: `WhatsappService` (credencial em `bdo.configuracoes`).
-- `SMART_SERVICE`: sem `SMART_SERVICE_URL` + `SMART_SERVICE_TOKEN` fica `AGUARDANDO_INTEGRACAO` e sai
-  sozinho quando forem configuradas.
+- `SMART_SERVICE`: `POST {SMART_SERVICE_URL}/integracoes/nexon/chamados` com Bearer `SMART_SERVICE_TOKEN`
+  (no ar desde 20/10/2026, NEXON-27). Sem as duas variáveis fica `AGUARDANDO_INTEGRACAO` e sai sozinho
+  quando forem configuradas. Em produção: `SMART_SERVICE_URL=http://localhost:3000/api/v1` (mesma VPS) e o
+  token é o `NEXON_CHAMADOS_TOKEN` do `aupus-service-api`. `referencia_externa` guarda o id da solicitação.
 
-### Contrato esperado do Smart Service (ainda não existe do lado de lá)
+### Contrato do Smart Service (`aupus-service-api`, módulo `integracoes-nexon`)
 
 ```
 POST {SMART_SERVICE_URL}/integracoes/nexon/chamados
@@ -50,9 +52,20 @@ Authorization: Bearer {SMART_SERVICE_TOKEN}
   "equipamento_id": "…", "unidade_id": "…", "planta_id": "…", "proprietario_id": "…",
   "autor_nome": "…", "aberto_em": "ISO-8601", "observacao": "…"
 }
-→ 2xx { "id": "<id da solicitação no Service>" }   (aceita também { data: { id } })
+→ 200 { data: { id, numero, criada } }
 ```
 
-Sugestão para o Service: criar a `solicitacoes_servico` com `origem = SISTEMA`,
-`tipo = MANUTENCAO_CORRETIVA`, prioridade mapeada, ids já sincronizados (equipamentos/plantas/unidades
-são os mesmos pela sincronização), e idempotência por `nexon_chamado_id`.
+- Cria `solicitacoes_servico` com `origem = SISTEMA`, `tipo = MANUTENCAO_CORRETIVA`, status `REGISTRADA`.
+- Idempotente por `nexon_chamado_id` (coluna única): reenvio devolve a mesma solicitação (`criada: false`).
+- Planta que não existe no Service → 422 (a fila tenta de novo). Equipamento, unidade ou proprietário que não
+  existem lá, ou são de outra planta, entram como texto nas observações.
+- Campo fora do contrato → 400 (o Service recusa propriedade desconhecida).
+- Trilha do lado de lá: `historico_solicitacao_servico` com `acao = 'RECEBIDA_NEXON'` e `dados_extras` (chamado,
+  planta, equipamento, autor, ip).
+
+```sql
+-- no banco aupus_service
+SELECT s.numero, s.status, h.data FROM solicitacoes_servico s
+JOIN historico_solicitacao_servico h ON h.solicitacao_id = s.id AND h.acao = 'RECEBIDA_NEXON'
+WHERE s.nexon_chamado_id = '<id do chamado>';
+```
