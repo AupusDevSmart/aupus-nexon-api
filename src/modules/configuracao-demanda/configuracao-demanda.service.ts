@@ -1,13 +1,20 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
 import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
+import { AuditoriaAcessosService } from '@/core/modules/usuarios/auditoria-acessos.service';
+import { normalizarPapel } from '@/core/modules/auth/permission-scope.service';
+import type { ClienteInfo } from '@/core/common/cliente-info';
+import { diffConfiguracaoDemanda, diffVazio, resumirDiff } from './configuracao-demanda-auditoria';
 import { CreateConfiguracaoDemandaDto } from './dto/create-configuracao-demanda.dto';
 import { UpdateConfiguracaoDemandaDto } from './dto/update-configuracao-demanda.dto';
 
 @Injectable()
 export class ConfiguracaoDemandaService {
+  private readonly logger = new Logger(ConfiguracaoDemandaService.name);
+
   constructor(
     private prisma: PrismaService,
     private scopeService: PermissionScopeService,
+    private auditoria: AuditoriaAcessosService,
   ) {}
 
   /**
@@ -325,8 +332,96 @@ export class ConfiguracaoDemandaService {
   /**
    * Atualiza configuração por unidade_id (cria se não existir)
    */
-  async updateByUnidade(unidadeId: string, data: UpdateConfiguracaoDemandaDto, userId?: string, user?: ScopedUser) {
-    if (user) await this.scopeService.assertEntityInScope('unidade', unidadeId.trim(), user);
+  async updateByUnidade(
+    unidadeId: string,
+    data: UpdateConfiguracaoDemandaDto,
+    userId?: string,
+    user?: ScopedUser & { nome?: string | null; email?: string | null },
+    cliente?: ClienteInfo,
+  ) {
+    const uid = unidadeId.trim();
+    if (user) await this.scopeService.assertEntityInScope('unidade', uid, user);
+
+    const { demanda_geracao, demanda_carga, ...dataConfig } = data;
+    const configAntes = await this.findByUnidade(uid);
+    const unidadeAntes = await this.prisma.unidades.findFirst({
+      where: { id: uid },
+      select: { nome: true, demanda_geracao: true, demanda_carga: true, planta: { select: { id: true, nome: true } } },
+    });
+
+    const resultado = await this.salvarPorUnidade(uid, dataConfig, userId);
+
+    // Demandas contratadas moram na unidade (o medidor do card e o gráfico leem de lá).
+    const demandas: { demanda_geracao?: number | null; demanda_carga?: number | null } = {};
+    if (demanda_geracao !== undefined) demandas.demanda_geracao = demanda_geracao;
+    if (demanda_carga !== undefined) demandas.demanda_carga = demanda_carga;
+    if (Object.keys(demandas).length > 0) {
+      await this.prisma.unidades.update({ where: { id: uid }, data: demandas });
+    }
+
+    await this.auditar(uid, { ...(configAntes ?? {}), ...(unidadeAntes ?? {}) }, { ...data }, unidadeAntes, user, cliente);
+    return resultado;
+  }
+
+  /**
+   * Trilha (auditoria_acessos, acao 'configuracao_demanda'): só grava o que mudou,
+   * com nomes de unidade, planta e equipamentos para a busca. Falha só loga.
+   */
+  private async auditar(
+    unidadeId: string,
+    antes: Record<string, unknown>,
+    depois: Record<string, unknown>,
+    unidade: { nome: string; planta: { id: string; nome: string } | null } | null,
+    user?: ScopedUser & { nome?: string | null; email?: string | null },
+    cliente?: ClienteInfo,
+  ) {
+    try {
+      const diff = diffConfiguracaoDemanda(antes, depois);
+      if (diffVazio(diff)) return;
+
+      const idsCitados = [...diff.adicionados, ...diff.removidos];
+      const equipamentos = idsCitados.length
+        ? await this.prisma.equipamentos.findMany({ where: { id: { in: idsCitados } }, select: { id: true, nome: true } })
+        : [];
+      const nomes = Object.fromEntries(equipamentos.map((e) => [e.id.trim(), e.nome]));
+      const comNome = (ids: string[]) => ids.map((id) => ({ id, nome: nomes[id] ?? null }));
+      const plantaId = unidade?.planta?.id?.trim();
+      const resumo = resumirDiff(diff, nomes);
+
+      await this.auditoria.registrar({
+        autorId: user?.id ?? null,
+        alvoUsuarioId: null,
+        acao: 'configuracao_demanda',
+        mensagem: `Configuração da demanda alterada — ${unidade?.nome ?? unidadeId}: ${resumo}`,
+        plantaIds: plantaId ? [plantaId] : [],
+        unidadeIds: [unidadeId],
+        dispositivo: cliente?.dispositivo ?? null,
+        detalhes: {
+          usuario: user
+            ? {
+                id: user.id?.trim() ?? null,
+                nome: user.nome ?? null,
+                email: user.email ?? null,
+                papel: user.role ? normalizarPapel(user.role) : null,
+              }
+            : null,
+          unidade: { id: unidadeId, nome: unidade?.nome ?? null },
+          planta: plantaId ? { id: plantaId, nome: unidade?.planta?.nome ?? null } : null,
+          campos_alterados: diff.campos.map((c) => c.campo),
+          alteracoes: diff.campos,
+          equipamentos_adicionados: comNome(diff.adicionados),
+          equipamentos_removidos: comNome(diff.removidos),
+          resumo,
+          ip: cliente?.ip ?? null,
+          user_agent: cliente?.userAgent ?? null,
+        },
+      });
+    } catch (e) {
+      this.logger.warn(`[auditoria] configuração da demanda não registrada (${unidadeId}): ${(e as Error).message}`);
+    }
+  }
+
+  private async salvarPorUnidade(unidadeId: string, data: UpdateConfiguracaoDemandaDto, userId?: string) {
     console.log('\n🔍 [SERVICE] updateByUnidade iniciado');
     console.log('  - unidadeId:', unidadeId);
     console.log('  - data:', JSON.stringify(data, null, 2));
