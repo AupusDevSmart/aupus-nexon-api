@@ -1273,10 +1273,10 @@ export class EquipamentosDadosService {
         throw new NotFoundException(`Range máximo do filtro personalizado é ${MAX_DIAS_CUSTOM} dias`);
       }
     } else if (opts.data) {
-      dataInicio = new Date(opts.data);
-      dataInicio.setHours(0, 0, 0, 0);
-      dataFim = new Date(dataInicio);
-      dataFim.setDate(dataFim.getDate() + 1);
+      // Dia escolhido = meia-noite a meia-noite em BRT. Antes era new Date('YYYY-MM-DD')
+      // (meia-noite UTC = 21h BRT da véspera) e o gráfico parava às 20h55.
+      dataInicio = new Date(`${String(opts.data).slice(0, 10)}T00:00:00-03:00`);
+      dataFim = new Date(dataInicio.getTime() + 86_400_000);
     } else {
       // 'dia' sem parametro = HOJE em BRT (meia-noite local SP -> agora). Alinha a
       // energia com o que o grafico mostra e com o reset diario do daily_yield;
@@ -1466,6 +1466,10 @@ export class EquipamentosDadosService {
           CASE
             WHEN COUNT(dados->'energy'->>'daily_yield') >= 1
             THEN MAX((dados->'energy'->>'daily_yield')::numeric)
+            -- Sem contador confiável (Power Meter só com Pt; energia_kwh esparsa): potência
+            -- média × horas cobertas pelas leituras. Com energia_kwh em quase toda leitura, soma.
+            WHEN COUNT(energia_kwh) < COUNT(*) / 2 AND COUNT(potencia_ativa_kw) > 0
+            THEN AVG(potencia_ativa_kw) * EXTRACT(EPOCH FROM (MAX(timestamp_dados) - MIN(timestamp_dados))) / 3600
             ELSE SUM(energia_kwh)
           END AS dia_kwh
         FROM equipamentos_dados
@@ -1559,6 +1563,10 @@ export class EquipamentosDadosService {
         CASE
           WHEN COUNT(dados->'energy'->>'daily_yield') >= 1
           THEN MAX((dados->'energy'->>'daily_yield')::numeric)
+          -- Sem contador confiável (Power Meter só com Pt; energia_kwh esparsa): potência
+          -- média × horas cobertas pelas leituras. Com energia_kwh em quase toda leitura, soma.
+          WHEN COUNT(energia_kwh) < COUNT(*) / 2 AND COUNT(potencia_ativa_kw) > 0
+          THEN AVG(potencia_ativa_kw) * EXTRACT(EPOCH FROM (MAX(timestamp_dados) - MIN(timestamp_dados))) / 3600
           ELSE SUM(energia_kwh)
         END AS energia_total,
         AVG(potencia_ativa_kw) AS potencia_media,
@@ -1692,6 +1700,10 @@ export class EquipamentosDadosService {
           CASE
             WHEN COUNT(dados->'energy'->>'daily_yield') >= 1
             THEN MAX((dados->'energy'->>'daily_yield')::numeric)
+            -- Sem contador confiável (Power Meter só com Pt; energia_kwh esparsa): potência
+            -- média × horas cobertas pelas leituras. Com energia_kwh em quase toda leitura, soma.
+            WHEN COUNT(energia_kwh) < COUNT(*) / 2 AND COUNT(potencia_ativa_kw) > 0
+            THEN AVG(potencia_ativa_kw) * EXTRACT(EPOCH FROM (MAX(timestamp_dados) - MIN(timestamp_dados))) / 3600
             ELSE SUM(energia_kwh)
           END AS dia_kwh,
           AVG(potencia_ativa_kw) AS dia_pot,
