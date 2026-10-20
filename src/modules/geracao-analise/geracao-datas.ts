@@ -40,9 +40,10 @@ export function diaDaSemana(dia: string): number {
   return (new Date(Date.UTC(a, m - 1, d)).getUTCDay() + 6) % 7;
 }
 
-export function diasEntre(inicio: string, fim: string): string[] {
+/** Dias de `inicio` a `fim` (inclusive), no máximo `limite` (padrão: pouco mais de um ano). */
+export function diasEntre(inicio: string, fim: string, limite = 400): string[] {
   const out: string[] = [];
-  for (let d = inicio; d <= fim; d = somarDias(d, 1)) out.push(d);
+  for (let d = inicio; d <= fim && out.length < limite; d = somarDias(d, 1)) out.push(d);
   return out;
 }
 

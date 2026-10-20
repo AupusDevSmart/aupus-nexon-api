@@ -2,7 +2,7 @@ import {
   azimuteParaOpenMeteo, classificarIntervalo, energiaPrevista, fechamentoDoMes, ghiParaPoa, InversorIntervalo,
   outrasPerdas, pctEsperado, potenciaEsperadaKw, potenciaEstavel,
 } from './geracao-calculo';
-import { diaLocal, inicioDoDiaUtc, janelaDoPeriodo } from './geracao-datas';
+import { diaLocal, diasEntre, inicioDoDiaUtc, janelaDoPeriodo } from './geracao-datas';
 import { diffConfig, potenciaTecnicaKw, validarConfig } from './geracao-config.service';
 import { blocosContiguos } from './geracao-analise.service';
 
@@ -188,5 +188,11 @@ describe('revisão: exportação zero', () => {
     const p = classificarIntervalo(600, [inv('a', 0, { limiteAtivo: true }), inv('b', 0, { limiteAtivo: true })], 666);
     expect(p.indisponibilidadeKw).toBe(0);
     expect(p.limitacaoExternaKw).toBeCloseTo(600);
+  });
+});
+
+describe('revisão de segurança: datas', () => {
+  it('diasEntre tem teto', () => {
+    expect(diasEntre('2000-01-01', '2030-12-31')).toHaveLength(400);
   });
 });
