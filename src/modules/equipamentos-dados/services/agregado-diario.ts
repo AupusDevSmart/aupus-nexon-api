@@ -31,6 +31,12 @@ export function inicioDoDiaUtcSql(dia: string): string {
   return new Date(Date.UTC(a, m - 1, d) - OFFSET_MS).toISOString().slice(0, 19).replace('T', ' ');
 }
 
+/** Ano entre 2020 (antes não há leitura no NexON) e o ano que vem; mês 1–12. */
+export function periodoValido(ano: number, mes?: number, agora = new Date()): boolean {
+  if (!Number.isInteger(ano) || ano < 2020 || ano > agora.getUTCFullYear() + 1) return false;
+  return mes === undefined || (Number.isInteger(mes) && mes >= 1 && mes <= 12);
+}
+
 /** Dias do intervalo [inicio, fim). */
 export function diasEntre(inicio: string, fim: string): string[] {
   const dias: string[] = [];

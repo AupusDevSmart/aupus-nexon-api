@@ -5,6 +5,7 @@ import {
   dividirIntervalo,
   faltantes,
   inicioDoDiaUtcSql,
+  periodoValido,
 } from './agregado-diario';
 
 describe('agregado-diario', () => {
@@ -72,5 +73,16 @@ describe('agregado-diario', () => {
       { mes: '2026-01', equipamento_id: 'a', energia_total: 30, potencia_media: 6, num_leituras: 10 },
       { mes: '2026-02', equipamento_id: 'a', energia_total: 7, potencia_media: 1, num_leituras: 1 },
     ]);
+  });
+
+  it('período válido: 2020 até o ano que vem, mês 1–12', () => {
+    const agora = new Date('2026-10-20T12:00:00Z');
+    expect(periodoValido(2026, 10, agora)).toBe(true);
+    expect(periodoValido(2027, undefined, agora)).toBe(true);
+    expect(periodoValido(2028, undefined, agora)).toBe(false);
+    expect(periodoValido(1000, undefined, agora)).toBe(false);
+    expect(periodoValido(NaN, undefined, agora)).toBe(false);
+    expect(periodoValido(2026, 13, agora)).toBe(false);
+    expect(periodoValido(2026, 0, agora)).toBe(false);
   });
 });

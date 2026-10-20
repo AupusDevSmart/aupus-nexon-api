@@ -1,7 +1,7 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
 import { EquipamentoDadosQueryDto } from './dto/equipamento-dados-query.dto';
-import { CAP_POTENCIA_GLITCH_KW, agruparPorMes } from './services/agregado-diario';
+import { CAP_POTENCIA_GLITCH_KW, agruparPorMes, periodoValido } from './services/agregado-diario';
 import { AgregadoDiarioService } from './services/agregado-diario.service';
 
 @Injectable()
@@ -1547,6 +1547,9 @@ export class EquipamentosDadosService {
     const now = new Date();
     const ano = opts.mes ? parseInt(opts.mes.split('-')[0]) : now.getFullYear();
     const mesNum = opts.mes ? parseInt(opts.mes.split('-')[1]) : now.getMonth() + 1;
+    // O resumo diário grava uma linha por equipamento × dia: período fora da faixa viraria
+    // escrita à toa no banco.
+    if (!periodoValido(ano, mesNum)) throw new BadRequestException(`Mês inválido: ${opts.mes}`);
     // Range em BRT (UTC-3) — sem isso o servidor (Node TZ variavel) interpreta
     // new Date(ano, mes-1, 1) como local do host e desloca o intervalo, o que
     // empurra leituras de antes da meia-noite BRT pro mes anterior.
@@ -1638,6 +1641,7 @@ export class EquipamentosDadosService {
   ) {
     const equipsFiltrados = await this.filtrarEquipamentosPorScope(equipamentos, user);
     const anoNum = opts.ano ? parseInt(opts.ano) : new Date().getFullYear();
+    if (!periodoValido(anoNum)) throw new BadRequestException(`Ano inválido: ${opts.ano}`);
     if (equipsFiltrados.length === 0) {
       return {
         ano: anoNum,
