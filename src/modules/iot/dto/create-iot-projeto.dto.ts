@@ -12,8 +12,8 @@ export class CreateIotProjetoDto {
   unidade_id!: string;
 
   @ApiProperty({
-    description: 'Nome do projeto IoT (livre, exibido no header da tab IoT)',
-    example: 'Diagrama IoT — Planta GO',
+    description: 'Nome do projeto IoT (livre, exibido no header da aba Topologia)',
+    example: 'Topologia — Planta GO',
   })
   @IsString()
   @IsNotEmpty()

@@ -751,7 +751,7 @@ export class IoTService {
         select: { id: true },
       });
       if (!existing) {
-        throw new NotFoundException(`Projeto IoT ${trimmedId} nao encontrado`);
+        throw new NotFoundException(`Projeto de topologia ${trimmedId} nao encontrado`);
       }
 
       const updateData: Prisma.iot_projetosUpdateInput = {};
@@ -792,7 +792,7 @@ export class IoTService {
       });
       if (!updated) {
         throw new NotFoundException(
-          `Projeto IoT ${trimmedId} desapareceu durante o update`,
+          `Projeto de topologia ${trimmedId} desapareceu durante o update`,
         );
       }
       return this.toProjetoRow(updated);
@@ -811,7 +811,7 @@ export class IoTService {
       select: { id: true, unidade_id: true },
     });
     if (!existing) {
-      throw new NotFoundException(`Projeto IoT ${trimmedId} nao encontrado`);
+      throw new NotFoundException(`Projeto de topologia ${trimmedId} nao encontrado`);
     }
     if (user) await this.scopeService.assertEntityInScope('unidade', existing.unidade_id.trim(), user);
     await this.prisma.iot_projetos.update({
