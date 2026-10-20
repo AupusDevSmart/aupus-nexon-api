@@ -6,9 +6,11 @@ import { AcaoPivo, PivoSequenciaService } from './pivo-sequencia.service';
 import { PivoConfigDto, ProgramacaoPivoDto } from './dto/pivos.dto';
 
 /**
- * Pivô (apps NexON v2). Leitura: escopo do equipamento/unidade. Escrita: quem
- * comanda (equipamentos.acionar_ponto) ou gerencia (equipamentos.manage), e o
- * operador com permissão por instalação precisa de "comandar" nela.
+ * Pivô (apps NexON v2). Leitura: escopo do equipamento/unidade (operador: só o
+ * equipamento liberado). Escrita: quem comanda (equipamentos.acionar_ponto) ou
+ * gerencia (equipamentos.manage). Config técnica × operacional (NEXON-20, PER-33a):
+ * lâmina, ponta, reservado e programações são de todos com acesso; pressão, tempo
+ * de volta, ângulo zero, válvula, motobomba e bombeamento só Admin/analistas.
  *
  * Programações, início agendado, paradas e bloqueio de ponta são executados pelo
  * servidor (PivoAutomacaoService).
@@ -49,7 +51,9 @@ export class PivosController {
   }
 
   @Put(':id/bombeamento')
-  @Permissions('equipamentos.manage')
+  // equipamentos.comandar deixa entrar o analista de operação; o service exige
+  // configuração técnica (proprietário/operador → 403 "Somente leitura").
+  @Permissions('equipamentos.manage', 'equipamentos.comandar')
   @ApiOperation({ summary: 'Grava o bombeamento do pivô (TON, modo, BOs, BI) e os tempos da sequência' })
   salvarBombeamento(@Param('id') id: string, @Body() body: any, @CurrentUser() user?: any) {
     return this.sequencia.salvarConfig(id, body ?? {}, user);

@@ -1,5 +1,7 @@
-import { CanActivate, ExecutionContext, Injectable, NotFoundException } from '@nestjs/common';
+import { CanActivate, ExecutionContext, ForbiddenException, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
+import { AuditoriaAcessosService } from '../../usuarios/auditoria-acessos.service';
+import { registrarAcessoNegado } from '../acesso-negado';
 import { PermissionScopeService } from '../permission-scope.service';
 import {
   PLANTA_SCOPE_KEY,
@@ -23,6 +25,7 @@ export class PlantaScopeGuard implements CanActivate {
   constructor(
     private reflector: Reflector,
     private scopeService: PermissionScopeService,
+    @Optional() private auditoria?: AuditoriaAcessosService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -58,7 +61,16 @@ export class PlantaScopeGuard implements CanActivate {
         throw new NotFoundException(`${meta.entity} nao encontrado`);
       }
       for (const id of ids) {
-        await this.scopeService.assertEntityInScope(meta.entity, id, user);
+        try {
+          await this.scopeService.assertEntityInScope(meta.entity, id, user);
+        } catch (e) {
+          // 403 de guard não passa pelo AcessoNegadoInterceptor: grava aqui (PER-43).
+          // 404 (não existe) não é tentativa negada.
+          if (e instanceof ForbiddenException) {
+            await registrarAcessoNegado(this.auditoria, req, `${meta.entity} fora do escopo`).catch(() => undefined);
+          }
+          throw e;
+        }
       }
     }
     return true;

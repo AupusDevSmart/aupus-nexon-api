@@ -1,5 +1,5 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
+import { ForbiddenException, Injectable, Logger } from '@nestjs/common';
+import { PrismaService, PermissionScopeService, ScopedUser, AcessoOperador } from '@/core';
 import { Prisma } from '@/core';
 import { CalculoCustosService } from '../equipamentos-dados/services/calculo-custos.service';
 import { detectarOverflowUint, ehPotenciaGlitch, CAP_POTENCIA_GLITCH_KW } from '../../shared/util/inverter-overflow';
@@ -144,7 +144,7 @@ export class CoaService {
    * Calcula custos de energia agregados para unidades com M160 ativo
    * ✅ PRÉ-FILTRO: Só calcula para unidades com equipamento M160 e tópico MQTT ativo
    */
-  private async calcularCustosAgregados(unidades: any[]): Promise<Map<string, number>> {
+  private async calcularCustosAgregados(unidades: any[], acesso: AcessoOperador | null = null): Promise<Map<string, number>> {
     const custosPorUnidade = new Map<string, number>();
     const hoje = new Date();
     const inicioDia = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate(), 0, 0, 0);
@@ -170,6 +170,8 @@ export class CoaService {
                 topico_mqtt: {
                   not: null, // Deve ter tópico MQTT configurado
                 },
+                // Operador: R$ só de medidor com "Ver valores em R$" (seção 6.4).
+                ...(acesso && { id: { in: [...acesso.verRs] } }),
               },
               select: {
                 id: true,
@@ -243,6 +245,14 @@ export class CoaService {
       },
     });
 
+    // Operador (PER-21e/23/24): só instalações com equipamento liberado e, nelas,
+    // só os liberados entram em leituras, energia, status, alarmes e totais.
+    const acesso = await this.scopeService.acessoPorEquipamento(user);
+    const eqScope = acesso ? [...acesso.equipamentos] : null;
+    const eqLiberado = (id: unknown) => !acesso || acesso.equipamentos.has(String(id ?? '').trim());
+    // Geração de nuvem é da usina inteira, não de um equipamento: operador só com "Ver geração".
+    const nuvemLiberada = (uid: string) => !acesso || acesso.verGeracao.has(uid);
+
     // 2. Buscar unidades com suas plantas
     const unidades = await this.prisma.unidades.findMany({
       where: {
@@ -250,6 +260,7 @@ export class CoaService {
         planta_id: {
           in: plantas.map(p => p.id),
         },
+        ...(acesso && { id: { in: [...acesso.unidades] } }),
       },
       select: {
         id: true,
@@ -262,7 +273,7 @@ export class CoaService {
         estado: true,
         planta_id: true,
         equipamentos: {
-          where: { deleted_at: null },
+          where: { deleted_at: null, ...(eqScope && { id: { in: eqScope } }) },
           select: {
             id: true,
             nome: true,
@@ -270,16 +281,21 @@ export class CoaService {
         },
       },
     });
+    // Planta sem nenhuma instalação visível some para o operador.
+    if (acesso) {
+      const comUnidade = new Set(unidades.map((u) => u.planta_id));
+      plantas.splice(0, plantas.length, ...plantas.filter((p) => comUnidade.has(p.id)));
+    }
 
     // 2.5. Calcular custos de energia para unidades do tipo "Carga" com M160 ativo
     this.logger.log('[COA] Calculando custos de energia...');
     const unidadesCargas = unidades.filter(u => u.tipo === 'Carga');
-    const custosPorUnidade = await this.calcularCustosAgregados(unidadesCargas);
+    const custosPorUnidade = await this.calcularCustosAgregados(unidadesCargas, acesso);
 
     // 3. Buscar últimas leituras de todos os equipamentos (query otimizada)
     const horaAtras = new Date(Date.now() - 60 * 60 * 1000); // 1 hora atrás
 
-    const ultimasLeituras = await this.prisma.$queryRaw<any[]>`
+    const ultimasLeiturasTodas = await this.prisma.$queryRaw<any[]>`
       WITH UltimasLeituras AS (
         SELECT DISTINCT ON (ed.equipamento_id)
           ed.equipamento_id,
@@ -299,6 +315,7 @@ export class CoaService {
       )
       SELECT * FROM UltimasLeituras
     `;
+    const ultimasLeituras = ultimasLeiturasTodas.filter((l) => eqLiberado(l.equipamento_id));
 
     // 3.5. Energia do dia por unidade — SEGUE a configuracao do grafico de demanda.
     // Em vez de agregar TODOS os equipamentos, soma apenas os equipamentos
@@ -331,13 +348,14 @@ export class CoaService {
       ', ',
     );
 
-    const energiaDiaPorUnidade = await this.energiaPorUnidade(unidadeIds, dataInicioBRT, dataFimBRT, null, catSinalValues);
+    const energiaDiaPorUnidade = await this.energiaPorUnidade(unidadeIds, dataInicioBRT, dataFimBRT, null, catSinalValues, eqScope);
 
     // [apps v2] Energia de ONTEM (D-1 BRT) pelo MESMO método — "12% acima de ontem"
     // no Início. Cache de 10 min por conjunto de unidades (dado de ontem é estável).
     const dataOntemBRT = new Date(dataInicioBRT.getTime() - 24 * 60 * 60 * 1000);
     const energiaOntemPorUnidade = await this.energiaOntemCacheada(unidadeIds, hojeSP, () =>
-      this.energiaPorUnidade(unidadeIds, dataOntemBRT, dataInicioBRT, dataOntemBRT, catSinalValues),
+      this.energiaPorUnidade(unidadeIds, dataOntemBRT, dataInicioBRT, dataOntemBRT, catSinalValues, eqScope),
+      eqScope,
     );
 
     // 4. Criar mapa de leituras por unidade
@@ -374,15 +392,15 @@ export class CoaService {
     // distinto de OFFLINE (sem info, cinza). reconhecido_em/dados_snapshot são raw.
     const tripUnidades = new Set<string>();
     try {
-      const tripRows = await this.prisma.$queryRaw<Array<{ unidade_id: string }>>`
-        SELECT DISTINCT TRIM(e.unidade_id) AS unidade_id
+      const tripRows = await this.prisma.$queryRaw<Array<{ unidade_id: string; equipamento_id: string }>>`
+        SELECT DISTINCT TRIM(e.unidade_id) AS unidade_id, TRIM(e.id) AS equipamento_id
         FROM logs_mqtt l
         JOIN equipamentos e ON TRIM(e.id) = TRIM(l.equipamento_id)
         WHERE l.dados_snapshot->>'kind' = 'trip'
           AND l.reconhecido_em IS NULL
           AND e.deleted_at IS NULL
       `;
-      for (const r of tripRows) if (r?.unidade_id) tripUnidades.add(String(r.unidade_id).trim());
+      for (const r of tripRows) if (r?.unidade_id && eqLiberado(r.equipamento_id)) tripUnidades.add(String(r.unidade_id).trim());
     } catch (e) {
       this.logger.warn(`[COA] consulta de trips falhou (segue sem destaque): ${e instanceof Error ? e.message : e}`);
     }
@@ -407,7 +425,7 @@ export class CoaService {
       `;
       for (const r of eqRows) {
         const uid = String(r.unidade_id || '').trim();
-        if (!uid) continue;
+        if (!uid || !eqLiberado(r.id)) continue;
         if (!expectedPorUnidade.has(uid)) expectedPorUnidade.set(uid, []);
         expectedPorUnidade.get(uid)!.push({ id: String(r.id).trim(), nome: r.nome });
       }
@@ -424,7 +442,7 @@ export class CoaService {
         FROM geracao_diaria_plantas
         WHERE data >= current_date - 1 AND COALESCE(kwh_realizado, 0) > 0
       `;
-      for (const r of cloudRows) if (r?.unidade_id) cloudRecentUnidades.add(String(r.unidade_id).trim());
+      for (const r of cloudRows) if (r?.unidade_id && nuvemLiberada(String(r.unidade_id).trim())) cloudRecentUnidades.add(String(r.unidade_id).trim());
     } catch (e) {
       this.logger.warn(`[COA] consulta de nuvem recente falhou: ${e instanceof Error ? e.message : e}`);
     }
@@ -456,7 +474,7 @@ export class CoaService {
         ORDER BY TRIM(unidade_id), hora DESC
       `;
       for (const r of nRows) {
-        if (!r?.unidade_id) continue;
+        if (!r?.unidade_id || !nuvemLiberada(String(r.unidade_id).trim())) continue;
         nuvemHojePorUnidade.set(String(r.unidade_id).trim(), {
           energiaKwh: Number(r.kwh_acumulado) || 0,
           potenciaKw: Number(r.kwh_hora) || 0,
@@ -476,8 +494,8 @@ export class CoaService {
     // carimba last_seen a cada telemetria — ver MqttService.touchLiveness).
     const tonVivaUnidades = new Set<string>();
     try {
-      const vivaRows = await this.prisma.$queryRaw<Array<{ unidade_id: string }>>`
-        SELECT DISTINCT TRIM(e.unidade_id) AS unidade_id
+      const vivaRows = await this.prisma.$queryRaw<Array<{ unidade_id: string; equipamento_id: string }>>`
+        SELECT DISTINCT TRIM(e.unidade_id) AS unidade_id, TRIM(e.id) AS equipamento_id
         FROM equipamentos e
         JOIN iot_dispositivos_online d
           ON (TRIM(e.topico_mqtt) = TRIM(d.topico_mqtt)
@@ -489,7 +507,7 @@ export class CoaService {
           AND d.online = true
           AND d.last_seen > now() - interval '15 minutes'
       `;
-      for (const r of vivaRows) if (r?.unidade_id) tonVivaUnidades.add(String(r.unidade_id).trim());
+      for (const r of vivaRows) if (r?.unidade_id && eqLiberado(r.equipamento_id)) tonVivaUnidades.add(String(r.unidade_id).trim());
     } catch (e) {
       this.logger.warn(`[COA] consulta de TON viva (liveness) falhou: ${e instanceof Error ? e.message : e}`);
     }
@@ -513,9 +531,9 @@ export class CoaService {
     const ontemSP = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' })
       .format(dataOntemBRT.getTime() + 12 * 60 * 60 * 1000);
     const [alarmesAtivos, scsPorUnidade, nuvemOntem] = await Promise.all([
-      this.alarmesLogsAtivos(unidadeIds),
-      this.equipamentosScsPorUnidade(unidadeIds),
-      this.nuvemOntemPorUnidade(unidadeIds, ontemSP),
+      this.alarmesLogsAtivos(unidadeIds, eqScope),
+      this.equipamentosScsPorUnidade(unidadeIds, eqScope),
+      this.nuvemOntemPorUnidade(unidadeIds.filter(nuvemLiberada), ontemSP),
     ]);
 
     for (const planta of plantas) {
@@ -749,8 +767,9 @@ export class CoaService {
           // não internet) em vez de cinza. Ver docs/IOT-NEXON-CONFIABILIDADE.md.
           tonViva: freshCount > 0 || tonVivaUnidades.has(unidade.id.trim()),
           // Pontos monitorados desta unidade ainda sem comissionamento (dado não validado).
-          naoComissionados: naoComissionadosUnicos.length > 0 ? naoComissionadosUnicos : undefined,
-          equipamentosOffline: offlineUnicos.length > 0 ? offlineUnicos : undefined,
+          // Comissionamento e lista de quem caiu são comunicação: operador não recebe (PER-22).
+          naoComissionados: !acesso && naoComissionadosUnicos.length > 0 ? naoComissionadosUnicos : undefined,
+          equipamentosOffline: !acesso && offlineUnicos.length > 0 ? offlineUnicos : undefined,
           ultimaLeitura,
           coordenadas: unidade.latitude && unidade.longitude ? {
             latitude: Number(unidade.latitude),
@@ -825,7 +844,7 @@ export class CoaService {
         totalReativo: Math.round(totalReativo * 100) / 100,
         // Aparente total dos PMs: S_T = √(P_T² + Q_T²), P_T = Σ PM ativo, Q_T = Σ PM reativo.
         totalAparente: Math.round(Math.sqrt(totalConsumo * totalConsumo + totalReativo * totalReativo) * 100) / 100,
-        totalNaoComissionados, // pontos monitorados ainda sem comissionamento (gate suave)
+        totalNaoComissionados: acesso ? 0 : totalNaoComissionados, // pontos monitorados ainda sem comissionamento (gate suave)
         ...(alarmesAtivos ? { alarmesLogsAtivos: alarmesAtivos.total, alarmesDesde: alarmesAtivos.desde } : {}),
       },
       plantas: plantasProcessadas,
@@ -845,7 +864,10 @@ export class CoaService {
     dataFimBRT: Date,
     legadoInicio: Date | null,
     catSinalValues: Prisma.Sql,
+    eqScope: string[] | null = null,
   ): Promise<Map<string, number>> {
+    // Operador: soma só os equipamentos liberados (PER-24), sem rótulo do recorte.
+    const soLiberados = eqScope ? Prisma.sql`AND trim(e.id) = ANY(${eqScope}::text[])` : Prisma.empty;
     const janelaLegado = legadoInicio
       ? Prisma.sql`ed.timestamp_dados >= ${legadoInicio} AND ed.timestamp_dados < ${dataFimBRT}`
       : Prisma.sql`ed.timestamp_dados >= CURRENT_DATE::timestamp`;
@@ -870,7 +892,7 @@ export class CoaService {
         -- equipamentos.id e char(26) padded; sel.equipamento_id veio trimado do JSON.
         SELECT s.unidade_id, e.id AS equipamento_id, cs.sinal, s.aplicar_perdas, s.fator_perdas
         FROM sel s
-        JOIN equipamentos e ON trim(e.id) = s.equipamento_id AND e.deleted_at IS NULL
+        JOIN equipamentos e ON trim(e.id) = s.equipamento_id AND e.deleted_at IS NULL ${soLiberados}
         JOIN tipos_equipamentos te ON te.id = e.tipo_equipamento_id
         JOIN categorias_equipamentos ce ON ce.id = te.categoria_id
         JOIN cat_sinal cs ON cs.categoria_nome = ce.nome
@@ -932,6 +954,7 @@ export class CoaService {
           WHERE ${janelaLegado}
             AND e.deleted_at IS NULL
             AND e.unidade_id = ANY(${faltantes}::text[])
+            ${soLiberados}
             AND (ed.potencia_ativa_kw IS NULL OR ed.potencia_ativa_kw < ${CAP_POTENCIA_GLITCH_KW})
         ),
         EnergiaM160Deltas AS (
@@ -1007,8 +1030,10 @@ export class CoaService {
     unidadeIds: string[],
     hojeSP: string,
     calcular: () => Promise<Map<string, number>>,
+    eqScope: string[] | null = null,
   ): Promise<Map<string, number>> {
-    const chave = [...unidadeIds].sort().join(',');
+    // Recorte do operador entra na chave: mesma instalação, outros equipamentos.
+    const chave = [...unidadeIds].sort().join(',') + (eqScope ? `|eq:${[...eqScope].sort().join(',')}` : '');
     const c = this.energiaOntemCache.get(chave);
     if (c && c.dia === hojeSP && Date.now() - c.ts < 10 * 60 * 1000) return c.valores;
     try {
@@ -1040,7 +1065,7 @@ export class CoaService {
   }
 
   /** Alarmes ativos (logs_mqtt) das unidades do dashboard: total + o mais antigo. */
-  private async alarmesLogsAtivos(unidadeIds: string[]): Promise<{ total: number; desde: string | null } | null> {
+  private async alarmesLogsAtivos(unidadeIds: string[], eqScope: string[] | null = null): Promise<{ total: number; desde: string | null } | null> {
     if (unidadeIds.length === 0) return { total: 0, desde: null };
     try {
       const rows = await this.prisma.$queryRaw<Array<{ total: number; desde: Date | null }>>`
@@ -1048,7 +1073,8 @@ export class CoaService {
         FROM logs_mqtt l
         JOIN equipamentos e ON e.id = l.equipamento_id
         WHERE ${condicaoStatus('ativo', new Date())}
-          AND TRIM(e.unidade_id) = ANY(${unidadeIds}::text[])`;
+          AND TRIM(e.unidade_id) = ANY(${unidadeIds}::text[])
+          ${eqScope ? Prisma.sql`AND TRIM(e.id) = ANY(${eqScope}::text[])` : Prisma.empty}`;
       const r = rows[0];
       return { total: Number(r?.total ?? 0), desde: r?.desde ? new Date(r.desde).toISOString() : null };
     } catch (e) {
@@ -1062,7 +1088,7 @@ export class CoaService {
    * TON), ponto com vínculo ativo, SCS declarado ou MQTT habilitado. 0 = "Sem instrumentação".
    * Erro → null (omite).
    */
-  private async equipamentosScsPorUnidade(unidadeIds: string[]): Promise<Map<string, number> | null> {
+  private async equipamentosScsPorUnidade(unidadeIds: string[], eqScope: string[] | null = null): Promise<Map<string, number> | null> {
     const m = new Map<string, number>();
     if (unidadeIds.length === 0) return m;
     try {
@@ -1085,6 +1111,7 @@ export class CoaService {
           WHERE e.deleted_at IS NULL AND (e.scs = true OR e.mqtt_habilitado = true)
         ) x
         WHERE unidade_id = ANY(${unidadeIds}::text[])
+          ${eqScope ? Prisma.sql`AND eq_id = ANY(${eqScope}::text[])` : Prisma.empty}
         GROUP BY unidade_id`;
       for (const r of rows) m.set(String(r.unidade_id).trim(), Number(r.n) || 0);
       return m;
@@ -1109,6 +1136,10 @@ export class CoaService {
     const r2 = (v: number) => Math.round(v * 100) / 100;
     if (!uid) return { periodo: 'dia', referencia: null, total_kwh: 0, pontos: [] as any[] };
     if (user) await this.scopeService.assertEntityInScope('unidade', uid, user);
+    // PER-40: operador só com "Ver geração" na instalação; 403 sem dar pista.
+    if (user && !(await this.scopeService.podeVerGeracao(uid, user))) {
+      throw new ForbiddenException('Recurso fora do escopo do usuario');
+    }
 
     const p = ['dia', 'mes', 'ano', 'total'].includes(String(periodo)) ? String(periodo) : 'dia';
     const hojeRow = await this.prisma.$queryRaw<Array<{ hoje: string }>>`

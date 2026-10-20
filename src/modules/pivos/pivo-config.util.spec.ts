@@ -1,4 +1,4 @@
-import { agruparConjugados, janelaOuPadrao, PONTA_PADRAO, RESERVADO_PADRAO } from './pivo-config.util';
+import { agruparConjugados, camposTecnicosAlterados, janelaOuPadrao, PONTA_PADRAO, RESERVADO_PADRAO } from './pivo-config.util';
 
 describe('pivo-config.util', () => {
   describe('janelaOuPadrao', () => {
@@ -51,6 +51,38 @@ describe('pivo-config.util', () => {
     it('ids com espaço (char(26)) e repetidos não duplicam', () => {
       const g = agruparConjugados([l('p1 ', 'Pivô 1', 'mb '), l('p1', 'Pivô 1', 'mb'), l('p2', 'Pivô 2', 'mb')]);
       expect(g[0].pivos.map((p) => p.equipamento_id)).toEqual(['p1', 'p2']);
+    });
+  });
+
+  describe('camposTecnicosAlterados (PER-33a)', () => {
+    const atual = {
+      parametros: { pressao_minima: 2, lamina_100: 8, tempo_volta_100: 24, correcao_angulo_zero: 0, direcionamento: 'valvula', valvula_ton_id: null, valvula_bo: null },
+      motobomba_equipamento_id: 'MB1',
+    };
+
+    it('só operacional (lâmina, ponta, reservado) → nenhum técnico', () => {
+      expect(camposTecnicosAlterados({ parametros: { lamina_100: 10 } }, atual)).toEqual([]);
+      expect(camposTecnicosAlterados({}, atual)).toEqual([]);
+    });
+
+    it('bloco parametros inteiro com técnicos iguais ao gravado não conta', () => {
+      expect(camposTecnicosAlterados({ parametros: { ...atual.parametros, lamina_100: 12 } }, atual)).toEqual([]);
+      expect(camposTecnicosAlterados({ parametros: { pressao_minima: '2' as any, valvula_bo: undefined } }, atual)).toEqual([]);
+      expect(camposTecnicosAlterados({ motobomba_equipamento_id: 'MB1 ' }, atual)).toEqual([]);
+    });
+
+    it('mudar tempo de volta, pressão, ângulo zero, válvula ou motobomba é técnico', () => {
+      expect(camposTecnicosAlterados({ parametros: { tempo_volta_100: 30, pressao_minima: 2.5 } }, atual)).toEqual([
+        'pressao_minima',
+        'tempo_volta_100',
+      ]);
+      expect(camposTecnicosAlterados({ parametros: { correcao_angulo_zero: 5, direcionamento: 'fisico', valvula_bo: 3 } }, atual)).toEqual([
+        'correcao_angulo_zero',
+        'direcionamento',
+        'valvula_bo',
+      ]);
+      expect(camposTecnicosAlterados({ motobomba_equipamento_id: null }, atual)).toEqual(['motobomba_equipamento_id']);
+      expect(camposTecnicosAlterados({ parametros: { pressao_minima: null } }, atual)).toEqual(['pressao_minima']);
     });
   });
 });

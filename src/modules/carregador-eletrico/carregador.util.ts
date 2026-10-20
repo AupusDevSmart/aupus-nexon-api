@@ -1,22 +1,47 @@
 import { FUSO_OPERACAO } from '../../shared/util/janela-horario';
+import { isGlobal, papelCanonico } from '../../core/modules/auth/papeis';
 
 /**
  * Regras do carregador (condomínio) — lógica PURA, testada em carregador.util.spec.ts.
  *
- * Perfis (mockup "Web — Modal do Carregador"):
- *  - analista: Aupus (super_admin/admin/gerente/analista) — edita o valor do kWh e tudo mais;
+ * Perfis (mockup "Web — Modal do Carregador" + NEXON-20, seção 5):
+ *  - analista: Aupus (Admin, analista de automação ou de operação) — edita o valor do kWh e tudo mais;
  *  - proprietario: dono da planta — gerencia moradores, vê todas as recargas, exporta;
+ *  - operador: equipamento liberado — libera e para recargas (portaria), lista moradores;
+ *    não cadastra morador nem exporta (PER-38); R$ só com "Ver valores em R$";
  *  - morador: usuário ligado a um morador — só as próprias recargas, inicia/para a própria.
  */
-export type PapelCarregador = 'analista' | 'proprietario' | 'morador';
-
-const ANALISTA = ['super_admin', 'admin', 'gerente', 'analista'];
+export type PapelCarregador = 'analista' | 'proprietario' | 'operador' | 'morador';
 
 export function papelCarregador(role: unknown, temMoradorVinculado: boolean): PapelCarregador {
-  const r = String(role ?? '').toLowerCase();
-  if (ANALISTA.includes(r)) return 'analista';
-  if (r === 'proprietario') return 'proprietario';
-  return temMoradorVinculado ? 'morador' : 'proprietario';
+  const p = papelCanonico(typeof role === 'string' ? role : null);
+  if (isGlobal(p)) return 'analista';
+  if (p === 'proprietario') return 'proprietario';
+  if (temMoradorVinculado) return 'morador';
+  if (p === 'operador') return 'operador';
+  // Papel sem nome no NexON (cativo, associado...): o escopo por vínculo já
+  // recorta as plantas; dentro delas vale como dono (comportamento de antes).
+  return 'proprietario';
+}
+
+/** Exporta a planilha de recargas (PER-38): proprietário, analistas e Admin. */
+export function podeExportarRecargas(papel: PapelCarregador): boolean {
+  return papel === 'analista' || papel === 'proprietario';
+}
+
+/** Cadastra, altera e remove morador: proprietário, analistas e Admin. */
+export function podeGerirMoradores(papel: PapelCarregador): boolean {
+  return papel === 'analista' || papel === 'proprietario';
+}
+
+/**
+ * Morador só vê valores (kWh, R$/kWh) da PRÓPRIA recarga; os demais papéis veem
+ * todas (o operador ainda depende de "Ver valores em R$" no carregador).
+ */
+export function moradorVeValoresDa(papel: PapelCarregador, meuMoradorId: string | null | undefined, moradorDaSessao: string | null | undefined): boolean {
+  if (papel !== 'morador') return true;
+  const eu = String(meuMoradorId ?? '').trim();
+  return !!eu && eu === String(moradorDaSessao ?? '').trim();
 }
 
 export const TARIFA_MIN = 0.3;

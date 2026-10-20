@@ -5,7 +5,8 @@ import {
   ConflictException,
   BadRequestException,
   ForbiddenException,
-  Logger
+  Logger,
+  Optional,
 } from '@nestjs/common';
 // Builtins do Node, sem efeito colateral na carga: nao ha por que adia-los com
 // require() dentro da funcao, que alem de esconder a dependencia obriga o TS a
@@ -32,6 +33,23 @@ import {
 import * as bcrypt from 'bcryptjs';
 import { customAlphabet } from 'nanoid';
 import { MailService } from '../../mail/mail.service';
+import { Papel, papelCanonico, podeCadastrar } from '../auth/papeis';
+import { AuditoriaAcessosService } from './auditoria-acessos.service';
+import { AcaoGestao, avaliarGestao, mensagemPapel, permissoesAlemDoAutor } from './regras-gestao-usuario';
+
+/** Quem pede (payload do JWT em req.user). */
+export interface Requisitante {
+  id?: string;
+  nome?: string;
+  role?: string | null;
+  permissions?: string[];
+}
+
+/** Campos do cadastro que entram no antes → depois da trilha. */
+const CAMPOS_TRILHA = [
+  'nome', 'email', 'telefone', 'status', 'cpf_cnpj', 'cidade', 'estado', 'endereco', 'cep',
+  'manager_id', 'concessionaria_atual_id', 'organizacao_atual_id', 'is_active',
+] as const;
 
 @Injectable()
 export class UsuariosService {
@@ -42,7 +60,140 @@ export class UsuariosService {
     private rolesService: RolesService,
     private permissionsService: PermissionsService,
     private mailService: MailService,
+    @Optional() private auditoria?: AuditoriaAcessosService,
   ) {}
+
+  // ==========================================================================
+  // Regras de gestão de usuário (NEXON-20, spec seção 3 / PER-11)
+  // ==========================================================================
+
+  /** Papel canônico de um usuário: Spatie (model_has_roles) e, sem ele, a coluna legada. */
+  async papelDoUsuario(id: string): Promise<{ papel: Papel; role: string | null }> {
+    const mhr = await this.prisma.model_has_roles.findFirst({
+      where: { model_id: id, model_type: 'App\\Models\\User' },
+      include: { roles: true },
+    });
+    let role = mhr?.roles?.name ?? null;
+    if (!role) {
+      const u = await this.prisma.usuarios.findFirst({ where: { id }, select: { role: true } });
+      role = u?.role ?? null;
+    }
+    return { papel: papelCanonico(role), role };
+  }
+
+  /** Vínculos ativos do operador: com o autor e com outros proprietários. */
+  private async vinculosDoOperador(alvoId: string, autorId: string): Promise<{ meu: number; outros: number } | null> {
+    try {
+      const [r] = await this.prisma.$queryRaw<Array<{ meu: number; outros: number }>>`
+        SELECT COUNT(*) FILTER (WHERE proprietario_id = ${autorId.trim()}::bpchar)::int AS meu,
+               COUNT(*) FILTER (WHERE proprietario_id <> ${autorId.trim()}::bpchar)::int AS outros
+        FROM operador_vinculos
+        WHERE operador_id = ${alvoId.trim()}::bpchar AND removido_em IS NULL
+          AND (validade IS NULL OR validade >= (now() AT TIME ZONE 'America/Sao_Paulo')::date)`;
+      return { meu: Number(r?.meu) || 0, outros: Number(r?.outros) || 0 };
+    } catch {
+      return null; // SQL 2026-10-20c não aplicado
+    }
+  }
+
+  /**
+   * Operador ligado ao autor: vínculo ativo com ele, ou criado por ele e ainda
+   * sem vínculo com outro proprietário (o recém-cadastrado, antes do passo Acesso).
+   */
+  async operadorLigadoAo(alvoId: string, autorId: string): Promise<boolean> {
+    const v = await this.vinculosDoOperador(alvoId, autorId);
+    if (v && v.meu > 0) return true;
+    const u = await this.prisma.usuarios.findFirst({ where: { id: alvoId.trim() }, select: { created_by: true } });
+    return u?.created_by?.trim() === autorId.trim() && (!v || v.outros === 0);
+  }
+
+  /**
+   * 403 se o requisitante não pode `acao` sobre o usuário `alvoId` (e, se
+   * informado, colocá-lo no `novoPapel`). Sem requisitante = chamada interna.
+   */
+  async assertPodeGerir(
+    requester: Requisitante | undefined,
+    alvoId: string,
+    acao: AcaoGestao,
+    novoPapel?: Papel,
+    novoRoleName?: string | null,
+  ): Promise<{ papel: Papel; role: string | null }> {
+    // Chamada interna: sem regra; só busca o papel se alguém vai precisar dele.
+    if (!requester?.id) {
+      return novoPapel !== undefined ? this.papelDoUsuario(alvoId) : { papel: 'outro', role: null };
+    }
+    const alvo = await this.papelDoUsuario(alvoId);
+    const autor = papelCanonico(requester.role);
+    const proprio = requester.id.trim() === alvoId.trim();
+    const donoOperador = !proprio && autor === 'proprietario' && alvo.papel === 'operador';
+    const ligado = donoOperador ? await this.operadorLigadoAo(alvoId, requester.id) : false;
+    const outroDono = donoOperador ? ((await this.vinculosDoOperador(alvoId, requester.id))?.outros ?? 0) > 0 : false;
+    const motivo = avaliarGestao({
+      autor, autorRole: requester.role, acao, proprio, alvo: alvo.papel, alvoRole: alvo.role,
+      alvoLigadoAoAutor: ligado, novoPapel, novoRoleName, alvoTemOutroDono: outroDono,
+    });
+    if (motivo) throw new ForbiddenException(motivo);
+    return alvo;
+  }
+
+  /**
+   * Papel pedido no corpo; undefined = não pediu. `roleId` e `roleNames` são
+   * gravados em sequência (o último vence), então TODOS entram na conta: mais de
+   * um papel diferente = 400, nunca "checa um e grava outro".
+   */
+  async papelPedido(data: { roleId?: number; roleNames?: string[] }): Promise<{ papel: Papel; roleName: string } | undefined> {
+    const nomes: string[] = [];
+    if (data.roleId) {
+      const r = await this.prisma.roles.findFirst({ where: { id: BigInt(data.roleId) } });
+      if (!r) throw new BadRequestException('Papel não encontrado');
+      nomes.push(r.name);
+    }
+    for (const n of data.roleNames ?? []) if (n?.trim()) nomes.push(n.trim());
+    const distintos = [...new Set(nomes)];
+    if (distintos.length === 0) return undefined;
+    if (distintos.length > 1) throw new BadRequestException('Envie um papel só (roleId ou roleNames)');
+    return { papel: papelCanonico(distintos[0]), roleName: distintos[0] };
+  }
+
+  /** Permissões diretas pedidas: só as que o autor tem (PER-3). */
+  async assertPermissoesConcedidas(
+    requester: Requisitante | undefined,
+    data: { permissionIds?: number[]; permissions?: string[] },
+  ): Promise<void> {
+    if (!requester?.id) return;
+    const nomes = new Set<string>(data.permissions ?? []);
+    if (data.permissionIds?.length) {
+      const ps = await this.prisma.permissions.findMany({
+        where: { id: { in: data.permissionIds.map((x) => BigInt(x)) } },
+        select: { name: true },
+      });
+      ps.forEach((p) => nomes.add(p.name));
+    }
+    const faltam = permissoesAlemDoAutor(papelCanonico(requester.role), requester.permissions, [...nomes]);
+    if (faltam.length) {
+      throw new ForbiddenException(`Você não pode conceder permissões que não tem: ${faltam.slice(0, 5).join(', ')}`);
+    }
+  }
+
+  private async trilha(
+    acao: Parameters<AuditoriaAcessosService['registrar']>[0]['acao'],
+    requester: Requisitante | undefined,
+    alvo: { id: string; nome?: string | null },
+    mensagem: string,
+    detalhes: Record<string, unknown> = {},
+  ): Promise<void> {
+    await this.auditoria?.registrar({
+      autorId: requester?.id ?? null,
+      autorNome: requester?.nome ?? null,
+      alvoUsuarioId: alvo.id,
+      alvoNome: alvo.nome ?? null,
+      acao,
+      mensagem,
+      detalhes,
+      objetoTipo: 'usuario',
+      objetoId: alvo.id,
+    });
+  }
 
   async findAll(query: UsuarioQueryDto, requestingUserId?: string) {
     const {
@@ -95,16 +246,24 @@ export class UsuariosService {
         }
       });
 
-      // Verificar se é proprietário APENAS pela coluna role (mais rápido)
-      const isProprietario = requestingUserData?.role === 'proprietario' ||
-                            requestingUserData?.role === 'propietario';
+      const papelReq = papelCanonico(requestingUserData?.role);
 
-      if (isProprietario) {
-        // Proprietário vê apenas operadores criados por ele + ele mesmo
+      if (papelReq === 'operador' || papelReq === 'outro') {
+        // Operador não gere ninguém: só ele mesmo.
+        grupos.push({ id: requestingUserId });
+      } else if (papelReq === 'proprietario') {
+        // Proprietário vê os operadores que criou ou que têm vínculo com ele + ele mesmo
+        let ligados: string[] = [];
+        try {
+          ligados = (await this.prisma.$queryRaw<Array<{ id: string }>>`
+            SELECT DISTINCT operador_id AS id FROM operador_vinculos
+            WHERE proprietario_id = ${requestingUserId}::bpchar AND removido_em IS NULL`).map((r) => r.id);
+        } catch { /* SQL 2026-10-20c não aplicado: só created_by */ }
         grupos.push({
           OR: [
             { created_by: requestingUserId }, // Operadores que ele criou
-            { id: requestingUserId }          // Ele mesmo
+            { id: requestingUserId },         // Ele mesmo
+            ...(ligados.length ? [{ id: { in: ligados } }] : []),
           ]
         });
         this.logger.log(`🔒 [FINDALL] Proprietário ${requestingUserId} - filtrando por created_by OU próprio ID`);
@@ -276,22 +435,23 @@ export class UsuariosService {
 
       // Compat: aceita string (id) ou objeto (user completo)
       const creatingUserId = typeof creatingUser === 'string' ? creatingUser : creatingUser?.id;
-      const creatingUserPermissions = typeof creatingUser === 'object' && creatingUser
-        ? creatingUser.permissions || []
-        : [];
 
-      // Validar hierarquia de criacao pela permissao do requester.
-      // Se o roleId alvo for informado, confere se requester tem usuarios.create_<role>.
-      if (data.roleId && creatingUserPermissions.length > 0) {
-        const targetRole = await this.prisma.roles.findFirst({ where: { id: BigInt(data.roleId) } });
-        if (targetRole) {
-          const requiredPerm = `usuarios.create_${targetRole.name}`;
-          if (!creatingUserPermissions.includes(requiredPerm)) {
-            throw new BadRequestException(
-              `Voce nao tem permissao para criar usuarios com role "${targetRole.name}". Requer: ${requiredPerm}`,
-            );
-          }
+      // Quem cadastra quem (spec NEXON-20, seção 3). Sem papel pedido, nasce
+      // Operador — nunca o "primeiro papel da tabela" (que é super_admin).
+      const requisitante: Requisitante | undefined = typeof creatingUser === 'object' && creatingUser?.id
+        ? creatingUser as Requisitante
+        : undefined;
+      let pedido = await this.papelPedido(data);
+      const papelAlvo: Papel = pedido?.papel ?? 'operador';
+      if (requisitante) {
+        const autor = papelCanonico(requisitante.role);
+        if (!podeCadastrar(autor, papelAlvo)) {
+          throw new ForbiddenException(mensagemPapel(papelAlvo));
         }
+        if (pedido?.roleName.toLowerCase() === 'super_admin' && String(requisitante.role).toLowerCase() !== 'super_admin') {
+          throw new ForbiddenException('Apenas super_admin atribui o papel super_admin');
+        }
+        await this.assertPermissoesConcedidas(requisitante, data);
       }
       console.log('📝 [CREATE USER] Dados recebidos:', JSON.stringify(data, null, 2));
       console.log('👤 [CREATE USER] Creating User ID recebido:', creatingUserId);
@@ -310,6 +470,14 @@ export class UsuariosService {
           });
           console.log(`♻️ [CREATE USER] Email liberado do usuário soft-deleted ${existingUser.id}`);
         } else {
+          // Operador é um usuário único com vários vínculos (PER-12): cadastrar
+          // um operador que já existe devolve o mesmo usuário, para o próximo
+          // passo (Acesso) criar o vínculo de quem está cadastrando.
+          const existente = await this.papelDoUsuario(existingUser.id);
+          if (existente.papel === 'operador' && papelAlvo === 'operador') {
+            // Só o necessário para o próximo passo: o cadastro dele não é de quem pede.
+            return { id: existingUser.id.trim(), nome: existingUser.nome, existente: true } as any;
+          }
           throw new ConflictException('Email já está em uso');
         }
       }
@@ -368,6 +536,14 @@ export class UsuariosService {
         }
       }
 
+      if (!pedido) {
+        const op = await this.prisma.roles.findFirst({ where: { name: 'operador' } });
+        if (op) {
+          data.roleId = Number(op.id);
+          pedido = { papel: 'operador', roleName: 'operador' };
+        }
+      }
+
       console.log('🔍 [CREATE USER] Antes de criar - data.createdBy:', data.createdBy);
 
       // Gerar ID
@@ -418,6 +594,11 @@ export class UsuariosService {
 
       console.log('✅ [CREATE USER] Usuário criado com sucesso');
 
+      await this.trilha('usuario_criado', typeof creatingUser === 'object' ? creatingUser as Requisitante : undefined,
+        { id: userId, nome: data.nome },
+        `Usuário ${data.nome} criado como ${pedido?.roleName ?? 'sem papel'}`,
+        { papel: pedido?.papel ?? null, role: pedido?.roleName ?? null, email: data.email, telefone: data.telefone ?? null });
+
       // Enviar email de boas-vindas (fire-and-forget)
       this.mailService
         .sendWelcomeEmail(data.email, data.nome, senhaTemporaria)
@@ -432,7 +613,7 @@ export class UsuariosService {
         primeiroAcesso: true,
       } as any;
     } catch (error) {
-      if (error instanceof ConflictException || error instanceof BadRequestException) {
+      if (error instanceof ConflictException || error instanceof BadRequestException || error instanceof ForbiddenException) {
         throw error;
       }
       console.error('Erro ao criar usuário:', error);
@@ -478,7 +659,7 @@ export class UsuariosService {
   async update(
     id: string,
     data: UpdateUsuarioDto,
-    requester?: { id?: string; role?: string | null; permissions?: string[] },
+    requester?: Requisitante,
   ): Promise<UsuarioResponseDto> {
     try {
       const usuario = await this.prisma.usuarios.findFirst({
@@ -492,11 +673,16 @@ export class UsuariosService {
         throw new NotFoundException('Usuário não encontrado');
       }
 
-      // Regra: admin nao pode editar outro admin (apenas super_admin pode).
-      // Self-edit sempre permitido.
-      if (requester && requester.id !== id && usuario.role === 'admin' && requester.role !== 'super_admin') {
-        throw new BadRequestException('Apenas super_admin pode editar outro admin');
+      // Quem edita quem (PER-11): mesma matriz do cadastro, dentro do escopo.
+      const pedido = await this.papelPedido(data);
+      const desativando = data.status !== undefined && data.status !== UsuarioStatus.ATIVO && usuario.status === UsuarioStatus.ATIVO;
+      if (data.clearRole && requester?.id && papelCanonico(requester.role) !== 'admin') {
+        throw new ForbiddenException('Apenas Admin remove o papel de um usuário');
       }
+      const papelAntes = await this.assertPodeGerir(
+        requester, id, desativando ? 'desativar' : 'editar', pedido?.papel, pedido?.roleName,
+      );
+      await this.assertPermissoesConcedidas(requester, data);
 
       // Verificar email duplicado
       if (data.email && data.email !== usuario.email) {
@@ -540,9 +726,34 @@ export class UsuariosService {
       // Processar atualizações do sistema híbrido de roles/permissions
       await this.processRoleAndPermissionUpdates(id, data);
 
+      // Trilha: só o que mudou (antes → depois), papel e ativação à parte.
+      const antes: Record<string, unknown> = {};
+      const depois: Record<string, unknown> = {};
+      for (const c of CAMPOS_TRILHA) {
+        const a = (usuario as any)[c] ?? null;
+        const d = (usuarioAtualizado as any)[c] ?? null;
+        if (String(a) !== String(d)) { antes[c] = a; depois[c] = d; }
+      }
+      const alvo = { id, nome: usuarioAtualizado.nome };
+      if (Object.keys(depois).length) {
+        await this.trilha('usuario_alterado', requester, alvo,
+          `Cadastro de ${usuarioAtualizado.nome} alterado: ${Object.keys(depois).join(', ')}`, { antes, depois });
+      }
+      if (pedido && pedido.papel !== papelAntes.papel) {
+        await this.trilha('papel_alterado', requester, alvo,
+          `Papel de ${usuarioAtualizado.nome}: ${papelAntes.role ?? '—'} → ${pedido.roleName}`,
+          { antes: papelAntes.role, depois: pedido.roleName });
+      }
+      if (usuario.status !== usuarioAtualizado.status) {
+        const ativou = usuarioAtualizado.status === UsuarioStatus.ATIVO;
+        await this.trilha(ativou ? 'usuario_reativado' : 'usuario_desativado', requester, alvo,
+          `${usuarioAtualizado.nome} ${ativou ? 'reativado' : 'desativado'}`,
+          { antes: usuario.status, depois: usuarioAtualizado.status });
+      }
+
       return await this.mapToUsuarioResponseDto(usuarioAtualizado);
     } catch (error) {
-      if (error instanceof NotFoundException || error instanceof ConflictException) {
+      if (error instanceof NotFoundException || error instanceof ConflictException || error instanceof ForbiddenException) {
         throw error;
       }
       console.error('Erro ao atualizar usuário:', error);
@@ -550,7 +761,7 @@ export class UsuariosService {
     }
   }
 
-  async remove(id: string, requester?: { id?: string; role?: string | null }) {
+  async remove(id: string, requester?: Requisitante) {
     try {
       const usuario = await this.prisma.usuarios.findFirst({
         where: {
@@ -563,10 +774,7 @@ export class UsuariosService {
         throw new NotFoundException('Usuário não encontrado');
       }
 
-      // Regra: admin nao pode deletar outro admin (apenas super_admin).
-      if (requester && requester.id !== id && usuario.role === 'admin' && requester.role !== 'super_admin') {
-        throw new BadRequestException('Apenas super_admin pode deletar outro admin');
-      }
+      await this.assertPodeGerir(requester, id, 'excluir');
 
       await this.prisma.usuarios.update({
         where: { id },
@@ -577,9 +785,12 @@ export class UsuariosService {
         },
       });
 
+      await this.trilha('usuario_excluido', requester, { id, nome: usuario.nome },
+        `Usuário ${usuario.nome} excluído`, { email: usuario.email, papel: usuario.role });
+
       return { message: 'Usuário excluído com sucesso' };
     } catch (error) {
-      if (error instanceof NotFoundException) {
+      if (error instanceof NotFoundException || error instanceof ForbiddenException) {
         throw error;
       }
       console.error('Erro ao excluir usuário:', error);
@@ -662,7 +873,7 @@ export class UsuariosService {
   async resetPassword(
     id: string,
     data: ResetPasswordDto,
-    requester?: { id?: string; role?: string | null },
+    requester?: Requisitante,
   ) {
     try {
       if (data.confirmarSenha !== undefined && data.novaSenha !== data.confirmarSenha) {
@@ -680,19 +891,7 @@ export class UsuariosService {
         throw new NotFoundException('Usuário não encontrado');
       }
 
-      if (requester) {
-        const requesterId = requester.id?.trim();
-        const role = requester.role ?? null;
-        if (role === 'proprietario' && usuario.created_by?.trim() !== requesterId && usuario.id.trim() !== requesterId) {
-          throw new ForbiddenException('Você só pode redefinir a senha de usuários que criou');
-        }
-        if (usuario.id.trim() !== requesterId && usuario.role === 'admin' && role !== 'super_admin') {
-          throw new ForbiddenException('Apenas super_admin pode redefinir a senha de outro admin');
-        }
-        if (usuario.role === 'super_admin' && role !== 'super_admin') {
-          throw new ForbiddenException('Apenas super_admin pode redefinir a senha de um super_admin');
-        }
-      }
+      await this.assertPodeGerir(requester, id, 'senha');
 
       const novaSenhaHash = await bcrypt.hash(data.novaSenha, 12);
 
@@ -705,6 +904,8 @@ export class UsuariosService {
       });
       await this.marcarSenhaAlterada(id);
       await this.revogarSessoes(id, null);
+      await this.trilha('usuario_alterado', requester, { id, nome: usuario.nome },
+        `Senha de ${usuario.nome} redefinida`, { campo: 'senha' });
 
       return {
         message: 'Senha resetada com sucesso',
@@ -1039,6 +1240,20 @@ export class UsuariosService {
    * Atribui uma role para um usuário (substitui a role atual)
    * Sincroniza tanto o sistema Spatie quanto a coluna role para compatibilidade
    */
+  /** POST /usuarios/:id/assign-role com a matriz de quem cadastra quem e trilha. */
+  async atribuirPapel(userId: string, roleId: number, requester?: Requisitante) {
+    const pedido = await this.papelPedido({ roleId });
+    const antes = await this.assertPodeGerir(requester, userId, 'editar', pedido?.papel, pedido?.roleName);
+    const r = await this.assignRole(userId, roleId);
+    if (pedido && antes.role !== pedido.roleName) {
+      const u = await this.prisma.usuarios.findFirst({ where: { id: userId }, select: { nome: true } });
+      await this.trilha('papel_alterado', requester, { id: userId, nome: u?.nome },
+        `Papel de ${u?.nome ?? userId}: ${antes.role ?? '—'} → ${pedido.roleName}`,
+        { antes: antes.role, depois: pedido.roleName });
+    }
+    return r;
+  }
+
   async assignRole(userId: string, roleId: number): Promise<{ message: string; role: any }> {
     try {
       const usuario = await this.prisma.usuarios.findFirst({

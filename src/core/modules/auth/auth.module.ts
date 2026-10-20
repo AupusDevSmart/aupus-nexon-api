@@ -2,7 +2,8 @@ import { Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import { APP_GUARD } from '@nestjs/core';
+import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
+import { AcessoNegadoInterceptor } from './acesso-negado';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { SessoesService } from './sessoes.service';
@@ -46,6 +47,10 @@ import { PermissionScopeModule } from './permission-scope.module';
     {
       provide: APP_GUARD,
       useClass: PermissionsGuard, // Valida @Permissions() globalmente (rotas sem decorator passam)
+    },
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: AcessoNegadoInterceptor, // 403 de comando/cadastro vai para a auditoria (PER-43)
     },
   ],
   exports: [AuthService, SessoesService, JwtModule],

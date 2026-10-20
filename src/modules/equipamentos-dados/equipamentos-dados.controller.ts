@@ -1,4 +1,5 @@
-import { Controller, Get, Param, Query, Logger, Post, Put, Body } from '@nestjs/common';
+import { Controller, ForbiddenException, Get, Param, Query, Logger, Post, Put, Body } from '@nestjs/common';
+import { capacidades, MSG_SOMENTE_LEITURA, papelCanonico } from '@/core/modules/auth/papeis';
 import { CurrentUser, PermissionScopeService } from '@/core';
 import { EquipamentosDadosService, EquipamentoAgregacaoConfig } from './equipamentos-dados.service';
 
@@ -35,6 +36,14 @@ export class EquipamentosDadosController {
   private async assertEqInScope(id: string, user?: any): Promise<void> {
     if (!user) return;
     await this.scopeService.assertEntityInScope('equipamento', id.trim(), user);
+  }
+
+  /** Valores em R$ (seção 6.4): operador só com "Ver valores em R$" no equipamento; 403 sem pista. */
+  private async assertVerValores(id: string, user?: any): Promise<void> {
+    await this.assertEqInScope(id, user);
+    if (user && !(await this.scopeService.podeVerValores(id.trim(), user))) {
+      throw new ForbiddenException('Recurso fora do escopo do usuario');
+    }
   }
 
   /**
@@ -165,7 +174,7 @@ export class EquipamentosDadosController {
   @Get(':id/medidor/resumo')
   async getMedidorResumo(@Param('id') id: string, @CurrentUser() user?: any) {
     await this.assertEqInScope(id, user);
-    return this.medidorResumoService.resumo(id);
+    return this.medidorResumoService.resumo(id, user);
   }
 
   @Get(':id/gateway/tendencia')
@@ -367,7 +376,7 @@ export class EquipamentosDadosController {
   @Get(':id/configuracao-custo')
   async getConfiguracaoCusto(@Param('id') id: string, @CurrentUser() user?: any) {
     this.logger.log(`GET /equipamentos-dados/${id}/configuracao-custo`);
-    await this.assertEqInScope(id, user);
+    await this.assertVerValores(id, user);
     return this.configuracaoCustoService.buscarOuDefault(id);
   }
 
@@ -383,6 +392,10 @@ export class EquipamentosDadosController {
   ) {
     this.logger.log(`PUT /equipamentos-dados/${id}/configuracao-custo`);
     await this.assertEqInScope(id, user);
+    // Tributos/tarifas são da equipe Aupus (seção 6, "tarifas"): proprietário e operador só leem.
+    if (user && !capacidades(papelCanonico(user.role)).tarifas) {
+      throw new ForbiddenException(MSG_SOMENTE_LEITURA);
+    }
     return this.configuracaoCustoService.upsert(id, dto);
   }
 
@@ -399,7 +412,7 @@ export class EquipamentosDadosController {
     this.logger.log(
       `GET /equipamentos-dados/${id}/custos-energia?periodo=${query.periodo || 'custom'}&data=${query.data || ''}&timestamp_inicio=${query.timestamp_inicio || ''}&timestamp_fim=${query.timestamp_fim || ''}`,
     );
-    await this.assertEqInScope(id, user);
+    await this.assertVerValores(id, user);
 
     // Determinar range de datas com base no período
     const { dataInicio, dataFim } = this.calcularRangeDatas(query);

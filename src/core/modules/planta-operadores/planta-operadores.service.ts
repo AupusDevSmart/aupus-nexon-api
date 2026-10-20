@@ -6,12 +6,34 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { isGlobal, papelCanonico } from '../auth/papeis';
+import { PermissionScopeService } from '../auth/permission-scope.service';
+import { VinculosOperadorService } from '../usuarios/vinculos-operador.service';
 
-type Requester = { id?: string; role?: string | null };
+type Requester = { id?: string; nome?: string; role?: string | null };
 
+/**
+ * Operadores por planta. Desde NEXON-20 o acesso do operador é por
+ * EQUIPAMENTO (operador_vinculos); estas rotas viraram atalho: "vincular à
+ * planta" libera todos os equipamentos dela no vínculo com o dono, "desvincular"
+ * retira. Sem a tabela nova (SQL não aplicado) seguem no planta_operadores.
+ */
 @Injectable()
 export class PlantaOperadoresService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly scope: PermissionScopeService,
+    private readonly vinculos: VinculosOperadorService,
+  ) {}
+
+  private async temVinculos(): Promise<boolean> {
+    try {
+      await this.prisma.$queryRaw`SELECT 1 FROM operador_vinculos LIMIT 1`;
+      return true;
+    } catch {
+      return false;
+    }
+  }
 
   /**
    * Lista plantas onde o usuario figura como operador (mirror para o UsuarioModal).
@@ -20,6 +42,21 @@ export class PlantaOperadoresService {
    */
   async listByOperador(usuarioId: string) {
     const uid = usuarioId.trim();
+    const acesso = await this.scope.getAcessoOperador(uid);
+    if (acesso) {
+      const plantas = await this.prisma.plantas.findMany({
+        where: { id: { in: [...acesso.plantas] }, deleted_at: null },
+        select: { id: true, nome: true, cnpj: true, cidade: true, uf: true },
+        orderBy: { nome: 'asc' },
+      });
+      return plantas.map((p) => ({
+        id: p.id.trim(),
+        planta_id: p.id.trim(),
+        usuario_id: uid,
+        created_at: null,
+        planta: { id: p.id.trim(), nome: p.nome, cnpj: p.cnpj, cidade: p.cidade, uf: p.uf },
+      }));
+    }
     const vinculos = await this.prisma.planta_operadores.findMany({
       where: { usuario_id: uid },
       orderBy: { created_at: 'desc' },
@@ -59,6 +96,29 @@ export class PlantaOperadoresService {
   async list(plantaId: string, requester?: Requester) {
     const planta = await this.garantirAcessoPlanta(plantaId, requester);
 
+    if (await this.temVinculos()) {
+      const rows = await this.prisma.$queryRaw<Array<{ usuario_id: string; created_at: Date; n: number }>>`
+        SELECT TRIM(v.operador_id) AS usuario_id, min(v.created_at) AS created_at, COUNT(*)::int AS n
+        FROM operador_vinculos v
+        JOIN operador_vinculo_equipamentos ve ON ve.vinculo_id = v.id
+        JOIN equipamentos e ON e.id = ve.equipamento_id AND e.deleted_at IS NULL
+        LEFT JOIN unidades u ON u.id = e.unidade_id
+        WHERE v.removido_em IS NULL AND COALESCE(e.planta_id, u.planta_id) = ${planta.id}::bpchar
+        GROUP BY v.operador_id`;
+      const usuarios = await this.prisma.usuarios.findMany({
+        where: { id: { in: rows.map((r) => r.usuario_id) } },
+        select: { id: true, nome: true, email: true, telefone: true, is_active: true, status: true },
+      });
+      return rows.map((r) => ({
+        id: r.usuario_id,
+        planta_id: planta.id,
+        usuario_id: r.usuario_id,
+        created_at: r.created_at,
+        equipamentos_liberados: Number(r.n),
+        usuario: usuarios.find((u) => u.id.trim() === r.usuario_id) ?? null,
+      }));
+    }
+
     const vinculos = await this.prisma.planta_operadores.findMany({
       where: { planta_id: planta.id },
       orderBy: { created_at: 'desc' },
@@ -90,6 +150,11 @@ export class PlantaOperadoresService {
    */
   async add(plantaId: string, usuarioId: string, requester?: Requester) {
     const planta = await this.garantirAcessoPlanta(plantaId, requester);
+
+    if (await this.temVinculos()) {
+      await this.vinculos.planta(usuarioId, planta.id, true, requester ?? {});
+      return { id: usuarioId.trim(), planta_id: planta.id, usuario_id: usuarioId.trim() };
+    }
 
     const usuario = await this.prisma.usuarios.findFirst({
       where: { id: usuarioId, deleted_at: null },
@@ -130,6 +195,11 @@ export class PlantaOperadoresService {
   async remove(plantaId: string, usuarioId: string, requester?: Requester) {
     const planta = await this.garantirAcessoPlanta(plantaId, requester);
 
+    if (await this.temVinculos()) {
+      await this.vinculos.planta(usuarioId, planta.id, false, requester ?? {});
+      return { message: 'Operador desvinculado da planta com sucesso' };
+    }
+
     const vinculo = await this.prisma.planta_operadores.findFirst({
       where: { planta_id: planta.id, usuario_id: usuarioId },
     });
@@ -153,11 +223,10 @@ export class PlantaOperadoresService {
     });
     if (!planta) throw new NotFoundException('Planta nao encontrada');
 
-    const role = requester?.role;
-    const isAdminLike = ['analista', 'gerente', 'admin', 'super_admin'].includes(role ?? '');
-    if (isAdminLike) return planta;
+    const papel = papelCanonico(requester?.role);
+    if (isGlobal(papel)) return planta;
 
-    if (role === 'proprietario') {
+    if (papel === 'proprietario') {
       if (planta.proprietario_id !== requester?.id) {
         throw new ForbiddenException('Voce so pode gerenciar operadores das suas proprias plantas');
       }

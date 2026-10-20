@@ -1,6 +1,7 @@
 import { Body, Controller, Delete, ForbiddenException, Get, Param, Post, Put, Query, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard, CurrentUser } from '@/core';
 import { BombaCombustivelService } from './bomba-combustivel.service';
+import { isGlobal, papelCanonico } from '../../core/modules/auth/papeis';
 
 /**
  * Posto de Combustível — tags RFID (máquinas), operadores (matrículas), lista de
@@ -12,9 +13,9 @@ import { BombaCombustivelService } from './bomba-combustivel.service';
 export class BombaCombustivelController {
   constructor(private readonly svc: BombaCombustivelService) {}
 
+  /** Equipe Aupus (Admin e analistas, inclusive os papéis novos do NEXON-20). */
   private assertAdmin(user: any) {
-    const role = String(user?.role || '').toLowerCase();
-    if (!['super_admin', 'admin', 'gerente'].includes(role)) throw new ForbiddenException('Apenas administradores.');
+    if (!isGlobal(papelCanonico(user?.role))) throw new ForbiddenException('Apenas administradores.');
   }
 
   @Get('bombas')

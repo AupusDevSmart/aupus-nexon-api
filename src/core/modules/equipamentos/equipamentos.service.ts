@@ -975,6 +975,9 @@ export class EquipamentosService {
     if (this.scopeService.isScoped(scope)) {
       where.AND.push({ unidade: { planta_id: { in: scope } } });
     }
+    // Operador: só os equipamentos liberados (e filhos), nunca o resto da instalação (PER-23).
+    const eqScope = await this.scopeService.getEquipamentosScope(user);
+    if (eqScope) where.AND.push({ id: { in: eqScope } });
 
     if (search) {
       where.OR = [
@@ -1130,9 +1133,20 @@ export class EquipamentosService {
       : undefined;
 
     // Adicionar contagem de componentes e informações de diagrama
+    const liberado = eqScope ? new Set(eqScope) : null;
+    const acessoOp = await this.scopeService.acessoPorEquipamento(user);
     const dataWithCounts = data.map((equipamento: any) => ({
       ...equipamento,
-      totalComponentes: equipamento.equipamentos_filhos?.length || 0,
+      // Pai/filhos fora do que foi liberado não aparecem nem pelo nome.
+      ...(liberado && {
+        equipamento_pai: equipamento.equipamento_pai && liberado.has(equipamento.equipamento_pai.id?.trim()) ? equipamento.equipamento_pai : null,
+        equipamentos_filhos: (equipamento.equipamentos_filhos ?? []).filter((f: any) => liberado.has(f.id?.trim())),
+      }),
+      // Valor contábil (R$): operador só com "Ver valores em R$" no equipamento.
+      ...(acessoOp && !acessoOp.verRs.has(String(equipamento.id ?? '').trim()) && { valor_contabil: null }),
+      totalComponentes: (liberado
+        ? (equipamento.equipamentos_filhos ?? []).filter((f: any) => liberado.has(f.id?.trim())).length
+        : equipamento.equipamentos_filhos?.length) || 0,
       noDiagrama: equipamento.diagrama_id !== null,
       diagramaId: equipamento.diagrama_id,
       tipoEquipamento: equipamento.tipo_equipamento_rel,
@@ -1200,6 +1214,29 @@ export class EquipamentosService {
     // Scope RBAC: 403 se a planta do equipamento (via unidade) nao esta no escopo do usuario
     const plantaIdEfetivo = equipamento.unidade?.planta_id ?? equipamento.planta_id ?? null;
     await this.scopeService.assertPlantaInScope(plantaIdEfetivo, user);
+
+    // Operador (PER-23 e seção 6.4): o próprio equipamento já passou pelo guard;
+    // pai fora do liberado não aparece nem pelo nome, e valor contábil (R$) só
+    // com "Ver valores em R$" naquele equipamento.
+    const acessoOp = await this.scopeService.acessoPorEquipamento(user);
+    if (acessoOp) {
+      await this.scopeService.assertEquipamentoLiberado(equipamento.id, user);
+      const semValor = <T extends { id: string; valor_contabil?: unknown }>(e: T): T =>
+        acessoOp.verRs.has(e.id.trim()) ? e : { ...e, valor_contabil: null };
+      const filhos = (equipamento.equipamentos_filhos ?? [])
+        .filter((f) => acessoOp.equipamentos.has(f.id.trim()))
+        .map(semValor);
+      return {
+        ...semValor(equipamento),
+        equipamento_pai:
+          equipamento.equipamento_pai && acessoOp.equipamentos.has(equipamento.equipamento_pai.id.trim())
+            ? equipamento.equipamento_pai
+            : null,
+        equipamentos_filhos: filhos,
+        totalComponentes: filhos.length,
+        tipoEquipamento: equipamento.tipo_equipamento_rel,
+      };
+    }
 
     return {
       ...equipamento,
@@ -1473,6 +1510,8 @@ export class EquipamentosService {
     if (this.scopeService.isScoped(scope)) {
       where.OR = [{ planta_id: { in: scope } }, { unidade: { planta_id: { in: scope } } }];
     }
+    const eqScope = await this.scopeService.getEquipamentosScope(user);
+    if (eqScope) where.id = { in: eqScope };
     return await this.prisma.equipamentos.findMany({
       where,
       select: {
@@ -1842,7 +1881,7 @@ export class EquipamentosService {
     };
   }
 
-  async getEstatisticasUnidade(unidadeId: string) {
+  async getEstatisticasUnidade(unidadeId: string, user?: ScopedUser) {
     // Verificar se unidade existe
     const unidade = await this.prisma.unidades.findFirst({
       where: { id: unidadeId, deleted_at: null },
@@ -1861,6 +1900,13 @@ export class EquipamentosService {
       throw new NotFoundException('Unidade não encontrada');
     }
 
+    // Operador: totais só dos equipamentos liberados, sem aviso do recorte (PER-24).
+    const eqScope = await this.scopeService.getEquipamentosScope(user);
+    const base: any = { unidade_id: unidadeId, deleted_at: null, ...(eqScope && { id: { in: eqScope } }) };
+    // Valor contábil (R$): operador só soma os equipamentos com "Ver valores em R$".
+    const acessoOp = await this.scopeService.acessoPorEquipamento(user);
+    const baseValor: any = acessoOp ? { ...base, id: { in: [...acessoOp.verRs] } } : base;
+
     const [
       totalEquipamentos,
       equipamentosPorTipo,
@@ -1871,28 +1917,27 @@ export class EquipamentosService {
     ] = await Promise.all([
       // Total de equipamentos
       this.prisma.equipamentos.count({
-        where: { unidade_id: unidadeId, deleted_at: null }
+        where: base
       }),
 
       // Por tipo
       this.prisma.equipamentos.groupBy({
         by: ['classificacao'],
-        where: { unidade_id: unidadeId, deleted_at: null },
+        where: base,
         _count: { id: true }
       }),
 
       // Por criticidade
       this.prisma.equipamentos.groupBy({
         by: ['criticidade'],
-        where: { unidade_id: unidadeId, deleted_at: null },
+        where: base,
         _count: { id: true }
       }),
 
       // Valor total
       this.prisma.equipamentos.aggregate({
         where: {
-          unidade_id: unidadeId,
-          deleted_at: null,
+          ...baseValor,
           valor_contabil: { not: null }
         },
         _sum: { valor_contabil: true }
@@ -1901,8 +1946,7 @@ export class EquipamentosService {
       // Contagem UCs
       this.prisma.equipamentos.count({
         where: {
-          unidade_id: unidadeId,
-          deleted_at: null,
+          ...base,
           classificacao: 'UC'
         }
       }),
@@ -1910,8 +1954,7 @@ export class EquipamentosService {
       // Contagem UARs
       this.prisma.equipamentos.count({
         where: {
-          unidade_id: unidadeId,
-          deleted_at: null,
+          ...base,
           classificacao: 'UAR'
         }
       })

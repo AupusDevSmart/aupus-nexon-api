@@ -1,4 +1,5 @@
 import {
+  ForbiddenException,
   Body,
   Controller,
   Delete,
@@ -16,7 +17,8 @@ import {
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
-import { JwtAuthGuard, Public } from '@/core';
+import { JwtAuthGuard, Public, CurrentUser, ScopedUser } from '@/core';
+import { capacidades, papelCanonico } from '@/core/modules/auth/papeis';
 import { IotCatalogService } from './iot-catalog.service';
 import { CreateIotDeviceModeloDto } from './dto/create-iot-device-modelo.dto';
 import { CreateIotDeviceTipoDto } from './dto/create-iot-device-tipo.dto';
@@ -30,6 +32,20 @@ export class IotCatalogController {
   private readonly logger = new Logger(IotCatalogController.name);
 
   constructor(private readonly service: IotCatalogService) {}
+
+  /** Catálogo IoT é cadastro técnico: operador nem lista (PER-22). */
+  private semOperador(user?: ScopedUser): void {
+    if (user && papelCanonico(user.role) === 'operador') {
+      throw new ForbiddenException('Recurso fora do escopo do usuario');
+    }
+  }
+
+  /** Editar o catálogo vale para todas as usinas: só admin e analista de automação. */
+  private exigirCadastroTecnico(user?: ScopedUser): void {
+    if (!capacidades(papelCanonico(user?.role)).cadastroTecnico) {
+      throw new ForbiddenException('Recurso fora do escopo do usuario');
+    }
+  }
 
   /**
    * Endpoint REST JSON do catalogo.
@@ -45,7 +61,8 @@ export class IotCatalogController {
   @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Catalogo IoT completo (tipos + modelos)' })
   @ApiResponse({ status: HttpStatus.OK })
-  async getCatalog(): Promise<IotCatalogResponseDto> {
+  async getCatalog(@CurrentUser() user?: ScopedUser): Promise<IotCatalogResponseDto> {
+    this.semOperador(user);
     return this.service.getCatalog();
   }
 
@@ -108,28 +125,32 @@ export class IotCatalogController {
   @Get('tipos')
   @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Lista tipos IoT' })
-  listTipos() {
+  listTipos(@CurrentUser() user?: ScopedUser) {
+    this.semOperador(user);
     return this.service.listTipos();
   }
 
   @Get('tipos/:id')
   @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Detalhe de tipo IoT' })
-  findTipo(@Param('id') id: string) {
+  findTipo(@Param('id') id: string, @CurrentUser() user?: ScopedUser) {
+    this.semOperador(user);
     return this.service.findTipo(id);
   }
 
   @Post('tipos')
   @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Cria tipo IoT' })
-  createTipo(@Body() dto: CreateIotDeviceTipoDto) {
+  createTipo(@Body() dto: CreateIotDeviceTipoDto, @CurrentUser() user?: ScopedUser) {
+    this.exigirCadastroTecnico(user);
     return this.service.createTipo(dto);
   }
 
   @Patch('tipos/:id')
   @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Atualiza tipo IoT' })
-  updateTipo(@Param('id') id: string, @Body() dto: UpdateIotDeviceTipoDto) {
+  updateTipo(@Param('id') id: string, @Body() dto: UpdateIotDeviceTipoDto, @CurrentUser() user?: ScopedUser) {
+    this.exigirCadastroTecnico(user);
     return this.service.updateTipo(id, dto);
   }
 
@@ -138,7 +159,8 @@ export class IotCatalogController {
   @ApiOperation({
     summary: 'Remove tipo IoT (cascade nos modelos linkados)',
   })
-  removeTipo(@Param('id') id: string) {
+  removeTipo(@Param('id') id: string, @CurrentUser() user?: ScopedUser) {
+    this.exigirCadastroTecnico(user);
     return this.service.removeTipo(id);
   }
 
@@ -149,35 +171,40 @@ export class IotCatalogController {
   @Get('modelos')
   @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Lista modelos IoT (filtra por ?tipo=codigo)' })
-  listModelos(@Query('tipo') tipo?: string) {
+  listModelos(@Query('tipo') tipo?: string, @CurrentUser() user?: ScopedUser) {
+    this.semOperador(user);
     return this.service.listModelos(tipo);
   }
 
   @Get('modelos/:id')
   @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Detalhe de modelo IoT' })
-  findModelo(@Param('id') id: string) {
+  findModelo(@Param('id') id: string, @CurrentUser() user?: ScopedUser) {
+    this.semOperador(user);
     return this.service.findModelo(id);
   }
 
   @Post('modelos')
   @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Cria modelo IoT' })
-  createModelo(@Body() dto: CreateIotDeviceModeloDto) {
+  createModelo(@Body() dto: CreateIotDeviceModeloDto, @CurrentUser() user?: ScopedUser) {
+    this.exigirCadastroTecnico(user);
     return this.service.createModelo(dto);
   }
 
   @Patch('modelos/:id')
   @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Atualiza modelo IoT' })
-  updateModelo(@Param('id') id: string, @Body() dto: UpdateIotDeviceModeloDto) {
+  updateModelo(@Param('id') id: string, @Body() dto: UpdateIotDeviceModeloDto, @CurrentUser() user?: ScopedUser) {
+    this.exigirCadastroTecnico(user);
     return this.service.updateModelo(id, dto);
   }
 
   @Delete('modelos/:id')
   @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Remove modelo IoT' })
-  removeModelo(@Param('id') id: string) {
+  removeModelo(@Param('id') id: string, @CurrentUser() user?: ScopedUser) {
+    this.exigirCadastroTecnico(user);
     return this.service.removeModelo(id);
   }
 
@@ -187,7 +214,8 @@ export class IotCatalogController {
     summary: 'Duplica modelo existente (mesmo tipo + mapeamento)',
     description: 'Util pra criar variantes (ex: SG250CX -> SG110CX so mudando num_mppts).',
   })
-  duplicateModelo(@Param('id') id: string) {
+  duplicateModelo(@Param('id') id: string, @CurrentUser() user?: ScopedUser) {
+    this.exigirCadastroTecnico(user);
     return this.service.duplicateModelo(id);
   }
 }

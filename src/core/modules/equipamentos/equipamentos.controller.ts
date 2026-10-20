@@ -411,8 +411,8 @@ export class EquipamentosController {
   @Permissions('equipamentos.view')
   @ApiOperation({ summary: 'Estatísticas dos equipamentos de uma unidade' })
   @ApiResponse({ status: 200, description: 'Estatísticas da unidade' })
-  getEstatisticasUnidade(@Param('unidadeId') unidadeId: string) {
-    return this.equipamentosService.getEstatisticasUnidade(unidadeId);
+  getEstatisticasUnidade(@Param('unidadeId') unidadeId: string, @CurrentUser() user: any) {
+    return this.equipamentosService.getEstatisticasUnidade(unidadeId, user);
   }
 
   // ==========================================

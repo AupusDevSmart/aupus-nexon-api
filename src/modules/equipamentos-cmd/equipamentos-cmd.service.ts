@@ -17,7 +17,8 @@ import { CommandResultDto } from './dto/command-result.dto';
 import { AcionarPontoResultDto } from './dto/acionar-ponto-result.dto';
 import { ClienteInfo } from '../../core/common/cliente-info';
 import { momentoEmSaoPaulo } from '../../shared/util/janela-horario';
-import { avaliarRestricoes } from './restricoes-comando';
+import { avaliarRestricoes, ehMedidor, sujeitoPermissaoPorUnidade } from './restricoes-comando';
+import { capacidades, MSG_SOMENTE_LEITURA, papelCanonico } from '../../core/modules/auth/papeis';
 
 /** Linha da trilha de comando (logs_mqtt tipo='comando'). */
 interface RegistroComando {
@@ -78,6 +79,8 @@ export class EquipamentosCmdService {
   ): Promise<{ ok: boolean; topico: string; action: string; ssid?: string }> {
     const trimmedId = equipamentoId.trim();
     if (user) await this.scopeService.assertEntityInScope('equipamento', trimmedId, user);
+    // Rede do TON é configuração técnica (PER-33a), não comando de operação.
+    this.exigirConfigTecnica(user);
 
     const eqp = await this.prisma.equipamentos.findFirst({
       where: { id: trimmedId, deleted_at: null },
@@ -126,6 +129,12 @@ export class EquipamentosCmdService {
   ): Promise<CommandResultDto> {
     const trimmedId = equipamentoId.trim();
     if (user) await this.scopeService.assertEntityInScope('equipamento', trimmedId, user);
+    // Texto livre/Modbus direto na TON passa por cima das restrições do ponto
+    // (janela, permissão por unidade, setpoint): só a equipe técnica (PER-33a).
+    // Proprietário e operador comandam pelos pontos (acionar-ponto).
+    if (user && !capacidades(papelCanonico(user.role)).configTecnica) {
+      throw new ForbiddenException('Comando bruto é só para a equipe técnica');
+    }
 
     const equipamento = await this.prisma.equipamentos.findFirst({
       where: { id: trimmedId, deleted_at: null },
@@ -297,6 +306,10 @@ export class EquipamentosCmdService {
         '',
     ).toUpperCase();
     // Só a bomba de COMBUSTÍVEL: a motobomba do pivô (bombeamento) é comandável.
+    // Medidor (inclusive o da concessionária) não recebe comando de ninguém (6.2).
+    if (ehMedidor(codigoTipo) && !sim) {
+      throw new BadRequestException(`"${equipamento.nome}" é um medidor: não recebe comando.`);
+    }
     if (/BOMBA_?COMBUST/.test(codigoTipo) && !sim) {
       throw new BadRequestException(
         `"${equipamento.nome}" é uma bomba autônoma — o relé é acionado pela lógica (RFID/regras/nível), não por comando manual. Use o painel de bancada (🧪) para testar o relé.`,
@@ -726,7 +739,10 @@ export class EquipamentosCmdService {
     let janelaOperador: unknown = null;
     let bloqueioPonta: any = null;
 
-    if (userId) {
+    // Admin, analistas e proprietário não passam pela permissão por instalação
+    // (legado; a tabela nem existe em produção). Operador: recorte por equipamento
+    // liberado, já checado no assertEntityInScope (NEXON-20, 6.2).
+    if (userId && sujeitoPermissaoPorUnidade(papelCanonico(user?.role))) {
       try {
         const rows = await this.prisma.$queryRaw<Array<{ linhas: number; comandar: boolean | null }>>`
           SELECT
@@ -742,6 +758,8 @@ export class EquipamentosCmdService {
       } catch (e) {
         this.logger.debug?.(`[restricoes] permissão por instalação indisponível: ${(e as Error).message}`);
       }
+    }
+    if (userId) {
       try {
         const rows = await this.prisma.$queryRaw<Array<{ cmd_janela: unknown }>>`
           SELECT cmd_janela FROM usuarios WHERE id = ${userId}::bpchar LIMIT 1`;
@@ -765,6 +783,13 @@ export class EquipamentosCmdService {
       nomePonto,
       agora: momentoEmSaoPaulo(),
     });
+  }
+
+  /** Configuração técnica (PER-33a): só Admin e analistas; demais → 403 "Somente leitura". */
+  private exigirConfigTecnica(user?: ScopedUser) {
+    if (user && !capacidades(papelCanonico(user.role)).configTecnica) {
+      throw new ForbiddenException(MSG_SOMENTE_LEITURA);
+    }
   }
 
   /** Promisified sleep — usado pelo pulso. */
@@ -982,6 +1007,9 @@ export class EquipamentosCmdService {
   async enviarSetpoint(equipamentoId: string, setpointId: string, valor: number, user?: Autor, cliente?: ClienteInfo) {
     const eqId = equipamentoId.trim();
     if (user) await this.scopeService.assertEntityInScope('equipamento', eqId, user);
+    // Setpoint grava PARÂMETRO (limite de potência, FP, reativo, endereço Modbus,
+    // constante/TC/TP): configuração técnica (PER-33a). Ligar/desligar segue no acionar.
+    this.exigirConfigTecnica(user);
     const equipamento = await this.prisma.equipamentos.findFirst({ where: { id: eqId, deleted_at: null }, select: { nome: true } });
     if (!equipamento) throw new NotFoundException(`Equipamento ${eqId} nao encontrado`);
     const dev = await this.deviceDoEquipamento(eqId);

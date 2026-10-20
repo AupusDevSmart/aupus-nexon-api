@@ -1,5 +1,5 @@
 import { Injectable, Logger, NotFoundException, ForbiddenException } from '@nestjs/common';
-import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
+import { PrismaService, PermissionScopeService, ScopedUser, Prisma } from '@/core';
 
 /**
  * Monta o PAYLOAD do boletim semanal (contrato de bdo_semanal/dados_exemplo.json) a
@@ -44,6 +44,11 @@ export class BoletimSemanalService {
         const pid = pr[0]?.pid;
         if (!pid || !escopo.includes(pid)) throw new ForbiddenException('Unidade fora do escopo');
       }
+    }
+    // Operador: boletim é de geração (PER-40) e os alarmes contam só os liberados (PER-24).
+    const eqScope = user ? await this.scope.getEquipamentosScope(user) : null;
+    if (user && eqScope && !(await this.scope.podeVerGeracao(uid, user))) {
+      throw new ForbiddenException('Recurso fora do escopo do usuario');
     }
 
     const refDate =
@@ -97,9 +102,9 @@ export class BoletimSemanalService {
       anterior: null,
     }));
 
-    const alarmeSemana = await this.contarAlarmes(uid, sIni, sFim);
-    const alarmeAnterior = await this.contarAlarmes(uid, aIni, aFim);
-    const tipos = await this.alarmesPorTipo(uid, sIni, sFim);
+    const alarmeSemana = await this.contarAlarmes(uid, sIni, sFim, eqScope);
+    const alarmeAnterior = await this.contarAlarmes(uid, aIni, aFim, eqScope);
+    const tipos = await this.alarmesPorTipo(uid, sIni, sFim, eqScope);
 
     const geradoEm = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
     const performanceMeta = 80;
@@ -151,7 +156,7 @@ export class BoletimSemanalService {
     };
   }
 
-  private async contarAlarmes(uid: string, ini: string, fim: string) {
+  private async contarAlarmes(uid: string, ini: string, fim: string, eqScope: string[] | null = null) {
     const rows = await this.prisma.$queryRaw<Array<{ sev: string; qtd: number }>>`
       SELECT UPPER(COALESCE(l.severidade,'')) AS sev, COUNT(*)::int AS qtd
       FROM logs_mqtt l
@@ -159,6 +164,7 @@ export class BoletimSemanalService {
       WHERE TRIM(e.unidade_id) = ${uid}
         AND l.tipo = 'alerta'
         AND l.created_at >= ${ini}::date AND l.created_at < (${fim}::date + 1)
+        ${eqScope ? Prisma.sql`AND TRIM(e.id) = ANY(${eqScope}::text[])` : Prisma.empty}
       GROUP BY 1
     `;
     let criticos = 0, nao_criticos = 0;
@@ -169,7 +175,7 @@ export class BoletimSemanalService {
     return { criticos, nao_criticos, total: criticos + nao_criticos };
   }
 
-  private async alarmesPorTipo(uid: string, ini: string, fim: string) {
+  private async alarmesPorTipo(uid: string, ini: string, fim: string, eqScope: string[] | null = null) {
     const rows = await this.prisma.$queryRaw<Array<{ tipo: string; qtd: number }>>`
       SELECT COALESCE(NULLIF(TRIM(r.nome), ''), 'Outros') AS tipo, COUNT(*)::int AS qtd
       FROM logs_mqtt l
@@ -178,6 +184,7 @@ export class BoletimSemanalService {
       WHERE TRIM(e.unidade_id) = ${uid}
         AND l.tipo = 'alerta'
         AND l.created_at >= ${ini}::date AND l.created_at < (${fim}::date + 1)
+        ${eqScope ? Prisma.sql`AND TRIM(e.id) = ANY(${eqScope}::text[])` : Prisma.empty}
       GROUP BY 1 ORDER BY 2 DESC LIMIT 6
     `;
     return rows.map((r) => ({ tipo: r.tipo, qtd: Number(r.qtd) }));

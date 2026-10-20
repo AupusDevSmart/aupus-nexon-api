@@ -1,6 +1,7 @@
 import { Body, Controller, Delete, ForbiddenException, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard, CurrentUser } from '@/core';
 import { ComissionamentoService } from './comissionamento.service';
+import { isGlobal, papelCanonico } from '../../core/modules/auth/papeis';
 
 /**
  * Comissionamento de pontos IoT (Fase 0) — checks de coerência + registro de aceite.
@@ -12,9 +13,9 @@ import { ComissionamentoService } from './comissionamento.service';
 export class ComissionamentoController {
   constructor(private readonly svc: ComissionamentoService) {}
 
+  /** Equipe Aupus (Admin e analistas, inclusive os papéis novos do NEXON-20). */
   private assertAdmin(user: any) {
-    const role = String(user?.role || '').toLowerCase();
-    if (!['super_admin', 'admin', 'gerente'].includes(role)) {
+    if (!isGlobal(papelCanonico(user?.role))) {
       throw new ForbiddenException('Apenas administradores comissionam pontos.');
     }
   }

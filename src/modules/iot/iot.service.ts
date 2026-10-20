@@ -523,6 +523,12 @@ export class IoTService {
       LEFT JOIN tipos_equipamentos te ON TRIM(te.id) = TRIM(e.tipo_equipamento_id)
       WHERE e.scs = true AND TRIM(e.unidade_id) = ${uid} AND e.deleted_at IS NULL
       ORDER BY COALESCE(NULLIF(TRIM(e.tag), ''), e.nome)`;
+    // Operador: só os cards dos equipamentos liberados (PER-23).
+    const eqScope = user ? await this.scopeService.getEquipamentosScope(user) : null;
+    if (eqScope) {
+      const lib = new Set(eqScope);
+      elementos.splice(0, elementos.length, ...elementos.filter((e) => lib.has(e.equipamento_id)));
+    }
     if (!elementos.length) return { unidade_id: uid, elementos: [] };
 
     // Fonte da leitura de cada elemento: um DJ/Medidor Concessionária não publica nada — quem
@@ -679,6 +685,8 @@ export class IoTService {
       if (unidadeId) {
         await this.scopeService.assertEntityInScope('unidade', unidadeId, user);
       }
+      // Operador: só o DJ liberado (a instalação sozinha não basta).
+      await this.scopeService.assertEquipamentoLiberado(id, user);
     }
 
     // ids sao char(26): TRIM dos dois lados (o io_config antigo gravava com padding).

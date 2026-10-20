@@ -177,6 +177,7 @@ export class MonitoramentoSyncService {
   async listarGeracaoDia(
     dataAlvo?: string,
     scope: PlantaScope = null,
+    unidadesGeracao: string[] | null = null,
   ): Promise<{ data: string; dados: Array<{ unidade_id: string; nome: string; kwh_realizado: number; kwh_previsto: number; pct: number | null; origem: string }> }> {
     const data = dataAlvo && /^\d{4}-\d{2}-\d{2}$/.test(dataAlvo) ? dataAlvo : this.hojeSP();
     const dados = await this.prisma.$queryRaw<
@@ -192,7 +193,7 @@ export class MonitoramentoSyncService {
       FROM geracao_diaria_plantas g
       JOIN unidades u ON TRIM(u.id) = TRIM(g.unidade_id) AND u.deleted_at IS NULL
       WHERE g.data = ${data}::date
-      ${this.scopeFrag(scope)}
+      ${this.scopeFrag(scope, unidadesGeracao)}
       ORDER BY g.kwh_realizado DESC
     `);
     return { data, dados };
@@ -203,7 +204,7 @@ export class MonitoramentoSyncService {
    * ranking de usinas de hoje, e a série diária do parque (últimos `dias`) pro gráfico
    * de tendência realizado × meta. Só leitura.
    */
-  async getResumo(dias = 30, scope: PlantaScope = null): Promise<{
+  async getResumo(dias = 30, scope: PlantaScope = null, unidadesGeracao: string[] | null = null): Promise<{
     data: string;
     hoje: { realizado: number; previsto: number; eficiencia: number | null; usinas: number };
     ranking: Array<{ unidade_id: string; nome: string; kwh_realizado: number; kwh_previsto: number; pct: number | null; origem: string }>;
@@ -211,7 +212,7 @@ export class MonitoramentoSyncService {
   }> {
     const d = Math.min(Math.max(Number(dias) || 30, 1), 180);
     const hoje = this.hojeSP();
-    const { dados: ranking } = await this.listarGeracaoDia(hoje, scope);
+    const { dados: ranking } = await this.listarGeracaoDia(hoje, scope, unidadesGeracao);
     const realizado = ranking.reduce((s, r) => s + (Number(r.kwh_realizado) || 0), 0);
     const previsto = ranking.reduce((s, r) => s + (Number(r.kwh_previsto) || 0), 0);
     const eficiencia = previsto > 0 ? Math.round((realizado / previsto) * 100) : null;
@@ -224,7 +225,7 @@ export class MonitoramentoSyncService {
       FROM geracao_diaria_plantas g
       JOIN unidades u ON TRIM(u.id) = TRIM(g.unidade_id) AND u.deleted_at IS NULL
       WHERE g.data > (${hoje}::date - ${d}::int) AND g.data <= ${hoje}::date
-      ${this.scopeFrag(scope)}
+      ${this.scopeFrag(scope, unidadesGeracao)}
       GROUP BY g.data
       ORDER BY g.data ASC
     `);
@@ -235,7 +236,7 @@ export class MonitoramentoSyncService {
    * Registros crus de geração diária (últimos `meses`), por unidade — o front filtra e
    * agrega client-side (usina/ano/mês), como o dashboard do BDO fazia.
    */
-  async getRegistros(meses = 12, scope: PlantaScope = null): Promise<
+  async getRegistros(meses = 12, scope: PlantaScope = null, unidadesGeracao: string[] | null = null): Promise<
     Array<{ unidade_id: string; nome: string; data: string; kwh_realizado: number; kwh_previsto: number }>
   > {
     const m = Math.min(Math.max(Number(meses) || 12, 1), 36);
@@ -247,7 +248,7 @@ export class MonitoramentoSyncService {
       FROM geracao_diaria_plantas g
       JOIN unidades u ON TRIM(u.id) = TRIM(g.unidade_id) AND u.deleted_at IS NULL
       WHERE g.data > (CURRENT_DATE - (${m}::int * INTERVAL '1 month'))
-      ${this.scopeFrag(scope)}
+      ${this.scopeFrag(scope, unidadesGeracao)}
       ORDER BY g.data ASC
     `);
   }
@@ -259,12 +260,18 @@ export class MonitoramentoSyncService {
    *   - scope === []    → não tem planta nenhuma → não vê nada (condição impossível).
    *   - scope === [...] → restrito às plantas do dono/operador (u.planta_id ∈ scope).
    * Sem isso, proprietário via COA veria a geração de TODAS as usinas. NÃO pode.
+   * `unidadesGeracao` (operador, PER-40): além da planta, só as instalações com "Ver geração".
    */
-  private scopeFrag(scope: PlantaScope): Prisma.Sql {
-    if (!Array.isArray(scope)) return Prisma.empty;
+  private scopeFrag(scope: PlantaScope, unidadesGeracao: string[] | null = null): Prisma.Sql {
+    const soGeracao = Array.isArray(unidadesGeracao)
+      ? unidadesGeracao.length === 0
+        ? Prisma.sql`AND FALSE`
+        : Prisma.sql`AND TRIM(u.id) = ANY(${unidadesGeracao.map((s) => String(s).trim())}::text[])`
+      : Prisma.empty;
+    if (!Array.isArray(scope)) return soGeracao;
     if (scope.length === 0) return Prisma.sql`AND FALSE`;
     const ids = scope.map((s) => String(s).trim());
-    return Prisma.sql`AND TRIM(u.planta_id) = ANY(${ids})`;
+    return Prisma.sql`AND TRIM(u.planta_id) = ANY(${ids}) ${soGeracao}`;
   }
 
   private okEmpty(p: string): SyncResult {

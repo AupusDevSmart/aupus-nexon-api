@@ -16,6 +16,12 @@ import { UsuariosService } from './usuarios.service';
 import { AuditoriaAcessosService } from './auditoria-acessos.service';
 import { AcessoOperadorDto, CriarConviteDto } from './dto/conta-app.dto';
 import { expandirPermissoes, LinhaPermissaoUnidade, resumirPermissoes } from './acesso-operador.util';
+import { VinculosOperadorService } from './vinculos-operador.service';
+
+/** Tabelas do acesso por instalação (SQL 2026-09-28) que podem não existir no banco. */
+function tabelaLegadaAusente(e: unknown): boolean {
+  return /usuario_unidade_permissoes|cmd_janela|does not exist/i.test((e as Error)?.message ?? '');
+}
 
 export interface Requisitante {
   id?: string;
@@ -50,7 +56,30 @@ export class OperadoresService {
     private readonly scope: PermissionScopeService,
     private readonly mail: MailService,
     private readonly auditoria: AuditoriaAcessosService,
+    private readonly vinculos: VinculosOperadorService,
   ) {}
+
+  /**
+   * NEXON-20: o escopo do operador é o vínculo por equipamento. O acesso por
+   * instalação dos apps vira vínculo; as linhas antigas seguem gravadas onde a
+   * tabela existe (o app ainda as lê), sem derrubar quando ela não existe.
+   */
+  private async gravarComVinculos(
+    usuarioId: string,
+    linhas: LinhaPermissaoUnidade[],
+    unidades: Array<{ id: string; planta_id: string }>,
+    janela: { inicio: string; fim: string; dias: number[] } | null,
+    req: Requisitante,
+    escopo: string[] | null,
+    dispositivo?: string | null,
+  ) {
+    await this.vinculos.porInstalacoes(usuarioId, unidades.map((u) => u.id), req, dispositivo);
+    try {
+      await this.gravarAcesso(usuarioId, linhas, unidades, janela, req.id!.trim(), escopo);
+    } catch (e) {
+      if (!tabelaLegadaAusente(e)) throw e;
+    }
+  }
 
   // ==========================================================================
   // Listagem
@@ -169,7 +198,7 @@ export class OperadoresService {
       dto.permissoes,
       dto.excecoes ?? [],
     );
-    await this.gravarAcesso(userId, linhas, unidades, dto.janela ?? null, reqId, null);
+    await this.gravarComVinculos(userId, linhas, unidades, dto.janela ?? null, req, null, cliente?.dispositivo);
 
     const validade = dto.validade_dias ?? 7;
     const canais = dto.canais ?? ['email'];
@@ -264,7 +293,7 @@ export class OperadoresService {
     const unidades = await this.carregarUnidadesNoEscopo(dto.unidade_ids, req);
     const linhas = expandirPermissoes(unidades.map((u) => u.id), dto.permissoes, dto.excecoes ?? []);
     const escopo = await this.scope.getScope(req);
-    await this.gravarAcesso(id, linhas, unidades, dto.janela ?? null, reqId, this.scope.isScoped(escopo) ? escopo : null);
+    await this.gravarComVinculos(id, linhas, unidades, dto.janela ?? null, req, this.scope.isScoped(escopo) ? escopo : null, cliente?.dispositivo);
     const depois = await this.lerAcesso(id);
 
     await this.auditoria.registrar({

@@ -1,4 +1,15 @@
-import { dataBR, hojeSP, papelCarregador, situacaoValidade, somarDias, tarifaValida, validadeDe } from './carregador.util';
+import {
+  dataBR,
+  hojeSP,
+  moradorVeValoresDa,
+  papelCarregador,
+  podeExportarRecargas,
+  podeGerirMoradores,
+  situacaoValidade,
+  somarDias,
+  tarifaValida,
+  validadeDe,
+} from './carregador.util';
 
 describe('carregador.util', () => {
   it('papel: Aupus é analista, dono é proprietário, vinculado é morador', () => {
@@ -6,7 +17,35 @@ describe('carregador.util', () => {
     expect(papelCarregador('analista', false)).toBe('analista');
     expect(papelCarregador('proprietario', true)).toBe('proprietario');
     expect(papelCarregador('operador', true)).toBe('morador');
-    expect(papelCarregador('operador', false)).toBe('proprietario');
+    expect(papelCarregador('cativo', false)).toBe('proprietario');
+  });
+
+  it('papel (NEXON-20): papéis novos de analista e operador sem morador', () => {
+    expect(papelCarregador('admin', false)).toBe('analista');
+    expect(papelCarregador('gerente', false)).toBe('analista');
+    expect(papelCarregador('analista_automacao', false)).toBe('analista');
+    expect(papelCarregador('analista_operacao', true)).toBe('analista');
+    expect(papelCarregador('propietario', false)).toBe('proprietario');
+    // Antes caía em proprietário (gerenciava moradores e exportava).
+    expect(papelCarregador('operador', false)).toBe('operador');
+    expect(papelCarregador(undefined, true)).toBe('morador');
+  });
+
+  it('exportar recargas e gerir moradores: só proprietário e analistas (PER-38)', () => {
+    expect(podeExportarRecargas('analista')).toBe(true);
+    expect(podeExportarRecargas('proprietario')).toBe(true);
+    expect(podeExportarRecargas('operador')).toBe(false);
+    expect(podeExportarRecargas('morador')).toBe(false);
+    expect(podeGerirMoradores('operador')).toBe(false);
+    expect(podeGerirMoradores('morador')).toBe(false);
+    expect(podeGerirMoradores('proprietario')).toBe(true);
+  });
+
+  it('morador só vê valores da própria recarga', () => {
+    expect(moradorVeValoresDa('morador', 'M1', 'M1 ')).toBe(true);
+    expect(moradorVeValoresDa('morador', 'M1', 'M2')).toBe(false);
+    expect(moradorVeValoresDa('morador', null, null)).toBe(false);
+    expect(moradorVeValoresDa('proprietario', null, 'M2')).toBe(true);
   });
 
   it('tarifa na faixa R$ 0,30 a R$ 5,00', () => {

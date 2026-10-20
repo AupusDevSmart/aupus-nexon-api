@@ -2,7 +2,20 @@ import { Injectable, Logger, ForbiddenException, NotFoundException, BadRequestEx
 import { Interval } from '@nestjs/schedule';
 import { randomBytes } from 'node:crypto';
 import { MailService } from '../../core/mail/mail.service';
-import { dataBR, hojeSP, papelCarregador, PapelCarregador, situacaoValidade, somarDias, tarifaValida, validadeDe } from './carregador.util';
+import {
+  dataBR,
+  hojeSP,
+  moradorVeValoresDa,
+  papelCarregador,
+  PapelCarregador,
+  podeExportarRecargas,
+  podeGerirMoradores,
+  situacaoValidade,
+  somarDias,
+  tarifaValida,
+  validadeDe,
+} from './carregador.util';
+import { MSG_SOMENTE_LEITURA } from '../../core/modules/auth/papeis';
 import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
 import { MqttService } from '../../shared/mqtt/mqtt.service';
 
@@ -17,6 +30,10 @@ import { MqttService } from '../../shared/mqtt/mqtt.service';
  *
  * Owner-scoped por planta. Ingestão MQTT (kWh + fim de sessão) fica no MqttService.
  */
+const TODOS_PAPEIS: PapelCarregador[] = ['analista', 'proprietario', 'operador', 'morador'];
+const PAPEIS_GEREM_MORADOR = TODOS_PAPEIS.filter(podeGerirMoradores);
+const PAPEIS_EXPORTAM = TODOS_PAPEIS.filter(podeExportarRecargas);
+
 @Injectable()
 export class CarregadorEletricoService {
   private readonly logger = new Logger(CarregadorEletricoService.name);
@@ -53,6 +70,45 @@ export class CarregadorEletricoService {
     if (!aceitos.includes(papel)) throw new ForbiddenException(msg);
   }
 
+  /**
+   * Acesso ao carregador para operar (liberar, parar, pedir vaga, estado).
+   * Morador: o carregador tem de ser da planta dele (o vínculo é o cadastro de
+   * morador, não o escopo do NexON). Demais: escopo do equipamento, que no
+   * operador também exige o equipamento liberado (NEXON-20, 6.2).
+   */
+  private async assertCarregador(eid: string, plantaId: string | null, user: ScopedUser | undefined, p?: { papel: PapelCarregador; morador: any | null }) {
+    if (!user) return;
+    const perfil = p ?? (await this.papel(user));
+    if (perfil.papel === 'morador') {
+      const minha = String(perfil.morador?.planta_id ?? '').trim();
+      if (!minha || minha !== String(plantaId ?? '').trim()) throw new ForbiddenException('Fora do escopo');
+      return;
+    }
+    await this.scope.assertEntityInScope('equipamento', eid, user);
+  }
+
+  /**
+   * Valores (R$/kWh, kWh das recargas) por linha (seção 6.4): operador só com "Ver
+   * valores em R$" no carregador; morador só das próprias recargas. Os demais veem tudo.
+   */
+  private async ocultarValores<T extends Record<string, any>>(rows: T[], user: ScopedUser | undefined, p: { papel: PapelCarregador; morador: any | null } | null): Promise<T[]> {
+    if (!user || !p || (p.papel !== 'operador' && p.papel !== 'morador')) return rows;
+    const veRs = new Map<string, boolean>();
+    const out: T[] = [];
+    for (const r of rows) {
+      const eq = String(r.equipamento_id ?? r.id ?? '').trim();
+      let ve = true;
+      if (p.papel === 'operador') {
+        if (!veRs.has(eq)) veRs.set(eq, await this.scope.podeVerValores(eq, user));
+        ve = veRs.get(eq)!;
+      } else if ('morador_id' in r) {
+        ve = moradorVeValoresDa(p.papel, p.morador?.id, r.morador_id);
+      }
+      out.push(ve ? r : ({ ...r, tarifa_kwh: null, ...(p.papel === 'morador' && 'kwh_total' in r ? { kwh_total: null } : {}) } as T));
+    }
+    return out;
+  }
+
   /** Trilha de morador (planta): grava em cada carregador da planta. */
   private async trilhaPlanta(plantaId: string | null, mensagem: string, semantico: string, user?: ScopedUser) {
     if (!plantaId) return;
@@ -68,7 +124,8 @@ export class CarregadorEletricoService {
   async salvarConfig(equipamentoId: string, body: any, user?: ScopedUser): Promise<any> {
     const eid = equipamentoId.trim();
     await this.assertPlantaNoEscopo(user, (await this.plantaDoCarregador(eid)) || '');
-    await this.exigirPapel(user, ['analista'], 'Só o analista altera o valor do kWh.');
+    // Valor do kWh = configuração técnica (PER-33a): Admin e analistas.
+    await this.exigirPapel(user, ['analista'], MSG_SOMENTE_LEITURA);
     const tarifa = tarifaValida(body?.tarifa_kwh);
     if (tarifa == null) throw new BadRequestException('Valor do kWh fora da faixa (R$ 0,30 a R$ 5,00).');
     const atual = (await this.prisma.$queryRaw<any[]>`SELECT tarifa_kwh FROM carregador_config WHERE TRIM(equipamento_id)=${eid} LIMIT 1`)[0];
@@ -144,7 +201,11 @@ export class CarregadorEletricoService {
       WHERE e.deleted_at IS NULL
         AND (e.tipo_equipamento ILIKE '%carregador%' OR te.codigo ILIKE '%CARREGADOR%' OR te.nome ILIKE '%carregador%')
       ORDER BY e.nome`;
-    return plantas ? rows.filter((r) => !!r.planta_id && plantas.includes(String(r.planta_id).trim())) : rows;
+    let vis = plantas ? rows.filter((r) => !!r.planta_id && plantas.includes(String(r.planta_id).trim())) : rows;
+    // Operador: só os carregadores liberados a ele.
+    const eqs = await this.scope.getEquipamentosScope(user);
+    if (eqs) vis = vis.filter((r) => eqs.includes(String(r.id).trim()));
+    return this.ocultarValores(vis, user, user ? await this.papel(user) : null);
   }
 
   // ===== Moradores =====
@@ -166,7 +227,7 @@ export class CarregadorEletricoService {
     if (!nome) throw new BadRequestException('Nome do morador obrigatório');
     const plantaId = body.planta_id ? String(body.planta_id).trim() : null;
     await this.assertPlantaNoEscopo(user, plantaId || '');
-    await this.exigirPapel(user, ['analista', 'proprietario'], 'Só o proprietário ou o analista cadastram moradores.');
+    await this.exigirPapel(user, PAPEIS_GEREM_MORADOR, 'Só o proprietário ou o analista cadastram moradores.');
     const tag = body.tag_uid ? String(body.tag_uid).trim().toUpperCase() : null;
     const validade = validadeDe(body.validade);
     if (validade === undefined) throw new BadRequestException('Validade inválida (use dd/mm/aaaa).');
@@ -180,7 +241,7 @@ export class CarregadorEletricoService {
     const emRecarga = antes ? await this.emRecarga(id) : false;
     // Com recarga em andamento não dá para desativar nem deixar vencer: expira ao fim da recarga.
     if (emRecarga && (body.ativo === false || (validade && validade < hoje))) {
-      throw new BadRequestException('Morador com recarga em andamento: o acesso só pode vencer ou ser desativado depois do fim da recarga.');
+      throw new BadRequestException('Não é possível desativar o morador: há recarga em andamento. O acesso só pode vencer ou ser desativado depois do fim da recarga.');
     }
     if (!antes && validade && validade < hoje) throw new BadRequestException('A validade não pode estar no passado.');
     const ativo = body.ativo !== false && !(validade && validade < hoje);
@@ -208,9 +269,10 @@ export class CarregadorEletricoService {
     const r = await this.prisma.$queryRaw<any[]>`SELECT planta_id, nome, apartamento FROM moradores WHERE id=${id.trim()} AND deleted_at IS NULL LIMIT 1`;
     if (!r.length) return { ok: true };
     await this.assertPlantaNoEscopo(user, r[0].planta_id || '');
-    await this.exigirPapel(user, ['analista', 'proprietario'], 'Só o proprietário ou o analista removem moradores.');
+    await this.exigirPapel(user, PAPEIS_GEREM_MORADOR, 'Só o proprietário ou o analista removem moradores.');
+    // PER-28: com recarga em andamento não remove (o acesso cai ao fim da recarga).
     if (await this.emRecarga(id.trim())) {
-      throw new BadRequestException('Não é possível remover com recarga em andamento.');
+      throw new BadRequestException('Não é possível remover o morador: há recarga em andamento. Tente de novo depois do fim da recarga.');
     }
     await this.prisma.$executeRaw`UPDATE moradores SET deleted_at=now(), ativo=false WHERE id=${id.trim()}`;
     await this.trilhaPlanta(r[0].planta_id ? String(r[0].planta_id).trim() : null,
@@ -299,8 +361,8 @@ export class CarregadorEletricoService {
   async liberarRecarga(equipamentoId: string, moradorId: string, user?: ScopedUser): Promise<any> {
     const eid = equipamentoId.trim();
     const plantaId = await this.plantaDoCarregador(eid);
-    await this.assertPlantaNoEscopo(user, plantaId || '');
     const p = await this.papel(user);
+    await this.assertCarregador(eid, plantaId, user, p);
     const alvo = p.papel === 'morador' ? String(p.morador?.id ?? '') : moradorId.trim();
     const mor = (await this.prisma.$queryRaw<any[]>`
       SELECT id, nome, ativo, to_char(validade,'YYYY-MM-DD') AS validade FROM moradores WHERE id=${alvo} AND deleted_at IS NULL LIMIT 1`)[0];
@@ -330,7 +392,7 @@ export class CarregadorEletricoService {
   async pedirVaga(equipamentoId: string, moradorId: string, user?: ScopedUser): Promise<any> {
     const eid = equipamentoId.trim();
     const plantaId = await this.plantaDoCarregador(eid);
-    await this.assertPlantaNoEscopo(user, plantaId || '');
+    await this.assertCarregador(eid, plantaId, user);
     const mor = (await this.prisma.$queryRaw<any[]>`SELECT id, nome FROM moradores WHERE id=${moradorId.trim()} AND deleted_at IS NULL LIMIT 1`)[0];
     if (!mor) throw new NotFoundException('Morador (solicitante) não encontrado');
     const ativa = (await this.prisma.$queryRaw<any[]>`SELECT id, ocioso_inicio FROM carregador_sessoes WHERE TRIM(equipamento_id)=${eid} AND status='ativa' LIMIT 1`)[0];
@@ -352,11 +414,12 @@ export class CarregadorEletricoService {
   async pararRecarga(equipamentoId: string, user?: ScopedUser): Promise<any> {
     const eid = equipamentoId.trim();
     const plantaId = await this.plantaDoCarregador(eid);
-    await this.assertPlantaNoEscopo(user, plantaId || '');
+    const p = await this.papel(user);
+    await this.assertCarregador(eid, plantaId, user, p);
     const ativa = (await this.prisma.$queryRaw<any[]>`
       SELECT id, morador_nome FROM carregador_sessoes WHERE TRIM(equipamento_id)=${eid} AND status='ativa' ORDER BY inicio DESC LIMIT 1`)[0];
     if (!ativa) throw new BadRequestException('Não há recarga em andamento neste carregador.');
-    const p = await this.papel(user);
+    // PER-32: morador só para a própria; proprietário, analistas e operador param qualquer uma.
     if (user && p.papel === 'morador') {
       const dono = (await this.prisma.$queryRaw<any[]>`SELECT morador_id FROM carregador_sessoes WHERE id=${ativa.id}`)[0];
       if (String(dono?.morador_id ?? '').trim() !== String(p.morador?.id ?? '').trim()) throw new ForbiddenException('Só quem está carregando pode parar a recarga.');
@@ -414,9 +477,13 @@ export class CarregadorEletricoService {
 
   // ===== Sessões (lista: ativas + histórico) =====
   async listarSessoes(user?: ScopedUser, equipamentoId?: string, limite = 100): Promise<any[]> {
-    const plantas = await this.plantasDoUsuario(user);
     const p = user ? await this.papel(user) : null;
+    // Morador: as próprias recargas (filtro abaixo), sem depender do escopo do NexON.
+    const plantas = p?.papel === 'morador' ? null : await this.plantasDoUsuario(user);
+    const eqs = p?.papel === 'morador' ? null : await this.scope.getEquipamentosScope(user);
     const so = p?.papel === 'morador' ? String(p.morador?.id ?? '-') : null;
+    // Escopo (planta e, para operador, carregador liberado) vai no SQL, antes do
+    // LIMIT: filtrar depois devolvia a lista curta ou vazia.
     const rows = await this.prisma.$queryRaw<any[]>`
       SELECT s.id, TRIM(s.equipamento_id) AS equipamento_id, s.morador_nome, s.status, TRIM(s.morador_id) AS morador_id,
              s.kwh_total, s.ocioso_min, s.liberado_por, s.liberado_por_user, s.ocioso_por_nome, s.planta_id,
@@ -427,22 +494,27 @@ export class CarregadorEletricoService {
       LEFT JOIN carregador_config c ON TRIM(c.equipamento_id)=TRIM(s.equipamento_id)
       WHERE (${equipamentoId ?? null}::text IS NULL OR TRIM(s.equipamento_id) = ${equipamentoId ?? null})
         AND (${so}::text IS NULL OR TRIM(s.morador_id) = ${so})
+        AND (${plantas === null}::boolean OR TRIM(s.planta_id) = ANY(${plantas ?? []}::text[]))
+        AND (${eqs === null}::boolean OR TRIM(s.equipamento_id) = ANY(${eqs ?? []}::text[]))
       ORDER BY (s.status='ativa') DESC, s.inicio DESC
       LIMIT ${Math.min(Number(limite) || 100, 500)}`;
-    return plantas ? rows.filter((r) => !!r.planta_id && plantas.includes(String(r.planta_id).trim())) : rows;
+    return this.ocultarValores(rows, user, p);
   }
 
   async getEstado(equipamentoId: string, user?: ScopedUser): Promise<any> {
     const eid = equipamentoId.trim();
     const plantaId = await this.plantaDoCarregador(eid);
-    await this.assertPlantaNoEscopo(user, plantaId || '');
+    const p = user ? await this.papel(user) : { papel: 'analista' as PapelCarregador, morador: null };
+    await this.assertCarregador(eid, plantaId, user, p);
     const cfg = (await this.prisma.$queryRaw<any[]>`SELECT * FROM carregador_config WHERE TRIM(equipamento_id)=${eid} LIMIT 1`)[0] ?? null;
     const ativa = (await this.prisma.$queryRaw<any[]>`
       SELECT id, morador_nome, TRIM(morador_id) AS morador_id, kwh_total, tarifa_kwh, soc_inicio,
              to_char(inicio,'DD/MM HH24:MI') AS inicio, to_char(inicio,'YYYY-MM-DD"T"HH24:MI:SS') AS inicio_iso, ocioso_inicio, ocioso_por_nome
       FROM carregador_sessoes WHERE TRIM(equipamento_id)=${eid} AND status='ativa' LIMIT 1`)[0] ?? null;
     const ultimas = await this.listarSessoes(user, eid, 8);
-    const p = user ? await this.papel(user) : { papel: 'analista' as PapelCarregador, morador: null };
+    // Valores: operador sem "Ver R$" não vê R$/kWh; morador não vê os da recarga de outro.
+    const veTarifa = p.papel !== 'operador' || !user || (await this.scope.podeVerValores(eid, user));
+    const [ativaVis] = ativa ? await this.ocultarValores([{ ...ativa, equipamento_id: eid }], user, p) : [null];
     return {
       papel: p.papel,
       meu_morador: p.morador ? { id: String(p.morador.id).trim(), nome: p.morador.nome, apartamento: p.morador.apartamento, validade: p.morador.validade, ativo: p.morador.ativo } : null,
@@ -451,17 +523,18 @@ export class CarregadorEletricoService {
       potencia_kw: cfg?.potencia_kw ?? null,
       estado: cfg?.ultimo_estado ?? 'desconhecido',
       fonte_kwh: cfg?.fonte_kwh ?? 'ton',
-      tarifa_kwh: cfg?.tarifa_kwh ?? null,
+      tarifa_kwh: veTarifa ? cfg?.tarifa_kwh ?? null : null,
       ultima_leitura_kwh: cfg?.ultima_leitura_kwh ?? null,
       ultima_leitura: cfg?.ultima_leitura ?? null,
-      sessao_ativa: ativa,
+      sessao_ativa: ativaVis ? (({ equipamento_id: _e, ...resto }) => resto)(ativaVis) : null,
       sessoes: ultimas,
     };
   }
 
   // ===== Export mensal (morador · kWh · ocioso · R$) =====
   async exportarMensal(mesAno: string, user?: ScopedUser, plantaId?: string): Promise<{ csv: string; linhas: any[]; detalhe: any[] }> {
-    await this.exigirPapel(user, ['analista', 'proprietario'], 'Exportação só para o proprietário ou o analista.');
+    // PER-38: exportar recargas só proprietário, analistas e Admin (operador e morador não).
+    await this.exigirPapel(user, PAPEIS_EXPORTAM, 'Exportação só para o proprietário ou o analista.');
     const m = /^\d{4}-\d{2}$/.test(mesAno) ? mesAno : null;
     if (!m) throw new BadRequestException("Mês inválido (use 'YYYY-MM')");
     await this.assertPlantaNoEscopo(user, plantaId || '');

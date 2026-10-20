@@ -1,5 +1,6 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
+import { papelCanonico } from '@/core/modules/auth/papeis';
 import { CreateDiagramaDto } from '../dto/create-diagrama.dto';
 import { UpdateDiagramaDto } from '../dto/update-diagrama.dto';
 import { SaveLayoutDto } from '../dto/save-layout.dto';
@@ -26,12 +27,24 @@ export class DiagramasService {
   }
 
   /**
+   * Operador nunca vê nem mexe no unifilar (PER-21): toda escrita é 403. A
+   * leitura não é 403 porque o sinóptico-ativo do web carrega o diagrama em
+   * qualquer aba (só lê `configuracoes`); para ele os nós vêm recortados.
+   */
+  private bloquearOperador(user?: ScopedUser): void {
+    if (user && papelCanonico(user.role) === 'operador') {
+      throw new ForbiddenException('Recurso fora do escopo do usuario');
+    }
+  }
+
+  /**
    * Assert publico: usado pelas rotas internas do DiagramasController
    * (equipamentos/conexoes/layout) para garantir que o usuario esta no escopo
    * da planta do diagrama antes de mutar.
    */
   async assertDiagramaInScope(diagramaId: string, user?: ScopedUser): Promise<void> {
     if (!user) return;
+    this.bloquearOperador(user);
     const plantaId = await this.plantaIdDoDiagrama(diagramaId);
     if (plantaId) await this.scopeService.assertPlantaInScope(plantaId, user);
   }
@@ -43,6 +56,7 @@ export class DiagramasService {
     const { unidadeId, nome, descricao, ativo, configuracoes } = createDiagramaDto;
 
     // Scope RBAC: a unidade-alvo deve estar no escopo
+    this.bloquearOperador(user);
     if (user) await this.scopeService.assertEntityInScope('unidade', unidadeId, user);
 
     // Verificar se a unidade existe
@@ -130,6 +144,9 @@ export class DiagramasService {
       },
     });
 
+    // Operador: contagens só dos liberados (o unifilar em si ele não vê).
+    const eqScope = await this.scopeService.getEquipamentosScope(user);
+
     // Buscar contagem de equipamentos e conexões para cada diagrama
     const diagramasComEstatisticas = await Promise.all(
       diagramas.map(async (diagrama) => {
@@ -138,14 +155,24 @@ export class DiagramasService {
             where: {
               diagrama_id: diagrama.id,
               deleted_at: null,
+              ...(eqScope && { id: { in: eqScope } }),
             },
           }),
-          this.prisma.equipamentos_conexoes.count({
-            where: {
-              diagrama_id: diagrama.id,
-              deleted_at: null,
-            },
-          }),
+          eqScope
+            ? this.prisma.equipamentos_conexoes.count({
+                where: {
+                  diagrama_id: diagrama.id,
+                  deleted_at: null,
+                  equipamento_origem_id: { in: eqScope },
+                  equipamento_destino_id: { in: eqScope },
+                },
+              })
+            : this.prisma.equipamentos_conexoes.count({
+                where: {
+                  diagrama_id: diagrama.id,
+                  deleted_at: null,
+                },
+              }),
         ]);
 
         return {
@@ -189,6 +216,14 @@ export class DiagramasService {
       throw new NotFoundException('Diagrama não encontrado');
     }
 
+    // Operador: só diagrama de instalação com equipamento liberado e, nele, só os
+    // nós liberados e as ligações entre eles (PER-21/23). Junções saem.
+    const acesso = await this.scopeService.acessoPorEquipamento(user);
+    if (acesso && !acesso.unidades.has(String(diagrama.unidade_id ?? '').trim())) {
+      throw new ForbiddenException('Recurso fora do escopo do usuario');
+    }
+    const eqScope = acesso ? [...acesso.equipamentos] : null;
+
     // Buscar unidade com planta e proprietário
     const unidade = await this.prisma.unidades.findUnique({
       where: { id: diagrama.unidade_id },
@@ -215,6 +250,7 @@ export class DiagramasService {
       where: {
         diagrama_id: id,
         deleted_at: null,
+        ...(eqScope && { id: { in: eqScope } }),
       },
       // ⚡ Fazer JOIN com tipo e categoria em uma única query
       include: {
@@ -276,6 +312,7 @@ export class DiagramasService {
       where: {
         diagrama_id: id,
         deleted_at: null,
+        ...(eqScope && { equipamento_origem_id: { in: eqScope }, equipamento_destino_id: { in: eqScope } }),
       },
       // ⚡ Fazer JOIN com equipamentos de origem e destino
       include: {
@@ -348,6 +385,7 @@ export class DiagramasService {
    * Atualiza um diagrama
    */
   async update(id: string, updateDiagramaDto: UpdateDiagramaDto, user?: ScopedUser) {
+    this.bloquearOperador(user);
     if (user) {
       const plantaId = await this.plantaIdDoDiagrama(id);
       if (plantaId) await this.scopeService.assertPlantaInScope(plantaId, user);
@@ -409,6 +447,7 @@ export class DiagramasService {
    * Remove um diagrama (soft delete)
    */
   async remove(id: string, user?: ScopedUser) {
+    this.bloquearOperador(user);
     if (user) {
       const plantaId = await this.plantaIdDoDiagrama(id);
       if (plantaId) await this.scopeService.assertPlantaInScope(plantaId, user);
@@ -491,6 +530,7 @@ export class DiagramasService {
    * ~10x mais rápido que múltiplas requisições PATCH
    */
   async saveLayout(diagramaId: string, dto: SaveLayoutDto, user?: ScopedUser) {
+    this.bloquearOperador(user);
     if (user) {
       const plantaId = await this.plantaIdDoDiagrama(diagramaId);
       if (plantaId) await this.scopeService.assertPlantaInScope(plantaId, user);

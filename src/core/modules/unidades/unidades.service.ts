@@ -124,6 +124,21 @@ export class UnidadesService {
     }
   }
 
+  /**
+   * Recorte do operador (PER-21e): só instalações com algum equipamento
+   * liberado e, dentro delas, a contagem só dos liberados. `null` = sem recorte.
+   */
+  private async recorteOperador(user?: ScopedUser) {
+    const eqScope = await this.scopeService.getEquipamentosScope(user);
+    if (!eqScope) return null;
+    const unidades = (await this.scopeService.getUnidadesScope(user)) ?? [];
+    return {
+      unidades,
+      eqScope,
+      contagem: { equipamentos: { where: { id: { in: eqScope }, deleted_at: null } } } as const,
+    };
+  }
+
   async findAll(queryDto: FindAllUnidadesDto, user?: ScopedUser): Promise<PaginatedUnidadesResponse> {
     const {
       page = 1,
@@ -178,6 +193,8 @@ export class UnidadesService {
       if (this.scopeService.isScoped(scope)) {
         whereClause.AND.push({ planta_id: { in: scope } });
       }
+      const recorte = await this.recorteOperador(user);
+      if (recorte) whereClause.AND.push({ id: { in: recorte.unidades } });
 
       // Construir ordenação
       const orderByClause: any = {};
@@ -226,9 +243,7 @@ export class UnidadesService {
               },
             },
             _count: {
-              select: {
-                equipamentos: true,
-              },
+              select: recorte?.contagem ?? { equipamentos: true },
             },
           },
           // O id desempata: sem ele, instalacoes de mesmo nome em plantas
@@ -267,6 +282,7 @@ export class UnidadesService {
 
   async findOne(id: string, user?: ScopedUser): Promise<UnidadeResponse> {
     try {
+      const recorte = await this.recorteOperador(user);
       const unidade = await this.prisma.unidades.findFirst({
         where: {
           id,
@@ -290,9 +306,7 @@ export class UnidadesService {
             },
           },
           _count: {
-            select: {
-              equipamentos: true,
-            },
+            select: recorte?.contagem ?? { equipamentos: true },
           },
         },
       });
@@ -303,6 +317,9 @@ export class UnidadesService {
 
       // Scope RBAC: 403 se a planta da unidade nao esta no escopo do usuario
       await this.scopeService.assertPlantaInScope(unidade.planta_id, user);
+      if (recorte && !recorte.unidades.includes(unidade.id.trim())) {
+        throw new ForbiddenException('Recurso fora do escopo do usuario');
+      }
 
       return this.formatUnidadeResponse(unidade);
     } catch (error) {
@@ -333,10 +350,12 @@ export class UnidadesService {
         throw new NotFoundException(`Planta com ID ${plantaId} não encontrada`);
       }
 
+      const recorte = await this.recorteOperador(user);
       const unidades = await this.prisma.unidades.findMany({
         where: {
           planta_id: plantaId,
           deleted_at: null,
+          ...(recorte && { id: { in: recorte.unidades } }),
         },
         include: {
           planta: {
@@ -356,9 +375,7 @@ export class UnidadesService {
             },
           },
           _count: {
-            select: {
-              equipamentos: true,
-            },
+            select: recorte?.contagem ?? { equipamentos: true },
           },
         },
         orderBy: {
@@ -488,9 +505,7 @@ export class UnidadesService {
             },
           },
           _count: {
-            select: {
-              equipamentos: true,
-            },
+            select: { equipamentos: true },
           },
         },
       });
@@ -588,7 +603,7 @@ export class UnidadesService {
     }
   }
 
-  async getEstatisticas(unidadeId: string) {
+  async getEstatisticas(unidadeId: string, user?: ScopedUser) {
     try {
       const unidade = await this.prisma.unidades.findFirst({
         where: {
@@ -607,23 +622,21 @@ export class UnidadesService {
         throw new NotFoundException(`Unidade com ID ${unidadeId} não encontrada`);
       }
 
+      // Operador: totais só dos liberados, sem rótulo do recorte (PER-24).
+      const recorte = await this.recorteOperador(user);
+      const base: any = { unidade_id: unidadeId, deleted_at: null, ...(recorte && { id: { in: recorte.eqScope } }) };
+
       const [totalEquipamentos, equipamentosPorTipo, equipamentosPorCriticidade] =
         await Promise.all([
           // Total de equipamentos
           this.prisma.equipamentos.count({
-            where: {
-              unidade_id: unidadeId,
-              deleted_at: null,
-            },
+            where: base,
           }),
 
           // Por classificação
           this.prisma.equipamentos.groupBy({
             by: ['classificacao'],
-            where: {
-              unidade_id: unidadeId,
-              deleted_at: null,
-            },
+            where: base,
             _count: {
               id: true,
             },
@@ -632,10 +645,7 @@ export class UnidadesService {
           // Por criticidade
           this.prisma.equipamentos.groupBy({
             by: ['criticidade'],
-            where: {
-              unidade_id: unidadeId,
-              deleted_at: null,
-            },
+            where: base,
             _count: {
               id: true,
             },

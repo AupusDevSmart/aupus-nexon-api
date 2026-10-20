@@ -9,12 +9,14 @@ import {
   Request,
   HttpCode,
   HttpStatus,
+  UseGuards,
 } from '@nestjs/common';
 import { ConfiguracaoDemandaService } from './configuracao-demanda.service';
 import { CreateConfiguracaoDemandaDto } from './dto/create-configuracao-demanda.dto';
 import { UpdateConfiguracaoDemandaDto } from './dto/update-configuracao-demanda.dto';
 import { CurrentUser } from '@/core';
 import { Cliente, type ClienteInfo } from '@/core/common/cliente-info';
+import { SemOperadorGuard } from '@/core/modules/auth/guards/sem-operador.guard';
 
 @Controller('configuracao-demanda')
 // @UseGuards(JwtAuthGuard) // Temporariamente desabilitado para testes
@@ -61,7 +63,9 @@ export class ConfiguracaoDemandaController {
     };
   }
 
+  // Configurar o gráfico de demanda não é operação: operador só lê (recortado).
   @Post()
+  @UseGuards(SemOperadorGuard)
   @HttpCode(HttpStatus.CREATED)
   async create(
     @Body() createDto: CreateConfiguracaoDemandaDto,
@@ -73,6 +77,7 @@ export class ConfiguracaoDemandaController {
 
   // IMPORTANTE: Rota mais específica deve vir ANTES da rota com parâmetro genérico
   @Put('unidade/:unidadeId')
+  @UseGuards(SemOperadorGuard)
   async updateByUnidade(
     @Param('unidadeId') unidadeId: string,
     @Body() updateDto: UpdateConfiguracaoDemandaDto,
@@ -96,6 +101,7 @@ export class ConfiguracaoDemandaController {
   }
 
   @Put(':id')
+  @UseGuards(SemOperadorGuard)
   async update(
     @Param('id') id: string,
     @Body() updateDto: UpdateConfiguracaoDemandaDto,
@@ -111,6 +117,7 @@ export class ConfiguracaoDemandaController {
   }
 
   @Delete(':id')
+  @UseGuards(SemOperadorGuard)
   @HttpCode(HttpStatus.NO_CONTENT)
   async remove(@Param('id') id: string, @CurrentUser() user?: any) {
     return this.configuracaoDemandaService.remove(id, user);

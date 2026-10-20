@@ -16,6 +16,8 @@ import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetPasswordWithTokenDto } from './dto/reset-password.dto';
 import { SessoesService } from './sessoes.service';
 import { ClienteInfo } from '../../common/cliente-info';
+import { capacidades, papelCanonico } from './papeis';
+import { PermissionScopeService } from './permission-scope.service';
 
 /** Validade do link de redefinição de senha, em minutos. */
 const RESET_TOKEN_EXP_MINUTES = 60;
@@ -32,6 +34,7 @@ export class AuthService {
     private prisma: PrismaService,
     private mailService: MailService,
     private sessoes: SessoesService,
+    private permissionScope: PermissionScopeService,
   ) {}
 
   /**
@@ -159,6 +162,9 @@ export class AuthService {
     (usuarioCompleto as any).role_details = permissoes.role;
     (usuarioCompleto as any).all_permissions = permissoes.permissionNames;
     (usuarioCompleto as any).plantas_vinculadas = plantas_vinculadas;
+    // Papel canônico e o que ele pode (spec NEXON-20): o front esconde botão por aqui.
+    (usuarioCompleto as any).papel = papelCanonico(permissoes.role?.name);
+    (usuarioCompleto as any).capacidades = capacidades(papelCanonico(permissoes.role?.name));
     (usuarioCompleto as any).senha_alterada_em = await this.usuariosService.getSenhaAlteradaEm(usuario.id);
 
     console.log(`📦 [AUTH] Dados do usuário para retornar:`, {
@@ -325,6 +331,8 @@ export class AuthService {
       role_details: permissoes.role,
       all_permissions: permissoes.permissionNames,
       plantas_vinculadas,
+      papel: papelCanonico(permissoes.role?.name),
+      capacidades: capacidades(papelCanonico(permissoes.role?.name)),
       senha_alterada_em: await this.usuariosService.getSenhaAlteradaEm(userId),
     };
   }
@@ -334,12 +342,9 @@ export class AuthService {
    * Roles analista+ retornam array vazio (sem filtro).
    */
   private async getPlantasAcessiveis(userId: string, roleName: string | null | undefined): Promise<string[]> {
-    if (roleName === 'operador') {
-      const vinculos = await this.prisma.planta_operadores.findMany({
-        where: { usuario_id: userId },
-        select: { planta_id: true },
-      });
-      return vinculos.map((v) => v.planta_id);
+    if (papelCanonico(roleName) === 'operador') {
+      // Plantas com algum equipamento liberado nos vínculos (mesma regra do escopo).
+      return (await this.permissionScope.getPlantasDoUsuario(userId, 'operador')) ?? [];
     }
 
     if (roleName === 'proprietario') {

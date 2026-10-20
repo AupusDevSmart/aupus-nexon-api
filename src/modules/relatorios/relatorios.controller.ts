@@ -1,6 +1,7 @@
 import { Body, Controller, ForbiddenException, Get, Post, Put, Query, Res, UseGuards } from '@nestjs/common';
 import type { Response } from 'express';
 import { JwtAuthGuard, CurrentUser, Cliente, ExportacaoAuditoriaService } from '@/core';
+import { isGlobal, papelCanonico } from '@/core/modules/auth/papeis';
 import type { ClienteInfo } from '@/core';
 import { RelatoriosService } from './relatorios.service';
 import { BoletimSemanalService } from './boletim-semanal.service';
@@ -17,8 +18,8 @@ export class RelatoriosController {
   ) {}
 
   private assertAdmin(user: any) {
-    const role = String(user?.role || '').toLowerCase();
-    if (!['super_admin', 'admin', 'gerente'].includes(role)) {
+    // Config/disparo do boletim: equipe Aupus (admin e analistas).
+    if (!isGlobal(papelCanonico(user?.role))) {
       throw new ForbiddenException('Apenas administradores.');
     }
   }

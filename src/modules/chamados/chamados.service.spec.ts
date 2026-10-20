@@ -31,6 +31,8 @@ function montar(scope: string[] | null = null) {
   };
   const scopeService: any = {
     getScope: jest.fn().mockResolvedValue(scope),
+    getEquipamentosScope: jest.fn().mockResolvedValue(null),
+    assertEquipamentoLiberado: jest.fn().mockResolvedValue(undefined),
     isScoped: (s: any) => Array.isArray(s),
     assertPlantaInScope: jest.fn().mockImplementation(async (p: string) => {
       if (scope && !scope.includes(p)) throw new ForbiddenException();

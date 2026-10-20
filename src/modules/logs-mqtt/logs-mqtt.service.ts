@@ -1,5 +1,6 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService, PermissionScopeService, ScopedUser, Prisma } from '@/core';
+import { isGlobal, papelCanonico } from '@/core/modules/auth/papeis';
 import { QueryLogsMqttDto } from './dto/query-logs-mqtt.dto';
 import { colunaTrilhaAusente, condicaoStatus, juntarE, parseTipos, StatusAlarme } from './logs-mqtt-filtros';
 
@@ -74,6 +75,9 @@ export class LogsMqttService {
 
     const scope = await this.scopeService.getScope(user);
     const escopado = this.scopeService.isScoped(scope);
+    // Operador: só equipamentos liberados e, de comando, só os que ele mesmo deu.
+    const eqScope = await this.scopeService.getEquipamentosScope(user);
+    const me = user?.id?.trim() ?? '';
     const eqId = limpo(query.equipamentoId);
     const unId = limpo(query.unidadeId);
     const plId = limpo(query.plantaId);
@@ -101,6 +105,10 @@ export class LogsMqttService {
             : Prisma.sql`TRIM(COALESCE(un.planta_id, e.planta_id)) = ANY(${scope}::text[])`,
         );
       }
+      if (eqScope) {
+        c.push(eqScope.length === 0 ? Prisma.sql`FALSE` : Prisma.sql`TRIM(l.equipamento_id) = ANY(${eqScope}::text[])`);
+        c.push(Prisma.sql`(l.tipo <> 'comando' OR l.usuario_id = ${me}::bpchar)`);
+      }
       partes.push(Prisma.sql`
         SELECT TRIM(l.id) AS id, l.tipo::text AS tipo, TRIM(l.equipamento_id) AS equipamento_id,
                l.mensagem::text AS mensagem, l.severidade::text AS severidade, l.created_at,
@@ -127,9 +135,8 @@ export class LogsMqttService {
       if (query.search) c.push(Prisma.sql`a.mensagem ILIKE ${'%' + query.search + '%'}`);
       if (query.dataInicial) c.push(Prisma.sql`a.created_at >= ${new Date(query.dataInicial)}`);
       if (query.dataFinal) c.push(Prisma.sql`a.created_at <= ${new Date(query.dataFinal)}`);
-      if (user?.role === 'operador') {
+      if (papelCanonico(user?.role) === 'operador') {
         // Operador vê só o que mudou o acesso DELE (ou o que ele mesmo fez).
-        const me = user.id?.trim() ?? '';
         c.push(Prisma.sql`(a.alvo_usuario_id = ${me}::bpchar OR a.autor_id = ${me}::bpchar)`);
       } else if (escopado) {
         c.push(scope.length === 0 ? Prisma.sql`FALSE` : Prisma.sql`a.planta_ids && ${scope}::text[]`);
@@ -253,6 +260,14 @@ export class LogsMqttService {
       where.AND =
         scope.length === 0 ? [{ id: '__NEVER__' }] : [{ equipamento: { unidade: { planta_id: { in: scope } } } }];
     }
+    const eqScope = await this.scopeService.getEquipamentosScope(user);
+    if (eqScope) {
+      where.AND = [
+        ...(where.AND ?? []),
+        { equipamento_id: { in: eqScope } },
+        { OR: [{ tipo: { not: 'comando' } }, { usuario_id: user?.id?.trim() ?? '__NEVER__' }] },
+      ];
+    }
     const [data, total] = await Promise.all([
       this.prisma.logs_mqtt.findMany({
         where,
@@ -291,11 +306,23 @@ export class LogsMqttService {
       },
     });
     if (!log) throw new NotFoundException('Log não encontrado');
+    // Comando de outra pessoa não aparece para o operador, nem aberto pelo id.
+    if (log.tipo === 'comando' && (await this.scopeService.acessoPorEquipamento(user)) && log.usuario_id?.trim() !== user?.id?.trim()) {
+      throw new ForbiddenException('Recurso fora do escopo do usuario');
+    }
     return log;
   }
 
   async remove(id: string, user?: ScopedUser) {
-    await this.findOne(id, user);
+    const log = await this.findOne(id, user);
+    // PER-44: a trilha de comando não se apaga, nem pelo Admin. Alarme só a
+    // equipe Aupus (papel global) remove; proprietário e operador reconhecem.
+    if (log.tipo === 'comando') {
+      throw new ForbiddenException('Registro de comando não pode ser apagado');
+    }
+    if (!isGlobal(papelCanonico(user?.role))) {
+      throw new ForbiddenException('Somente a equipe Aupus remove alarmes');
+    }
     return this.prisma.logs_mqtt.delete({ where: { id: id.trim() } });
   }
 

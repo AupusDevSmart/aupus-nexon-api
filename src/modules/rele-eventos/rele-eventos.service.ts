@@ -1,8 +1,7 @@
 import { ForbiddenException, Injectable } from '@nestjs/common';
 import { randomBytes } from 'crypto';
 import { PrismaService, Prisma, ScopedUser, PlantaScope } from '@/core';
-
-const PAPEIS_EDITORES = ['super_admin', 'admin'];
+import { isGlobal, papelCanonico } from '@/core/modules/auth/papeis';
 
 export interface EventoRow {
   id: string;
@@ -35,7 +34,8 @@ export class ReleEventosService {
   constructor(private readonly prisma: PrismaService) {}
 
   assertEditor(user?: ScopedUser): void {
-    if (!user?.role || !PAPEIS_EDITORES.includes(user.role)) {
+    // Mapa de códigos é configuração técnica: equipe Aupus (admin e analistas).
+    if (!isGlobal(papelCanonico(user?.role))) {
       throw new ForbiddenException('Apenas administradores editam o mapa de códigos.');
     }
   }
@@ -44,6 +44,8 @@ export class ReleEventosService {
   async listar(
     opts: { device?: string; equipamentoId?: string; limit?: number; desde?: string },
     scope: PlantaScope = null,
+    /** Operador: só eventos dos equipamentos liberados (PER-23). */
+    eqScope: string[] | null = null,
   ): Promise<EventoRow[]> {
     const limit = Math.min(Math.max(Number(opts.limit) || 200, 1), 1000);
     const filtros: Prisma.Sql[] = [];
@@ -60,6 +62,10 @@ export class ReleEventosService {
         : scope.length === 0
           ? Prisma.sql`AND 1 = 0`
           : Prisma.sql`AND TRIM(u.planta_id) IN (${Prisma.join(scope.map((s) => s.trim()))})`;
+    const soLiberados =
+      eqScope === null
+        ? Prisma.empty
+        : Prisma.sql`AND TRIM(e.equipamento_id) = ANY(${eqScope}::text[])`;
 
     return this.prisma.$queryRaw<EventoRow[]>`
       SELECT e.id, e.device, e.origem_protocolo,
@@ -74,6 +80,7 @@ export class ReleEventosService {
       WHERE 1 = 1
       ${filtros.length > 0 ? Prisma.join(filtros, ' ') : Prisma.empty}
       ${escopo}
+      ${soLiberados}
       ORDER BY e.ts_fonte DESC NULLS LAST, e.ts_recebido DESC
       LIMIT ${limit}
     `;

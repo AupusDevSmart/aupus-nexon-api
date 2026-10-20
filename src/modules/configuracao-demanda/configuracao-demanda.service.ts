@@ -2,8 +2,10 @@ import { Injectable, NotFoundException, BadRequestException, ForbiddenException,
 import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
 import { AuditoriaAcessosService } from '@/core/modules/usuarios/auditoria-acessos.service';
 import { normalizarPapel } from '@/core/modules/auth/permission-scope.service';
+import { capacidades, papelCanonico } from '@/core/modules/auth/papeis';
 import type { ClienteInfo } from '@/core/common/cliente-info';
 import { diffConfiguracaoDemanda, diffVazio, resumirDiff } from './configuracao-demanda-auditoria';
+import { recortarEquipamentosIds } from './recorte-operador';
 import { CreateConfiguracaoDemandaDto } from './dto/create-configuracao-demanda.dto';
 import { UpdateConfiguracaoDemandaDto } from './dto/update-configuracao-demanda.dto';
 
@@ -63,6 +65,8 @@ export class ConfiguracaoDemandaService {
       if (typeof config.equipamentos_ids === 'string') {
         config.equipamentos_ids = JSON.parse(config.equipamentos_ids);
       }
+      const eqScope = user ? await this.scopeService.getEquipamentosScope(user) : null;
+      if (eqScope) config.equipamentos_ids = recortarEquipamentosIds(config.equipamentos_ids, eqScope);
 
       console.log(`📊 Configuração encontrada para unidade ${unidadeId}:`, config.id);
       return config;
@@ -137,13 +141,20 @@ export class ConfiguracaoDemandaService {
         ORDER BY p.nome, u.nome
       `;
 
+      // Operador: só instalações com equipamento liberado e, nelas, só os liberados.
+      const eqScope = user ? await this.scopeService.getEquipamentosScope(user) : null;
+      const unidades = eqScope ? new Set((await this.scopeService.getUnidadesScope(user)) ?? []) : null;
+
       // Parse JSON fields
-      return configuracoes.map(config => {
-        if (typeof config.equipamentos_ids === 'string') {
-          config.equipamentos_ids = JSON.parse(config.equipamentos_ids);
-        }
-        return config;
-      });
+      return configuracoes
+        .filter((config) => !unidades || unidades.has(String(config.unidade_id ?? '').trim()))
+        .map(config => {
+          if (typeof config.equipamentos_ids === 'string') {
+            config.equipamentos_ids = JSON.parse(config.equipamentos_ids);
+          }
+          if (eqScope) config.equipamentos_ids = recortarEquipamentosIds(config.equipamentos_ids, eqScope);
+          return config;
+        });
     } catch (error) {
       console.error('Erro ao listar configurações:', error);
       throw new BadRequestException('Erro ao listar configurações');
@@ -354,7 +365,10 @@ export class ConfiguracaoDemandaService {
     const mudaDemanda =
       (demanda_geracao !== undefined && num(demanda_geracao) !== num(unidadeAntes?.demanda_geracao)) ||
       (demanda_carga !== undefined && num(demanda_carga) !== num(unidadeAntes?.demanda_carga));
-    if (mudaDemanda && !user?.permissions?.includes('unidades.manage')) {
+    // Demanda contratada é configuração técnica (NEXON-20): Admin e analistas (o
+    // de operação não tem unidades.manage, mas configura).
+    if (mudaDemanda && !user?.permissions?.includes('unidades.manage')
+        && !capacidades(papelCanonico(user?.role)).configTecnica) {
       throw new ForbiddenException('Sem permissão para alterar a demanda contratada da unidade');
     }
 

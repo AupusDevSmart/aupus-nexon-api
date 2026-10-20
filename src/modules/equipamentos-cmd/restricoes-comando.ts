@@ -6,6 +6,7 @@ import {
   JanelaComAtivo,
   MomentoLocal,
 } from '../../shared/util/janela-horario';
+import { isGlobal, Papel } from '../../core/modules/auth/papeis';
 
 /**
  * Regras de bloqueio do acionar (apps NexON v2) — lógica PURA, testada em
@@ -54,4 +55,18 @@ export function avaliarRestricoes(ctx: ContextoComando): Bloqueio | null {
     };
   }
   return null;
+}
+
+/**
+ * Permissão por instalação (usuario_unidade_permissoes, legado v2) só restringe
+ * quem não é Admin/analista/proprietário: esses comandam tudo do próprio escopo
+ * (NEXON-20, 6.2). O operador continua sujeito a ela, além do equipamento liberado.
+ */
+export function sujeitoPermissaoPorUnidade(papel: Papel): boolean {
+  return !isGlobal(papel) && papel !== 'proprietario';
+}
+
+/** Medidor (código do tipo MEDIDOR*, inclusive o da concessionária): sem comando (6.2). */
+export function ehMedidor(codigoTipo: string | null | undefined): boolean {
+  return /^MEDIDOR/i.test(String(codigoTipo ?? '').trim());
 }

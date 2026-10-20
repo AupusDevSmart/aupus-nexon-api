@@ -12,6 +12,7 @@ import {
   HttpStatus,
   UploadedFile,
   UseInterceptors,
+  ForbiddenException,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -44,6 +45,14 @@ import {
 } from './dto';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { Permissions } from '../auth/decorators/permissions.decorator';
+import { papelCanonico } from '../auth/papeis';
+
+/** Rotas de manutenção (debug, lote, teste, migração de papéis): só Admin. */
+function exigirAdmin(user: any): void {
+  if (papelCanonico(user?.role) !== 'admin') {
+    throw new ForbiddenException('Apenas Admin');
+  }
+}
 
 @ApiTags('Usuários')
 @Controller('usuarios')
@@ -114,7 +123,8 @@ export class UsuariosController {
       }
     }
   })
-  async getValidRoleConstraintValues() {
+  async getValidRoleConstraintValues(@CurrentUser() currentUser?: any) {
+    exigirAdmin(currentUser);
     const validValues = await this.usuariosService.getValidRoleConstraintValues();
     return { validValues };
   }
@@ -129,7 +139,8 @@ export class UsuariosController {
     status: 200,
     description: 'Dados de debug das permissões'
   })
-  debugUserPermissionsNew(@Param('userId') userId: string) {
+  debugUserPermissionsNew(@Param('userId') userId: string, @CurrentUser() currentUser?: any) {
+    exigirAdmin(currentUser);
     return this.usuariosService.debugUserPermissions(userId);
   }
 
@@ -153,7 +164,8 @@ export class UsuariosController {
       }
     }
   })
-  debugUserPermissions(@Param('id') id: string) {
+  debugUserPermissions(@Param('id') id: string, @CurrentUser() currentUser?: any) {
+    exigirAdmin(currentUser);
     return this.usuariosService.debugUserPermissions(id);
   }
 
@@ -192,7 +204,8 @@ export class UsuariosController {
   @ApiParam({ name: 'id', description: 'ID do usuário' })
   @ApiResponse({ status: 200, description: 'Usuário encontrado' })
   @ApiResponse({ status: 404, description: 'Usuário não encontrado' })
-  findOne(@Param('id') id: string) {
+  async findOne(@Param('id') id: string, @CurrentUser() currentUser?: any) {
+    await this.usuariosService.assertPodeGerir(currentUser, id, 'ver');
     return this.usuariosService.findOne(id);
   }
 
@@ -334,7 +347,8 @@ export class UsuariosController {
     type: UserPermissionsResponseDto
   })
   @ApiResponse({ status: 404, description: 'Usuário não encontrado' })
-  getUserPermissions(@Param('id') id: string) {
+  async getUserPermissions(@Param('id') id: string, @CurrentUser() currentUser?: any) {
+    await this.usuariosService.assertPodeGerir(currentUser, id, 'ver');
     return this.usuariosService.getUserPermissions(id);
   }
 
@@ -347,7 +361,8 @@ export class UsuariosController {
     type: UserPermissionsResponseDto 
   })
   @ApiResponse({ status: 404, description: 'Usuário não encontrado' })
-  getUserPermissionsDetailed(@Param('id') id: string) {
+  async getUserPermissionsDetailed(@Param('id') id: string, @CurrentUser() currentUser?: any) {
+    await this.usuariosService.assertPodeGerir(currentUser, id, 'ver');
     return this.usuariosService.getUserPermissionsDetailed(id);
   }
 
@@ -360,7 +375,8 @@ export class UsuariosController {
     type: UserPermissionsSummaryDto 
   })
   @ApiResponse({ status: 404, description: 'Usuário não encontrado' })
-  getUserPermissionsSummary(@Param('id') id: string) {
+  async getUserPermissionsSummary(@Param('id') id: string, @CurrentUser() currentUser?: any) {
+    await this.usuariosService.assertPodeGerir(currentUser, id, 'ver');
     return this.usuariosService.getUserPermissionsSummary(id);
   }
 
@@ -373,7 +389,8 @@ export class UsuariosController {
     type: CategorizedPermissionsDto 
   })
   @ApiResponse({ status: 404, description: 'Usuário não encontrado' })
-  getUserPermissionsCategorized(@Param('id') id: string) {
+  async getUserPermissionsCategorized(@Param('id') id: string, @CurrentUser() currentUser?: any) {
+    await this.usuariosService.assertPodeGerir(currentUser, id, 'ver');
     return this.usuariosService.getUserPermissionsCategorized(id);
   }
 
@@ -392,10 +409,12 @@ export class UsuariosController {
     }
   })
   @ApiResponse({ status: 404, description: 'Usuário não encontrado' })
-  checkUserPermission(
+  async checkUserPermission(
     @Param('id') id: string,
     @Body() checkPermissionDto: CheckPermissionDto,
+    @CurrentUser() currentUser?: any,
   ) {
+    await this.usuariosService.assertPodeGerir(currentUser, id, 'ver');
     return this.usuariosService.checkUserPermission(id, checkPermissionDto.permissionName);
   }
 
@@ -418,10 +437,12 @@ export class UsuariosController {
     }
   })
   @ApiResponse({ status: 404, description: 'Usuário não encontrado' })
-  checkUserPermissions(
+  async checkUserPermissions(
     @Param('id') id: string,
     @Body() checkMultipleDto: CheckMultiplePermissionsDto,
+    @CurrentUser() currentUser?: any,
   ) {
+    await this.usuariosService.assertPodeGerir(currentUser, id, 'ver');
     return this.usuariosService.checkUserPermissions(
       id, 
       checkMultipleDto.permissionNames, 
@@ -449,8 +470,9 @@ export class UsuariosController {
   assignRole(
     @Param('id') id: string,
     @Body() assignRoleDto: AssignRoleDto,
+    @CurrentUser() currentUser?: any,
   ) {
-    return this.usuariosService.assignRole(id, assignRoleDto.roleId);
+    return this.usuariosService.atribuirPapel(id, assignRoleDto.roleId, currentUser);
   }
 
   @Post(':id/assign-permission')
@@ -471,10 +493,13 @@ export class UsuariosController {
   })
   @ApiResponse({ status: 404, description: 'Usuário ou permissão não encontrada' })
   @ApiResponse({ status: 409, description: 'Usuário já possui esta permissão' })
-  assignPermission(
+  async assignPermission(
     @Param('id') id: string,
     @Body() assignPermissionDto: AssignPermissionDto,
+    @CurrentUser() currentUser?: any,
   ) {
+    await this.usuariosService.assertPodeGerir(currentUser, id, 'editar');
+    await this.usuariosService.assertPermissoesConcedidas(currentUser, { permissionIds: [assignPermissionDto.permissionId] });
     return this.usuariosService.assignPermission(id, assignPermissionDto.permissionId);
   }
 
@@ -495,10 +520,13 @@ export class UsuariosController {
     }
   })
   @ApiResponse({ status: 404, description: 'Usuário, permissão não encontrada ou usuário não possui a permissão' })
-  removePermission(
+  async removePermission(
     @Param('id') id: string,
     @Param('permissionId') permissionId: string,
+    @CurrentUser() currentUser?: any,
   ) {
+    await this.usuariosService.assertPodeGerir(currentUser, id, 'editar');
+    await this.usuariosService.assertPermissoesConcedidas(currentUser, { permissionIds: [parseInt(permissionId)] });
     return this.usuariosService.removePermission(id, parseInt(permissionId));
   }
 
@@ -523,10 +551,13 @@ export class UsuariosController {
   })
   @ApiResponse({ status: 404, description: 'Usuário não encontrado' })
   @ApiResponse({ status: 400, description: 'Uma ou mais permissões não existem' })
-  syncUserPermissions(
+  async syncUserPermissions(
     @Param('id') id: string,
     @Body() syncPermissionsDto: SyncPermissionsDto,
+    @CurrentUser() currentUser?: any,
   ) {
+    await this.usuariosService.assertPodeGerir(currentUser, id, 'editar');
+    await this.usuariosService.assertPermissoesConcedidas(currentUser, { permissionIds: syncPermissionsDto.permissionIds });
     return this.usuariosService.syncUserPermissions(id, syncPermissionsDto.permissionIds);
   }
 
@@ -552,7 +583,8 @@ export class UsuariosController {
       }
     }
   })
-  bulkAssignRoles(@Body() bulkData: BulkAssignRolesDto) {
+  bulkAssignRoles(@Body() bulkData: BulkAssignRolesDto, @CurrentUser() currentUser?: any) {
+    exigirAdmin(currentUser);
     return this.usuariosService.bulkAssignRoles(bulkData);
   }
 
@@ -574,7 +606,8 @@ export class UsuariosController {
       }
     }
   })
-  bulkAssignPermissions(@Body() bulkData: BulkAssignPermissionsDto) {
+  bulkAssignPermissions(@Body() bulkData: BulkAssignPermissionsDto, @CurrentUser() currentUser?: any) {
+    exigirAdmin(currentUser);
     return this.usuariosService.bulkAssignPermissions(bulkData);
   }
 
@@ -599,7 +632,8 @@ export class UsuariosController {
       }
     }
   })
-  syncLegacyRoles() {
+  syncLegacyRoles(@CurrentUser() currentUser?: any) {
+    exigirAdmin(currentUser);
     return this.usuariosService.syncLegacyRolesToSpatie();
   }
 
@@ -613,7 +647,8 @@ export class UsuariosController {
     status: 200,
     description: 'Teste realizado com sucesso'
   })
-  testSimple(@Body() body: any) {
+  testSimple(@Body() body: any, @CurrentUser() currentUser?: any) {
+    exigirAdmin(currentUser);
     console.log('🔥 TESTE SIMPLES - Chegou no controller!');
     console.log('📝 Body recebido:', JSON.stringify(body, null, 2));
     console.log('📝 Tipo:', typeof body);
@@ -633,6 +668,7 @@ export class UsuariosController {
     description: 'Teste realizado com sucesso'
   })
   testCreateUser(@Body() body: any, @CurrentUser() currentUser?: any) {
+    exigirAdmin(currentUser);
     console.log('🔥 TESTE CREATE USER - Chegou no controller!');
     console.log('📝 Body recebido (RAW):', JSON.stringify(body, null, 2));
     console.log('📝 Current User:', currentUser);

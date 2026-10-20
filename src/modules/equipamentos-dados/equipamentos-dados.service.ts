@@ -36,7 +36,10 @@ export class EquipamentosDadosService {
       select: { id: true },
     });
     const allowed = new Set(inScope.map((e) => e.id.trim()));
-    return ids.filter((id) => allowed.has(id));
+    // Operador: gráfico/total só dos liberados; os outros saem calados (PER-24).
+    const eqScope = await this.scopeService.getEquipamentosScope(user);
+    const liberados = eqScope ? new Set(eqScope) : null;
+    return ids.filter((id) => allowed.has(id) && (!liberados || liberados.has(id)));
   }
 
   /**

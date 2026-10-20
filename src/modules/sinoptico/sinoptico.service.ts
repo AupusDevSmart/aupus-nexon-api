@@ -56,6 +56,9 @@ export class SinopticoService {
         ? { id: '__NEVER__' }
         : { planta_id: { in: scope } }
       : undefined;
+    // Operador: só os equipamentos liberados entram em dados, alarmes e totais (PER-23/24).
+    const eqScope = await this.scopeService.getEquipamentosScope(user);
+    const eqIdWhere = eqScope ? { id: { in: eqScope } } : {};
 
     // 1. Equipamentos MQTT da unidade
     const equipamentos = await this.prisma.equipamentos.findMany({
@@ -63,6 +66,7 @@ export class SinopticoService {
         unidade_id: uid,
         mqtt_habilitado: true,
         deleted_at: null,
+        ...eqIdWhere,
         ...(unidadeScopeWhere ? { unidade: unidadeScopeWhere } : {}),
       },
       select: { id: true, nome: true },
@@ -108,6 +112,7 @@ export class SinopticoService {
       created_at: { gte: new Date(agora - janelaAlarmes * 60000) },
       equipamento: {
         unidade_id: uid,
+        ...eqIdWhere,
         ...(unidadeScopeWhere ? { unidade: unidadeScopeWhere } : {}),
       },
     };
@@ -132,7 +137,8 @@ export class SinopticoService {
             createdAt: recente.created_at.toISOString(),
           }
         : null,
-      equipamentosSemDados,
+      // Quem está sem dados é comunicação: operador não recebe a lista (PER-22).
+      equipamentosSemDados: eqScope ? [] : equipamentosSemDados,
     };
   }
 }
