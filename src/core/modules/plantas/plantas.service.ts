@@ -390,12 +390,23 @@ export class PlantasService {
       };
     }
 
+    // NEXON-21: a tela Ativos › Proprietários lista daqui, então vão junto o
+    // contato, a cidade e quantas plantas (do escopo de quem pede) cada um tem.
+    const plantasContadas: any = { deleted_at: null };
+    if (this.scopeService.isScoped(scope)) plantasContadas.id = { in: scope };
+
     const proprietarios = await this.prisma.usuarios.findMany({
       where,
       select: {
         id: true,
         nome: true,
-        cpf_cnpj: true
+        cpf_cnpj: true,
+        email: true,
+        telefone: true,
+        cidade: true,
+        estado: true,
+        role: true,
+        _count: { select: { plantas_proprietario: { where: plantasContadas } } },
       },
       orderBy: {
         nome: 'asc'
@@ -406,7 +417,13 @@ export class PlantasService {
       id: prop.id,
       nome: prop.nome,
       cpf_cnpj: prop.cpf_cnpj,
-      tipo: this.getTipoProprietario(prop.cpf_cnpj)
+      tipo: this.getTipoProprietario(prop.cpf_cnpj),
+      email: prop.email,
+      telefone: prop.telefone ?? undefined,
+      cidade: prop.cidade ?? undefined,
+      estado: prop.estado ?? undefined,
+      role: prop.role,
+      totalPlantas: prop._count.plantas_proprietario,
     }));
   }
 

@@ -441,12 +441,24 @@ describe('PlantasService', () => {
         {
           id: 'usr_prop1_123456789012345678',
           nome: 'Proprietário 1',
-          cpf_cnpj: '12.345.678/0001-90'
+          cpf_cnpj: '12.345.678/0001-90',
+          email: 'p1@exemplo.com',
+          telefone: '(64) 99999-0000',
+          cidade: 'Rio Verde',
+          estado: 'GO',
+          role: 'proprietario',
+          _count: { plantas_proprietario: 3 }
         },
         {
           id: 'usr_prop2_123456789012345678',
           nome: 'Proprietário 2',
-          cpf_cnpj: '987.654.321-00'
+          cpf_cnpj: '987.654.321-00',
+          email: 'p2@exemplo.com',
+          telefone: null,
+          cidade: null,
+          estado: null,
+          role: 'admin',
+          _count: { plantas_proprietario: 0 }
         }
       ];
 
@@ -461,13 +473,25 @@ describe('PlantasService', () => {
         id: 'usr_prop1_123456789012345678',
         nome: 'Proprietário 1',
         cpf_cnpj: '12.345.678/0001-90',
-        tipo: 'pessoa_juridica'
+        tipo: 'pessoa_juridica',
+        email: 'p1@exemplo.com',
+        telefone: '(64) 99999-0000',
+        cidade: 'Rio Verde',
+        estado: 'GO',
+        role: 'proprietario',
+        totalPlantas: 3
       });
       expect(result[1]).toEqual({
         id: 'usr_prop2_123456789012345678',
         nome: 'Proprietário 2',
         cpf_cnpj: '987.654.321-00',
-        tipo: 'pessoa_fisica'
+        tipo: 'pessoa_fisica',
+        email: 'p2@exemplo.com',
+        telefone: undefined,
+        cidade: undefined,
+        estado: undefined,
+        role: 'admin',
+        totalPlantas: 0
       });
     });
 

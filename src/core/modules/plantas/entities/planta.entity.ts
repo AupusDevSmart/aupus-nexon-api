@@ -17,6 +17,24 @@ export class ProprietarioBasico {
     description: 'Tipo do proprietário baseado no CPF/CNPJ' 
   })
   tipo: 'pessoa_fisica' | 'pessoa_juridica';
+
+  @ApiProperty({ required: false, example: 'contato@empresa.com.br' })
+  email?: string;
+
+  @ApiProperty({ required: false, example: '(64) 99999-0000' })
+  telefone?: string;
+
+  @ApiProperty({ required: false, example: 'Rio Verde' })
+  cidade?: string;
+
+  @ApiProperty({ required: false, example: 'GO' })
+  estado?: string;
+
+  @ApiProperty({ required: false, example: 'proprietario', description: 'Papel do usuário' })
+  role?: string;
+
+  @ApiProperty({ required: false, example: 3, description: 'Plantas ativas do proprietário (no escopo de quem pede)' })
+  totalPlantas?: number;
 }
 
 export class Endereco {
