@@ -120,7 +120,10 @@ export class ChamadosEncaminhamentoWorker {
         referencia = d?.id ? String(d.id).slice(0, 100) : null;
       }
     } catch (e: any) {
-      erro = (e?.response?.data?.message ?? e?.message ?? String(e)).toString();
+      // O Smart Service responde erro no envelope { error: { message } }.
+      const corpo = e?.response?.data;
+      const msg = corpo?.error?.message ?? corpo?.message ?? e?.message ?? String(e);
+      erro = (Array.isArray(msg) ? msg.join('; ') : msg).toString();
     }
 
     const tentativas = enc.tentativas + 1;
