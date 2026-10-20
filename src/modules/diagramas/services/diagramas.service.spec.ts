@@ -1,11 +1,13 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { DiagramasService } from './diagramas.service';
 import { PermissionScopeService, PrismaService } from '@/core';
+import { AuditoriaAcessosService } from '@/core/modules/usuarios/auditoria-acessos.service';
 import { NotFoundException } from '@nestjs/common';
 
 describe('DiagramasService', () => {
   let service: DiagramasService;
   let prismaService: PrismaService;
+  let auditoria: { registrar: jest.Mock };
 
   const mockPrismaService = {
     diagramas_unitarios: {
@@ -17,10 +19,12 @@ describe('DiagramasService', () => {
     },
     unidades: {
       findUnique: jest.fn(),
+      findFirst: jest.fn(),
     },
     equipamentos: {
       findMany: jest.fn(),
       updateMany: jest.fn(),
+      update: jest.fn(),
     },
     tipos_equipamentos: {
       findMany: jest.fn(),
@@ -28,6 +32,8 @@ describe('DiagramasService', () => {
     equipamentos_conexoes: {
       findMany: jest.fn(),
       updateMany: jest.fn(),
+      deleteMany: jest.fn(),
+      createMany: jest.fn(),
     },
     $transaction: jest.fn((callback) => callback(mockPrismaService)),
   };
@@ -42,6 +48,7 @@ describe('DiagramasService', () => {
     getUserAccessiblePlantas: jest.fn().mockResolvedValue([]),
     // Sem usuário operador: sem recorte por equipamento (NEXON-20).
     acessoPorEquipamento: jest.fn().mockResolvedValue(null),
+    assertPlantaInScope: jest.fn().mockResolvedValue(undefined),
     getEquipamentosScope: jest.fn().mockResolvedValue(null),
   };
 
@@ -57,11 +64,16 @@ describe('DiagramasService', () => {
           provide: PermissionScopeService,
           useValue: mockPermissionScopeService,
         },
+        {
+          provide: AuditoriaAcessosService,
+          useValue: { registrar: jest.fn().mockResolvedValue(undefined) },
+        },
       ],
     }).compile();
 
     service = module.get<DiagramasService>(DiagramasService);
     prismaService = module.get<PrismaService>(PrismaService);
+    auditoria = module.get(AuditoriaAcessosService) as any;
 
     // Limpar mocks antes de cada teste
     jest.clearAllMocks();
@@ -410,6 +422,70 @@ describe('DiagramasService', () => {
           }),
         }),
       );
+    });
+  });
+
+  describe('saveLayout — grupos e auditoria (NEXON-31)', () => {
+    const diagrama = {
+      id: 'diag-1',
+      nome: 'Unifilar',
+      unidade_id: 'uni-1',
+      versao: '1.3',
+      configuracoes: {
+        grafico: { tipo: 'demanda' },
+        grupos: [{ id: 'g-velho', nome: 'Antigo', equipamentoIds: ['e3'] }],
+      },
+    };
+    const dto: any = {
+      equipamentos: [
+        { equipamentoId: 'e1', posicaoX: 1, posicaoY: 1 },
+        { equipamentoId: 'e2', posicaoX: 2, posicaoY: 1 },
+      ],
+      conexoes: [],
+    };
+
+    beforeEach(() => {
+      mockPrismaService.diagramas_unitarios.findFirst.mockResolvedValue(diagrama);
+      mockPrismaService.equipamentos.findMany
+        .mockResolvedValueOnce([{ id: 'e1' }, { id: 'e2' }]) // validação
+        .mockResolvedValueOnce([{ id: 'e1' }, { id: 'e3' }]); // quem estava antes
+      mockPrismaService.unidades.findFirst.mockResolvedValue({ nome: 'Pontal', planta_id: 'pl-1' });
+    });
+
+    it('grava os grupos em configuracoes sem perder as outras chaves e audita o que mudou', async () => {
+      const r = await service.saveLayout(
+        'diag-1',
+        { ...dto, grupos: [{ id: 'g1', nome: 'Inversores A', equipamentoIds: ['e1', 'e2', 'fora'] }] },
+        { id: 'u1', role: 'admin', nome: 'Lucas' } as any,
+      );
+
+      expect(r.grupos).toEqual([expect.objectContaining({ id: 'g1', equipamentoIds: ['e1', 'e2'] })]);
+      const cfg = mockPrismaService.diagramas_unitarios.update.mock.calls[0][0].data.configuracoes;
+      expect(cfg.grafico).toEqual({ tipo: 'demanda' });
+      expect(cfg.grupos.map((g: any) => g.id)).toEqual(['g1']);
+
+      const reg = auditoria.registrar.mock.calls[0][0];
+      expect(reg).toMatchObject({ acao: 'diagrama_layout', objetoTipo: 'diagrama', objetoId: 'diag-1', plantaIds: ['pl-1'], unidadeIds: ['uni-1'] });
+      expect(reg.mensagem).toContain('Unifilar salvo — Unifilar (Pontal)');
+      expect(reg.mensagem).toContain('grupo criado "Inversores A" (2 equip.)');
+      expect(reg.mensagem).toContain('grupo desfeito "Antigo"');
+      expect(reg.detalhes.equipamentos_entraram).toEqual(['e2']);
+      expect(reg.detalhes.equipamentos_sairam).toEqual(['e3']);
+    });
+
+    it('sem grupos no DTO mantém os salvos, podados pelo layout novo', async () => {
+      mockPrismaService.diagramas_unitarios.findFirst.mockResolvedValue({
+        ...diagrama,
+        configuracoes: { grupos: [{ id: 'g1', nome: 'A', equipamentoIds: ['e1', 'e3'] }] },
+      });
+      const r = await service.saveLayout('diag-1', dto);
+      expect(r.grupos).toEqual([expect.objectContaining({ id: 'g1', equipamentoIds: ['e1'] })]);
+      expect(mockPrismaService.diagramas_unitarios.update).toHaveBeenCalled();
+    });
+
+    it('falha na auditoria não derruba o salvamento', async () => {
+      auditoria.registrar.mockRejectedValueOnce(new Error('db fora'));
+      await expect(service.saveLayout('diag-1', { ...dto, grupos: [] })).resolves.toMatchObject({ equipamentosAtualizados: 2 });
     });
   });
 });

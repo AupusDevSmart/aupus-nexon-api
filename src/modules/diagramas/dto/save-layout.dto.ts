@@ -1,4 +1,15 @@
-import { IsString, IsNumber, IsEnum, IsArray, ValidateNested, IsOptional } from 'class-validator';
+import {
+  IsString,
+  IsNumber,
+  IsEnum,
+  IsArray,
+  ValidateNested,
+  IsOptional,
+  IsBoolean,
+  MaxLength,
+  MinLength,
+  ArrayMaxSize,
+} from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
@@ -152,6 +163,52 @@ export class ConexaoLayoutDto {
 }
 
 /**
+ * Agrupamento de equipamentos no unifilar (NEXON-31).
+ * Fica em `diagramas_unitarios.configuracoes.grupos` — no modo recolhido o grupo
+ * vira um único bloco com o nome; ao abrir, mostra os equipamentos.
+ */
+export class GrupoDiagramaDto {
+  @ApiProperty({ description: 'ID do grupo (gerado no cliente)', example: 'grp_k3j2h1' })
+  @IsString()
+  @MinLength(1)
+  @MaxLength(40)
+  id: string;
+
+  @ApiProperty({ description: 'Nome do grupo', example: 'Inversores bloco A' })
+  @IsString()
+  @MinLength(1)
+  @MaxLength(80)
+  nome: string;
+
+  @ApiProperty({ description: 'Equipamentos do grupo', type: [String] })
+  @IsArray()
+  @ArrayMaxSize(500)
+  @IsString({ each: true })
+  equipamentoIds: string[];
+
+  @ApiPropertyOptional({ description: 'Cor do grupo (hex)', example: '#70C04B' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  cor?: string;
+
+  @ApiPropertyOptional({ description: 'Abre recolhido para quem vê o diagrama', default: true })
+  @IsOptional()
+  @IsBoolean()
+  recolhido?: boolean;
+
+  @ApiPropertyOptional({ description: 'Posição X do bloco recolhido (grid); vazio = centro dos equipamentos' })
+  @IsOptional()
+  @IsNumber()
+  posicaoX?: number;
+
+  @ApiPropertyOptional({ description: 'Posição Y do bloco recolhido (grid); vazio = centro dos equipamentos' })
+  @IsOptional()
+  @IsNumber()
+  posicaoY?: number;
+}
+
+/**
  * DTO completo para salvar todo o layout do diagrama
  * Uma única requisição substitui todo o estado anterior
  */
@@ -173,4 +230,15 @@ export class SaveLayoutDto {
   @ValidateNested({ each: true })
   @Type(() => ConexaoLayoutDto)
   conexoes: ConexaoLayoutDto[];
+
+  @ApiPropertyOptional({
+    description: 'Agrupamentos do unifilar. Ausente = mantém os grupos salvos; [] = remove todos.',
+    type: [GrupoDiagramaDto],
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(200)
+  @ValidateNested({ each: true })
+  @Type(() => GrupoDiagramaDto)
+  grupos?: GrupoDiagramaDto[];
 }

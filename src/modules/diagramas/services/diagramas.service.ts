@@ -4,12 +4,25 @@ import { papelCanonico } from '@/core/modules/auth/papeis';
 import { CreateDiagramaDto } from '../dto/create-diagrama.dto';
 import { UpdateDiagramaDto } from '../dto/update-diagrama.dto';
 import { SaveLayoutDto } from '../dto/save-layout.dto';
+import { AuditoriaAcessosService } from '@/core/modules/usuarios/auditoria-acessos.service';
+import type { ClienteInfo } from '@/core/common/cliente-info';
+import {
+  diffGrupos,
+  gruposDaConfiguracao,
+  gruposMudaram,
+  normalizarGrupos,
+  resumirGrupos,
+  type GrupoDiagrama,
+} from './diagrama-grupos';
+
+type Autor = ScopedUser & { nome?: string | null; email?: string | null };
 
 @Injectable()
 export class DiagramasService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly scopeService: PermissionScopeService,
+    private readonly auditoria: AuditoriaAcessosService,
   ) {}
 
   /** Resolve planta_id de um diagrama (via unidade). null se nao encontrar. */
@@ -529,7 +542,7 @@ export class DiagramasService {
    * Estratégia: DELETE ALL + INSERT ALL em uma única transação
    * ~10x mais rápido que múltiplas requisições PATCH
    */
-  async saveLayout(diagramaId: string, dto: SaveLayoutDto, user?: ScopedUser) {
+  async saveLayout(diagramaId: string, dto: SaveLayoutDto, user?: Autor, cliente?: ClienteInfo) {
     this.bloquearOperador(user);
     if (user) {
       const plantaId = await this.plantaIdDoDiagrama(diagramaId);
@@ -592,8 +605,29 @@ export class DiagramasService {
       }
     }
 
+    // Quem estava no diagrama antes (para a auditoria dizer o que entrou e saiu)
+    const antes = await this.prisma.equipamentos
+      .findMany({ where: { diagrama_id: diagramaId }, select: { id: true } })
+      .catch(() => [] as { id: string }[]);
+
+    // Grupos (NEXON-31): ausente no DTO = mantém os salvos, sempre podados pelo layout novo
+    const gruposAntes = gruposDaConfiguracao(diagrama.configuracoes);
+    const gruposDepois = normalizarGrupos(dto.grupos ?? gruposAntes, equipamentoIds);
+    const diffDosGrupos = diffGrupos(gruposAntes, gruposDepois);
+    const gravarGrupos =
+      dto.grupos !== undefined || JSON.stringify(gruposAntes) !== JSON.stringify(gruposDepois);
+
     // Executar em transação atômica
     const resultado = await this.prisma.$transaction(async (tx) => {
+      if (gravarGrupos) {
+        await tx.diagramas_unitarios.update({
+          where: { id: diagramaId },
+          data: {
+            configuracoes: { ...((diagrama.configuracoes as Record<string, unknown>) || {}), grupos: gruposDepois } as any,
+          },
+        });
+      }
+
       // 1. DELETE ALL - Remover todas as conexões existentes (hard delete para performance)
       await tx.equipamentos_conexoes.deleteMany({
         where: { diagrama_id: diagramaId },
@@ -668,6 +702,94 @@ export class DiagramasService {
       };
     });
 
-    return resultado;
+    await this.auditarLayout(diagrama, user, cliente, {
+      antes: antes.map((e) => e.id.trim()),
+      depois: equipamentoIds,
+      conexoes: resultado.conexoesCriadas,
+      grupos: gruposDepois,
+      diffGrupos: diffDosGrupos,
+    });
+
+    return { ...resultado, grupos: gruposDepois };
+  }
+
+  /**
+   * Trilha do unifilar (auditoria_acessos, acao 'diagrama_layout'): quem salvou,
+   * quais equipamentos entraram/saíram e o que mudou nos grupos. Busca por
+   * objeto_tipo 'diagrama' + objeto_id, planta ou unidade. Nunca derruba o save.
+   */
+  private async auditarLayout(
+    diagrama: { id: string; nome: string; unidade_id: string | null; versao?: string | null },
+    user: Autor | undefined,
+    cliente: ClienteInfo | undefined,
+    dados: {
+      antes: string[];
+      depois: string[];
+      conexoes: number;
+      grupos: GrupoDiagrama[];
+      diffGrupos: ReturnType<typeof diffGrupos>;
+    },
+  ): Promise<void> {
+    try {
+      const unidadeId = diagrama.unidade_id?.trim() ?? null;
+      const unidade = unidadeId
+        ? await this.prisma.unidades.findFirst({ where: { id: unidadeId }, select: { nome: true, planta_id: true } })
+        : null;
+      const plantaId = unidade?.planta_id?.trim() ?? null;
+      const setAntes = new Set(dados.antes);
+      const setDepois = new Set(dados.depois);
+      const entraram = dados.depois.filter((id) => !setAntes.has(id));
+      const sairam = dados.antes.filter((id) => !setDepois.has(id));
+      const mudouGrupos = gruposMudaram(dados.diffGrupos);
+
+      const partes = [`${dados.depois.length} equip.`, `${dados.conexoes} conexões`];
+      if (entraram.length) partes.push(`+${entraram.length} equip. no diagrama`);
+      if (sairam.length) partes.push(`-${sairam.length} equip. do diagrama`);
+      if (mudouGrupos) partes.push(resumirGrupos(dados.diffGrupos));
+
+      await this.auditoria.registrar({
+        autorId: user?.id ?? null,
+        alvoUsuarioId: null,
+        acao: 'diagrama_layout',
+        mensagem: `Unifilar salvo — ${diagrama.nome}${unidade?.nome ? ` (${unidade.nome})` : ''}: ${partes.join(' · ')}`,
+        plantaIds: plantaId ? [plantaId] : [],
+        unidadeIds: unidadeId ? [unidadeId] : [],
+        dispositivo: cliente?.dispositivo ?? null,
+        objetoTipo: 'diagrama',
+        objetoId: diagrama.id.trim(),
+        resultado: 'ok',
+        autorNome: user?.nome ?? null,
+        rota: `/diagramas/${diagrama.id.trim()}/layout`,
+        detalhes: {
+          usuario: user
+            ? {
+                id: user.id?.trim() ?? null,
+                nome: user.nome ?? null,
+                email: user.email ?? null,
+                papel: user.role ? papelCanonico(user.role) : null,
+              }
+            : null,
+          diagrama: { id: diagrama.id.trim(), nome: diagrama.nome, versao: diagrama.versao ?? null },
+          unidade: unidadeId ? { id: unidadeId, nome: unidade?.nome ?? null } : null,
+          planta_id: plantaId,
+          equipamentos: dados.depois.length,
+          conexoes: dados.conexoes,
+          equipamentos_entraram: entraram,
+          equipamentos_sairam: sairam,
+          grupos_alterados: mudouGrupos,
+          grupos: dados.grupos.map((g) => ({ id: g.id, nome: g.nome, equipamentos: g.equipamentoIds.length })),
+          grupos_diff: mudouGrupos
+            ? {
+                criados: dados.diffGrupos.criados.map((g) => ({ id: g.id, nome: g.nome, equipamento_ids: g.equipamentoIds })),
+                removidos: dados.diffGrupos.removidos.map((g) => ({ id: g.id, nome: g.nome })),
+                renomeados: dados.diffGrupos.renomeados,
+                membros_alterados: dados.diffGrupos.membrosAlterados,
+              }
+            : null,
+        },
+      });
+    } catch {
+      // auditoria nunca derruba o salvamento (o registrar já loga a falha)
+    }
   }
 }
