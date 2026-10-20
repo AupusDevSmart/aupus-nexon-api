@@ -114,3 +114,16 @@ describe('diffRegra / resumirAlteracoes', () => {
     );
   });
 });
+
+describe('RegrasNotificacaoService — escopo de usuários (NEXON-25)', () => {
+  it('usuário com escopo não escolhe usuário de fora das plantas dele', async () => {
+    const { service, prisma } = montar(['p1']);
+    (prisma.usuarios as any).count = jest.fn(async () => 0);
+    await expect(
+      service.create(
+        { nome: 'X', evento: 'falha', canais: ['push'], planta_ids: ['p1'], usuario_ids: ['estranho'] },
+        { id: 'u2', role: 'operador' },
+      ),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+});

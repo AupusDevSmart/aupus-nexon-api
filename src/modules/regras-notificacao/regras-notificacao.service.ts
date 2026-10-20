@@ -38,6 +38,7 @@ export class RegrasNotificacaoService {
   async create(dto: CreateRegraNotificacaoDto, user?: Autor, cliente?: ClienteInfo) {
     const data = this.montar(dto);
     await this.validarPlantas(data.planta_ids ?? [], user);
+    await this.validarUsuarios(data.usuario_ids ?? [], user);
     const regra = await this.prisma.regras_notificacao.create({
       data: { ...(data as Prisma.regras_notificacaoCreateInput), created_by: user?.id?.trim() ?? null, updated_by: user?.id?.trim() ?? null },
     });
@@ -91,6 +92,7 @@ export class RegrasNotificacaoService {
     const antes = await this.buscar(id, user);
     const data = this.montar(dto, antes);
     if (data.planta_ids) await this.validarPlantas(data.planta_ids, user);
+    if (data.usuario_ids) await this.validarUsuarios(data.usuario_ids, user);
     const alteracoes = diffRegra(antes as any, data as any);
     if (!alteracoes.length) return this.enriquecer([antes]).then((r) => r[0]);
 
@@ -200,6 +202,27 @@ export class RegrasNotificacaoService {
     if (!plantaIds.length || !plantaIds.every((p) => scope.includes(p))) {
       throw new ForbiddenException('Escolha só plantas que você acompanha');
     }
+  }
+
+  /** Usuário com escopo só escolhe a si mesmo ou quem opera/é dono de uma planta dele. */
+  private async validarUsuarios(usuarioIds: string[], user?: ScopedUser) {
+    if (!usuarioIds.length) return;
+    const scope = await this.scopeService.getScope(user);
+    if (!this.scopeService.isScoped(scope)) return;
+    const eu = user?.id?.trim();
+    const outros = usuarioIds.filter((id) => id !== eu);
+    if (!outros.length) return;
+    const dentro = await this.prisma.usuarios.count({
+      where: {
+        id: { in: outros },
+        deleted_at: null,
+        OR: [
+          { plantas_operando: { some: { planta_id: { in: scope } } } },
+          { plantas_proprietario: { some: { id: { in: scope }, deleted_at: null } } },
+        ],
+      },
+    });
+    if (dentro !== outros.length) throw new ForbiddenException('Escolha só usuários das suas plantas');
   }
 
   /** Nomes de plantas e usuários para a tabela (ids continuam na regra). */
