@@ -34,6 +34,7 @@ import {
 } from './dto/create-conexao.dto';
 import { SaveLayoutDto } from './dto/save-layout.dto';
 import { UserProprietarioId, CurrentUser } from '@/core';
+import { Cliente, type ClienteInfo } from '@/core/common/cliente-info';
 
 @ApiTags('Diagramas Sinópticos')
 // @ApiBearerAuth() // TODO: Descomentar quando implementar autenticação
@@ -409,6 +410,7 @@ export class DiagramasController {
     @Param('id') diagramaId: string,
     @Body() dto: SaveLayoutDto,
     @CurrentUser() user?: any,
+    @Cliente() cliente?: ClienteInfo,
   ) {
     const startTime = Date.now();
 
@@ -417,7 +419,7 @@ export class DiagramasController {
     console.log('   📋 Equipamentos:', dto.equipamentos?.length || 0);
     console.log('   📋 Conexões:', dto.conexoes?.length || 0);
 
-    const resultado = await this.diagramasService.saveLayout(diagramaId, dto, user);
+    const resultado = await this.diagramasService.saveLayout(diagramaId, dto, user, cliente);
 
     const tempoMs = Date.now() - startTime;
     console.log(`   ✅ Layout salvo em ${tempoMs}ms`);

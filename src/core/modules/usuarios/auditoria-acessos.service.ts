@@ -27,7 +27,9 @@ export type AcaoAuditoria =
   | 'operador_reativado'
   | 'acesso_negado'
   // NEXON-25 (Configurações › Notificações)
-  | 'regra_notificacao';
+  | 'regra_notificacao'
+  // NEXON-31 (unifilar: layout e agrupamentos)
+  | 'diagrama_layout';
 
 export interface RegistroAcesso {
   autorId: string | null;
