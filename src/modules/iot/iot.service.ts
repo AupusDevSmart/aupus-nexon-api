@@ -525,7 +525,25 @@ export class IoTService {
       ORDER BY COALESCE(NULLIF(TRIM(e.tag), ''), e.nome)`;
     if (!elementos.length) return { unidade_id: uid, elementos: [] };
 
-    const ids = elementos.map((e) => e.equipamento_id);
+    // Fonte da leitura de cada elemento: um DJ/Medidor Concessionária não publica nada — quem
+    // publica é o device associado no IoT (PM, medidor da SSU via A-966/TON-V2: props.
+    // disjuntor_equipamento_id) ou o relé (IED) que lê o DJ. Sem isso o cartão dizia "Sem
+    // comunicação" com o PM mandando normalmente.
+    const elIds = elementos.map((e) => e.equipamento_id);
+    const vinculos = await this.prisma.$queryRaw<Array<{ alvo: string; fonte: string }>>`
+      SELECT TRIM(c.props->>'disjuntor_equipamento_id') AS alvo, TRIM(c.props->>'equipamento_id') AS fonte
+      FROM iot_componentes c
+      WHERE c.props->>'disjuntor_equipamento_id' = ANY(${elIds}::text[])
+        AND COALESCE(c.props->>'equipamento_id', '') <> ''`;
+    const fonteDe = new Map<string, string>(vinculos.map((v) => [v.alvo, v.fonte]));
+    for (const e of elementos) {
+      if (fonteDe.has(e.equipamento_id)) continue;
+      if (e.scs_medicao === 'ied' || e.scs_status) {
+        const rele = await this.statusFonteDoDisjuntor(e.equipamento_id).catch(() => null);
+        if (rele?.rele_equipamento_id) fonteDe.set(e.equipamento_id, String(rele.rele_equipamento_id).trim());
+      }
+    }
+    const ids = [...new Set(elementos.map((e) => fonteDe.get(e.equipamento_id) ?? e.equipamento_id))];
     // Última leitura por equipamento via LATERAL no índice (equipamento_id, timestamp_dados).
     // TRIM(ed.equipamento_id) desligava o índice e varria os 5 GB da tabela a cada
     // chamada (7–11 s na Visão Geral dos apps, NEXON-4). char(26) já ignora espaço à direita.
@@ -544,7 +562,7 @@ export class IoTService {
     return {
       unidade_id: uid,
       elementos: elementos.map((e) => {
-        const d = porId.get(e.equipamento_id);
+        const d = porId.get(fonteDe.get(e.equipamento_id) ?? e.equipamento_id);
         return {
           equipamento_id: e.equipamento_id,
           rotulo: e.tag?.trim() || e.nome?.trim() || e.equipamento_id,
@@ -1479,9 +1497,14 @@ export class IoTService {
       // Medidor SSU: tipo de equipamento da categoria "Gateway" (o mesmo do A-966) — e' a
       // categoria que liga a ingestao de pulsos (salvarDadosGateway), o dashboard do
       // gateway e o fluxo BIDIRECIONAL na demanda. A TON publica o mesmo JSON do A-966.
+      // Power Meter e inversor também ganham o tipo cadastrado: sem ele a categoria fica
+      // vazia e o equipamento cai em "Não entra no agregado" (demanda) e fora do COA.
+      const tipoComp = String(comp.type ?? '').toLowerCase();
       const tipoEquipamentoId =
-        String(comp.type ?? '') === 'medidor_ssu' ? 'tipo-ims-a966-001'
+        tipoComp === 'medidor_ssu' ? 'tipo-ims-a966-001'
         : (ehMedidorSsu(comp) || a966Auto) ? 'cmsyybblg000jjq1qr1na33zz'   // Medidor Concessionária (EQTL001)
+        : tipoComp === 'power_meter' ? 'tipo-meter-m160-001'               // categoria Power Meter
+        : tipoComp === 'inversor' ? '01JAQTE1INVERSOR000000005'            // categoria Inversor PV
         : undefined;
 
       let equipId: string;
