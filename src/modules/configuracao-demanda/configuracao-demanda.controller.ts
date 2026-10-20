@@ -14,6 +14,7 @@ import { ConfiguracaoDemandaService } from './configuracao-demanda.service';
 import { CreateConfiguracaoDemandaDto } from './dto/create-configuracao-demanda.dto';
 import { UpdateConfiguracaoDemandaDto } from './dto/update-configuracao-demanda.dto';
 import { CurrentUser } from '@/core';
+import { Cliente, type ClienteInfo } from '@/core/common/cliente-info';
 
 @Controller('configuracao-demanda')
 // @UseGuards(JwtAuthGuard) // Temporariamente desabilitado para testes
@@ -76,6 +77,7 @@ export class ConfiguracaoDemandaController {
     @Param('unidadeId') unidadeId: string,
     @Body() updateDto: UpdateConfiguracaoDemandaDto,
     @Request() req: any,
+    @Cliente() cliente?: ClienteInfo,
   ) {
     console.log('\n🎯 [CONTROLLER] PUT /configuracao-demanda/unidade/:unidadeId chamado');
     console.log('  - unidadeId:', unidadeId);
@@ -84,7 +86,7 @@ export class ConfiguracaoDemandaController {
 
     try {
       const userId = req.user?.id;
-      const result = await this.configuracaoDemandaService.updateByUnidade(unidadeId, updateDto, userId, req.user);
+      const result = await this.configuracaoDemandaService.updateByUnidade(unidadeId, updateDto, userId, req.user, cliente);
       console.log('✅ [CONTROLLER] Resposta do service:', result);
       return result;
     } catch (error) {

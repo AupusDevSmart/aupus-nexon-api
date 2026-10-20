@@ -43,4 +43,16 @@ export class UpdateConfiguracaoDemandaDto {
   @Min(0)
   @Max(100)
   percentual_adicional?: number;
+
+  /** Demanda contratada de geração (kW) — grava em unidades.demanda_geracao. */
+  @IsNumber()
+  @IsOptional()
+  @Min(0)
+  demanda_geracao?: number | null;
+
+  /** Demanda contratada de carga/consumo (kW) — grava em unidades.demanda_carga. */
+  @IsNumber()
+  @IsOptional()
+  @Min(0)
+  demanda_carga?: number | null;
 }

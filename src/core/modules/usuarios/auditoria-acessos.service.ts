@@ -5,7 +5,7 @@ import { novoId26 } from '../../common/cliente-info';
 export interface RegistroAcesso {
   autorId: string | null;
   alvoUsuarioId: string | null;
-  acao: 'convite' | 'convite_reenviado' | 'permissoes' | 'exportacao' | 'exportacao_negada';
+  acao: 'convite' | 'convite_reenviado' | 'permissoes' | 'exportacao' | 'exportacao_negada' | 'configuracao_demanda';
   mensagem: string;
   detalhes?: Record<string, unknown>;
   plantaIds?: string[];
