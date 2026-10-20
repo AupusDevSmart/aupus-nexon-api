@@ -28,6 +28,7 @@ function montar(scope: string[] | null = null) {
       findFirst: jest.fn(async () => ({ ...regraBase })),
     },
     plantas: { findMany: jest.fn(async () => [{ id: 'p1', nome: 'Usina 1' }]) },
+    $queryRaw: jest.fn(async () => []),
     usuarios: { findMany: jest.fn(async () => []) },
   };
   const scopeService = {
@@ -125,5 +126,17 @@ describe('RegrasNotificacaoService — escopo de usuários (NEXON-25)', () => {
         { id: 'u2', role: 'operador' },
       ),
     ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+});
+
+describe('RegrasNotificacaoService — papéis canônicos (NEXON-20)', () => {
+  it('papel legado vira canônico e o resolver inclui os nomes antigos do banco', async () => {
+    const { service, prisma } = montar();
+    await service.create({ nome: 'X', evento: 'falha', canais: ['push'], papeis: ['gerente', 'analista_operacao'] }, admin);
+    expect(prisma.regras_notificacao.create.mock.calls[0][0].data.papeis).toEqual(['analista_operacao']);
+
+    await service.resolverDestinatarios({ papeis: ['admin'], planta_ids: [], usuario_ids: [] });
+    const where = (prisma.usuarios.findMany.mock.calls as any[][]).slice(-1)[0][0].where;
+    expect(where.OR[0]).toEqual({ role: { in: ['super_admin', 'admin'] } });
   });
 });

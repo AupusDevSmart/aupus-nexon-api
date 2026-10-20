@@ -1,5 +1,6 @@
 import { PartialType } from '@nestjs/mapped-types';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
+import { papelCanonico } from '@/core/modules/auth/papeis';
 import {
   ArrayMaxSize,
   ArrayMinSize,
@@ -45,8 +46,10 @@ export class CreateRegraNotificacaoDto {
   @IsIn([...CANAIS_NOTIFICACAO], { each: true })
   canais: string[];
 
+  /** Papel canônico; nome legado (super_admin, analista, gerente) vira o canônico. */
   @IsOptional()
   @IsArray()
+  @Transform(({ value }) => (Array.isArray(value) ? value.map((p) => papelCanonico(p)) : value))
   @IsIn([...PAPEIS_NOTIFICACAO], { each: true })
   papeis?: string[];
 

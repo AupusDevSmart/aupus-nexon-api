@@ -1,7 +1,8 @@
 /** NEXON-25 — vocabulário das regras de notificação (API e tela usam os mesmos valores). */
 export const EVENTOS_NOTIFICACAO = ['falha', 'sem_comunicacao', 'vencimento_acesso_morador'] as const;
 export const CANAIS_NOTIFICACAO = ['push', 'email', 'whatsapp'] as const;
-export const PAPEIS_NOTIFICACAO = ['super_admin', 'admin', 'gerente', 'analista', 'operador', 'proprietario'] as const;
+/** Papéis canônicos da spec de permissões (NEXON-20, ADR 0002; ver auth/papeis.ts). */
+export const PAPEIS_NOTIFICACAO = ['admin', 'analista_automacao', 'analista_operacao', 'proprietario', 'operador'] as const;
 
 export type EventoNotificacao = (typeof EVENTOS_NOTIFICACAO)[number];
 export type CanalNotificacao = (typeof CANAIS_NOTIFICACAO)[number];

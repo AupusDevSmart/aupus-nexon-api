@@ -2,7 +2,7 @@ import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundEx
 import { Prisma } from '@prisma/client';
 import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
 import { AuditoriaAcessosService } from '@/core/modules/usuarios/auditoria-acessos.service';
-import { isPapelSemEscopo, normalizarPapel } from '@/core/modules/auth/permission-scope.service';
+import { isGlobal, papelCanonico, type Papel } from '@/core/modules/auth/papeis';
 import type { ClienteInfo } from '@/core/common/cliente-info';
 import {
   CreateRegraNotificacaoDto,
@@ -17,6 +17,15 @@ type Regra = Prisma.regras_notificacaoGetPayload<object>;
 type DadosRegra = Partial<
   Pick<Regra, 'nome' | 'evento' | 'canais' | 'papeis' | 'planta_ids' | 'usuario_ids' | 'ativo' | 'limite_minutos' | 'antecedencia_dias'>
 >;
+
+/** Nomes da tabela `roles` de cada papel canônico (inverso de papelCanonico). */
+const ROLES_DO_PAPEL: Partial<Record<Papel, string[]>> = {
+  admin: ['super_admin', 'admin'],
+  analista_automacao: ['analista_automacao', 'analista'],
+  analista_operacao: ['analista_operacao', 'gerente'],
+  proprietario: ['proprietario', 'propietario'],
+  operador: ['operador'],
+};
 
 const limpar = (ids?: string[] | null) => [...new Set((ids ?? []).map((i) => String(i).trim()).filter(Boolean))];
 
@@ -126,21 +135,26 @@ export class RegrasNotificacaoService {
 
   async resolverDestinatarios(regra: Pick<Regra, 'papeis' | 'planta_ids' | 'usuario_ids'>) {
     const plantas = limpar(regra.planta_ids);
-    const papeis = limpar(regra.papeis).map(normalizarPapel);
+    const papeis = new Set(limpar(regra.papeis).map((p) => papelCanonico(p)));
     const OR: Prisma.usuariosWhereInput[] = [];
 
-    const admins = papeis.filter((p) => isPapelSemEscopo(p));
-    if (admins.length) OR.push({ role: { in: admins } });
-    if (papeis.includes('operador')) {
+    // Papéis globais valem para todas as plantas; nomes legados do banco entram junto.
+    const globais = [...papeis].filter((p) => isGlobal(p)).flatMap((p) => ROLES_DO_PAPEL[p] ?? []);
+    if (globais.length) OR.push({ role: { in: globais } });
+    if (papeis.has('operador')) {
       OR.push(
         plantas.length
-          ? { role: 'operador', plantas_operando: { some: { planta_id: { in: plantas } } } }
+          ? { role: 'operador', id: { in: await this.operadoresDasPlantas(plantas) } }
           : { role: 'operador' },
       );
     }
-    if (papeis.includes('proprietario')) {
-      const roles = ['proprietario', 'propietario'];
-      OR.push(plantas.length ? { role: { in: roles }, plantas_proprietario: { some: { id: { in: plantas }, deleted_at: null } } } : { role: { in: roles } });
+    if (papeis.has('proprietario')) {
+      const roles = ROLES_DO_PAPEL.proprietario;
+      OR.push(
+        plantas.length
+          ? { role: { in: roles }, plantas_proprietario: { some: { id: { in: plantas }, deleted_at: null } } }
+          : { role: { in: roles } },
+      );
     }
     const ids = limpar(regra.usuario_ids);
     if (ids.length) OR.push({ id: { in: ids } });
@@ -152,7 +166,22 @@ export class RegrasNotificacaoService {
       orderBy: { nome: 'asc' },
       take: 1000,
     });
-    return usuarios.map((u) => ({ ...u, id: u.id.trim(), role: normalizarPapel(u.role) }));
+    return usuarios.map((u) => ({ ...u, id: u.id.trim(), role: papelCanonico(u.role) }));
+  }
+
+  /** Operadores com vínculo ativo em algum equipamento das plantas (NEXON-20, ADR 0002). */
+  private async operadoresDasPlantas(plantas: string[]): Promise<string[]> {
+    const linhas = await this.prisma.$queryRaw<Array<{ id: string }>>`
+      SELECT DISTINCT TRIM(v.operador_id) AS id
+      FROM operador_vinculos v
+      JOIN operador_vinculo_equipamentos ve ON ve.vinculo_id = v.id
+      JOIN equipamentos e ON e.id = ve.equipamento_id
+      LEFT JOIN unidades u ON u.id = e.unidade_id
+      JOIN plantas p ON p.id = COALESCE(e.planta_id, u.planta_id) AND p.proprietario_id = v.proprietario_id
+      WHERE v.removido_em IS NULL
+        AND (v.validade IS NULL OR v.validade >= (now() AT TIME ZONE 'America/Sao_Paulo')::date)
+        AND TRIM(p.id) = ANY(${plantas}::text[])`;
+    return linhas.map((l) => l.id);
   }
 
   // ---------------------------------------------------------------------------
@@ -176,7 +205,7 @@ export class RegrasNotificacaoService {
     if (dto.nome !== undefined) out.nome = dto.nome.trim();
     if (dto.evento !== undefined) out.evento = dto.evento;
     if (dto.canais !== undefined) out.canais = limpar(dto.canais);
-    if (dto.papeis !== undefined) out.papeis = limpar(dto.papeis).map(normalizarPapel);
+    if (dto.papeis !== undefined) out.papeis = [...new Set(limpar(dto.papeis).map((p) => papelCanonico(p)))];
     if (dto.planta_ids !== undefined) out.planta_ids = limpar(dto.planta_ids);
     if (dto.usuario_ids !== undefined) out.usuario_ids = limpar(dto.usuario_ids);
     if (dto.ativo !== undefined) out.ativo = dto.ativo;
@@ -217,7 +246,7 @@ export class RegrasNotificacaoService {
         id: { in: outros },
         deleted_at: null,
         OR: [
-          { plantas_operando: { some: { planta_id: { in: scope } } } },
+          { id: { in: await this.operadoresDasPlantas(scope) } },
           { plantas_proprietario: { some: { id: { in: scope }, deleted_at: null } } },
         ],
       },
@@ -270,6 +299,11 @@ export class RegrasNotificacaoService {
         mensagem: `Regra de notificação ${operacao} — ${regra.nome}: ${detalhe}`,
         plantaIds: regra.planta_ids,
         dispositivo: cliente?.dispositivo ?? null,
+        objetoTipo: 'regra_notificacao',
+        objetoId: regra.id.trim(),
+        resultado: 'ok',
+        autorNome: user?.nome ?? null,
+        rota: '/regras-notificacao',
         detalhes: {
           operacao,
           usuario: user
@@ -277,7 +311,7 @@ export class RegrasNotificacaoService {
                 id: user.id?.trim() ?? null,
                 nome: user.nome ?? null,
                 email: user.email ?? null,
-                papel: user.role ? normalizarPapel(user.role) : null,
+                papel: user.role ? papelCanonico(user.role) : null,
               }
             : null,
           regra: {
