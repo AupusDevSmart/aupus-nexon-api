@@ -9,6 +9,7 @@ import { MqttIngestionService } from './services/mqtt-ingestion.service';
 import { GatewayGraficosService } from './services/gateway-graficos.service';
 import { GatewayDashboardService } from './services/gateway-dashboard.service';
 import { MedidorResumoService } from './services/medidor-resumo.service';
+import { AgregadoDiarioService } from './services/agregado-diario.service';
 import { PrismaModule } from '@/core';
 
 @Module({
@@ -24,6 +25,7 @@ import { PrismaModule } from '@/core';
     GatewayGraficosService,
     GatewayDashboardService,
     MedidorResumoService,
+    AgregadoDiarioService,
   ],
   exports: [
     EquipamentosDadosService,

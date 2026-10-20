@@ -1,6 +1,8 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
 import { EquipamentoDadosQueryDto } from './dto/equipamento-dados-query.dto';
+import { CAP_POTENCIA_GLITCH_KW, agruparPorMes } from './services/agregado-diario';
+import { AgregadoDiarioService } from './services/agregado-diario.service';
 
 @Injectable()
 export class EquipamentosDadosService {
@@ -9,6 +11,7 @@ export class EquipamentosDadosService {
   constructor(
     private prisma: PrismaService,
     private scopeService: PermissionScopeService,
+    private agregado: AgregadoDiarioService,
   ) {}
 
   /** Helper interno: garante que o equipamento (single id) esta no escopo do user. */
@@ -1553,35 +1556,13 @@ export class EquipamentosDadosService {
 
     this.logger.log(`⚡ [V2 MÊS] ${equipsFiltrados.length} equipamentos, ${ano}-${mesNum}`);
 
-    const dadosAgregados = await this.prisma.$queryRaw<Array<{
-      dia: Date;
-      equipamento_id: string;
-      energia_total: number;
-      potencia_media: number;
-      num_leituras: number;
-    }>>`
-      SELECT
-        DATE_TRUNC('day', timestamp_dados AT TIME ZONE 'America/Sao_Paulo')::date AS dia,
-        equipamento_id,
-        CASE
-          WHEN COUNT(dados->'energy'->>'daily_yield') >= 1
-          THEN MAX((dados->'energy'->>'daily_yield')::numeric)
-          -- Sem contador confiável (Power Meter só com Pt; energia_kwh esparsa): potência
-          -- média × horas cobertas pelas leituras. Com energia_kwh em quase toda leitura, soma.
-          WHEN COUNT(energia_kwh) < COUNT(*) / 2 AND COUNT(potencia_ativa_kw) > 0
-          THEN AVG(potencia_ativa_kw) * EXTRACT(EPOCH FROM (MAX(timestamp_dados) - MIN(timestamp_dados))) / 3600
-          ELSE SUM(energia_kwh)
-        END AS energia_total,
-        AVG(potencia_ativa_kw) AS potencia_media,
-        COUNT(*) AS num_leituras
-      FROM equipamentos_dados
-      WHERE equipamento_id = ANY(${ids}::text[])
-        AND timestamp_dados >= ${dataInicio}
-        AND timestamp_dados < ${dataFim}
-        AND (potencia_ativa_kw IS NULL OR potencia_ativa_kw < ${CAP_POTENCIA_GLITCH_KW})
-      GROUP BY DATE_TRUNC('day', timestamp_dados AT TIME ZONE 'America/Sao_Paulo'), equipamento_id
-      ORDER BY dia ASC
-    `;
+    // Resumo diário guardado (dias fechados) + ontem/hoje na hora: ver AgregadoDiarioService.
+    const mm = String(mesNum).padStart(2, '0');
+    const dadosAgregados = await this.agregado.porDia(
+      ids,
+      `${ano}-${mm}-01`,
+      `${proxMes.ano}-${String(proxMes.mes).padStart(2, '0')}-01`,
+    );
 
     const equipamentosDb = await this.prisma.equipamentos.findMany({
       where: { id: { in: ids } },
@@ -1595,7 +1576,7 @@ export class EquipamentosDadosService {
       // converte pro TZ local do Node — se Node=BRT, 2026-06-01Z vira 31/05
       // local e quebra o numero do dia. Extraindo do diaKey (UTC, ja casa com
       // o AT TIME ZONE 'America/Sao_Paulo' do SQL acima).
-      const diaKey = row.dia.toISOString().split('T')[0];
+      const diaKey = row.dia; // 'YYYY-MM-DD' local, já vem como texto do resumo
       const diaDoMes = parseInt(diaKey.split('-')[2], 10);
       if (!pontosMap.has(diaKey)) {
         pontosMap.set(diaKey, {
@@ -1684,43 +1665,8 @@ export class EquipamentosDadosService {
 
     this.logger.log(`⚡ [V2 ANO] ${equipsFiltrados.length} equipamentos, ${anoNum}`);
 
-    const dadosAgregados = await this.prisma.$queryRaw<Array<{
-      mes: Date;
-      equipamento_id: string;
-      energia_total: number;
-      potencia_media: number;
-      num_leituras: number;
-    }>>`
-      SELECT mes, equipamento_id,
-             SUM(dia_kwh) AS energia_total,
-             AVG(dia_pot) AS potencia_media,
-             SUM(n) AS num_leituras
-      FROM (
-        SELECT
-          DATE_TRUNC('month', timestamp_dados AT TIME ZONE 'America/Sao_Paulo')::date AS mes,
-          DATE_TRUNC('day', timestamp_dados AT TIME ZONE 'America/Sao_Paulo') AS dia,
-          equipamento_id,
-          CASE
-            WHEN COUNT(dados->'energy'->>'daily_yield') >= 1
-            THEN MAX((dados->'energy'->>'daily_yield')::numeric)
-            -- Sem contador confiável (Power Meter só com Pt; energia_kwh esparsa): potência
-            -- média × horas cobertas pelas leituras. Com energia_kwh em quase toda leitura, soma.
-            WHEN COUNT(energia_kwh) < COUNT(*) / 2 AND COUNT(potencia_ativa_kw) > 0
-            THEN AVG(potencia_ativa_kw) * EXTRACT(EPOCH FROM (MAX(timestamp_dados) - MIN(timestamp_dados))) / 3600
-            ELSE SUM(energia_kwh)
-          END AS dia_kwh,
-          AVG(potencia_ativa_kw) AS dia_pot,
-          COUNT(*) AS n
-        FROM equipamentos_dados
-        WHERE equipamento_id = ANY(${ids}::text[])
-          AND timestamp_dados >= ${dataInicio}
-          AND timestamp_dados < ${dataFim}
-          AND (potencia_ativa_kw IS NULL OR potencia_ativa_kw < ${CAP_POTENCIA_GLITCH_KW})
-        GROUP BY mes, dia, equipamento_id
-      ) t
-      GROUP BY mes, equipamento_id
-      ORDER BY mes ASC
-    `;
+    // Soma por mês do resumo diário (dias fechados guardados + ontem/hoje na hora).
+    const dadosAgregados = agruparPorMes(await this.agregado.porDia(ids, `${anoNum}-01-01`, `${anoNum + 1}-01-01`));
 
     const equipamentosDb = await this.prisma.equipamentos.findMany({
       where: { id: { in: ids } },
@@ -1734,9 +1680,8 @@ export class EquipamentosDadosService {
       // Extrair ano/mes do toISOString() em UTC (bate com AT TIME ZONE
       // 'America/Sao_Paulo' do SQL). NUNCA usar getMonth/getFullYear do Date
       // raw — eles convertem pra TZ local do Node e desalinham vs. o SQL.
-      const isoDay = row.mes.toISOString().split('T')[0]; // YYYY-MM-DD
-      const [, mesStr] = isoDay.split('-');
-      const mesKey = isoDay.slice(0, 7); // YYYY-MM
+      const mesKey = row.mes; // YYYY-MM local
+      const mesStr = mesKey.slice(5, 7);
       const mesNumero = parseInt(mesStr, 10);
 
       if (!pontosMap.has(mesKey)) {
@@ -1805,11 +1750,6 @@ export class EquipamentosDadosService {
 
 const LIMITE_EQUIPAMENTOS = 50;
 const MAX_DIAS_CUSTOM = 31;
-// Frame com potencia >= 1 GW e overflow UINT do Modbus (ex: total_yield=2^32,
-// potencia=isso/1000=4.29 GW, daily_yield=2^16/10=6553.5). Nenhum device real
-// chega perto de 1 GW, entao descartar a leitura inteira por esse sinal limpa
-// os 3 campos de uma vez — sem teto em daily_yield (que teria falso-positivo).
-const CAP_POTENCIA_GLITCH_KW = 1_000_000;
 
 export interface EquipamentoAgregacaoConfig {
   id: string;
