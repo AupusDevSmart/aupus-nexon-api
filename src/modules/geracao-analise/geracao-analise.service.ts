@@ -6,12 +6,16 @@ import {
   outrasPerdas, pctEsperado, potenciaEsperadaKw, potenciaEstavel,
 } from './geracao-calculo';
 import {
-  DIAS_SEMANA, diaLocal, diasEntre, diasNoMes, horaLocal, inicioDoDiaUtc, isoLocal, janelaDoPeriodo, MESES,
-  Periodo, PERIODOS, somarDias, sqlUtc,
+  ANO_MINIMO_TOTAL, DIAS_SEMANA, diaLocal, diasEntre, diasNoMes, horaLocal, inicioDoDiaUtc, isoLocal, janelaDoPeriodo,
+  MESES, Periodo, PERIODOS, somarDias, sqlUtc,
 } from './geracao-datas';
 import { ContextoUsina, GeracaoConfigService } from './geracao-config.service';
 import { IrradianciaService } from './irradiancia/irradiancia.service';
-import { sqlNum } from './geracao-sql';
+import { ColunaOpcional, FILTRO_TON, POTENCIA_KW, sqlNum, YIELD_KWH, YIELD_MAX_KWH } from './geracao-sql';
+import { DiaFonteCalc, FonteGeracaoService } from './fonte-geracao.service';
+import {
+  agregarTonDia, blocosSolares, DiaFonte, resumirFontes, SOLAR_FIM_H, SOLAR_INICIO_H, TonDia, TonInversorDia,
+} from './geracao-fonte';
 
 /** Leitura agregada de um inversor num intervalo de 15 min. */
 interface BucketInversor {
@@ -22,6 +26,8 @@ interface BucketInversor {
   falha: boolean;
   desligado: boolean;
   limiteAtivo: boolean;
+  /** MAX(daily_yield) válido no intervalo (kWh); null = sem daily_yield. */
+  y: number | null;
 }
 
 export interface Intervalo {
@@ -43,19 +49,23 @@ export interface ResumoDia {
   limitacaoExternaKwh: number;
   intervalosComDado: number;
   intervalosComEsperado: number;
+  /** kWh da TON no dia (Σ MAX(daily_yield) dos inversores, NEXON-37); null = sem leitura. */
+  kwhTon: number | null;
+  /** Todo inversor com leitura em ≥ 70% dos blocos solares. */
+  tonCompleta: boolean;
 }
 
-const POTENCIA_KW = Prisma.sql`COALESCE(potencia_ativa_kw,
-  ${sqlNum("dados->'power'->>'active_total'")} / 1000.0,
-  ${sqlNum("dados->>'potencia_kw'")},
-  ${sqlNum("dados->>'active_power'")} / 1000.0)`;
-
-/** Hash do que muda o resultado de um dia: config mudou → o dia em cache não vale. */
-export function hashConfig(ctx: ContextoUsina): string {
+/**
+ * Hash do que muda o resultado de um dia: config mudou → o dia em cache não vale.
+ * `versao` muda quando o cálculo do dia muda (NEXON-37: TON sem NUVEM_FUSION + kWh da TON no
+ * cache; sem as colunas do SQL 2026-10-21 o hash é outro, e o dia é refeito quando o SQL entra).
+ */
+export function hashConfig(ctx: ContextoUsina, versao = ''): string {
   const c = ctx.config;
   return createHash('sha1').update(JSON.stringify([
     c.fonte, c.kwpDc, ctx.potenciaAcKw, c.fatorDesempenho, c.inclinacaoGraus, c.azimuteGraus,
     c.solarimetroEquipamentoId, c.solarimetroMedicao, ctx.inversores.map((i) => [i.id, i.potenciaKw]),
+    c.fonteGeracao, versao,
   ])).digest('hex');
 }
 
@@ -66,6 +76,17 @@ const DIAS_REVALIDAR = 7;
 const r1 = (v: number) => Math.round(v * 10) / 10;
 const r2 = (v: number) => Math.round(v * 100) / 100;
 const rn = (v: number | null) => (v == null ? null : r2(v));
+/** Período Total: anos de dias (diasEntre limita a ~1 ano por padrão). */
+const SEM_LIMITE = 20_000;
+/** Versão do cálculo do dia (entra no hash do cache). */
+const VERSAO_CACHE = 'fonte-v1';
+
+/** TON de cada dia a partir dos resumos (cache diário da análise). */
+function tonDosResumos(resumos: Iterable<ResumoDia>): Map<string, TonDia> {
+  const m = new Map<string, TonDia>();
+  for (const r of resumos) m.set(r.dia, { kwh: r.kwhTon, completa: r.tonCompleta });
+  return m;
+}
 
 @Injectable()
 export class GeracaoAnaliseService {
@@ -76,7 +97,14 @@ export class GeracaoAnaliseService {
     private readonly scope: PermissionScopeService,
     private readonly configs: GeracaoConfigService,
     private readonly irradiancia: IrradianciaService,
+    private readonly fontes: FonteGeracaoService,
   ) {}
+
+  /** geracao_analise_diaria.kwh_ton/ton_completa (SQL 2026-10-21). */
+  private readonly colunasTon = new ColunaOpcional(/kwh_ton|ton_completa/);
+  private versao(): string {
+    return this.colunasTon.disponivel() ? VERSAO_CACHE : `${VERSAO_CACHE}-sem-ton`;
+  }
 
   // ── Leitura dos inversores ────────────────────────────────────────────────
 
@@ -89,15 +117,17 @@ export class GeracaoAnaliseService {
              AVG(GREATEST(p, 0))::float8 AS media, MIN(p)::float8 AS min, MAX(p)::float8 AS max, COUNT(*)::int AS n,
              bool_or(st ~* '(fault|falha|alarm|trip|erro)') AS falha,
              bool_or(st ~* '(stop|shutdown|deslig|emergenc|power ?off)') AS desligado,
-             MIN(lim)::float8 AS lim
+             MIN(lim)::float8 AS lim,
+             MAX(CASE WHEN y >= 0 AND y < ${YIELD_MAX_KWH} THEN y END)::float8 AS y
       FROM (
         SELECT equipamento_id, timestamp_dados,
-               ${POTENCIA_KW} AS p,
+               ${POTENCIA_KW} AS p, ${YIELD_KWH} AS y,
                COALESCE(dados->'status'->>'work_state_text', '') AS st,
                ${sqlNum("COALESCE(dados->'limits'->>'active_power_pct', dados->>'power_limit_pct', dados->'power'->>'limit_pct')")} AS lim
         FROM equipamentos_dados
         WHERE equipamento_id = ANY(${ids}::bpchar[])
           AND timestamp_dados >= ${sqlUtc(ini)}::timestamp AND timestamp_dados < ${sqlUtc(fim)}::timestamp
+          AND ${FILTRO_TON}
       ) x
       WHERE p IS NOT NULL AND abs(p) < 1000000
       GROUP BY 1, 2`;
@@ -107,6 +137,7 @@ export class GeracaoAnaliseService {
         media: Number(r.media) || 0, min: r.min, max: r.max, leituras: Number(r.n) || 0,
         falha: r.falha === true, desligado: r.desligado === true,
         limiteAtivo: r.lim != null && Number(r.lim) >= 0 && Number(r.lim) < 100,
+        y: r.y == null ? null : Number(r.y),
       });
       out.set(r.eq, m);
     }
@@ -150,10 +181,15 @@ export class GeracaoAnaliseService {
    * real, esperado e a perda classificada (seção 4).
    */
   async intervalos(ctx: ContextoUsina, diaInicio: string, diaFim: string, agora: Date): Promise<Intervalo[]> {
+    return (await this.calcular(ctx, diaInicio, diaFim, agora)).ints;
+  }
+
+  /** Intervalos + TON de cada dia (kWh por daily_yield e completude), numa leitura só. */
+  async calcular(ctx: ContextoUsina, diaInicio: string, diaFim: string, agora: Date): Promise<{ ints: Intervalo[]; ton: Map<string, TonDia> }> {
     const ini = inicioDoDiaUtc(diaInicio);
     const fimDia = inicioDoDiaUtc(somarDias(diaFim, 1));
     const fim = new Date(Math.min(fimDia.getTime(), agora.getTime()));
-    if (fim <= ini) return [];
+    if (fim <= ini) return { ints: [], ton: new Map() };
     const ids = ctx.inversores.map((i) => i.id);
     const [porInversor, irr] = await Promise.all([
       this.buckets(ids, ini, fim),
@@ -197,11 +233,37 @@ export class GeracaoAnaliseService {
         limitacaoExternaKw: perdas?.limitacaoExternaKw ?? 0,
       });
     }
+    return { ints: out, ton: this.tonDosBuckets(ctx, porInversor, diaInicio, diaFim, agora) };
+  }
+
+  /** TON por dia a partir dos buckets: Σ MAX(daily_yield) (ou integral) e cobertura solar. */
+  private tonDosBuckets(
+    ctx: ContextoUsina, porInversor: Map<string, Map<number, BucketInversor>>, diaInicio: string, diaFim: string, agora: Date,
+  ): Map<string, TonDia> {
+    const porDia = new Map<string, Map<string, TonInversorDia>>();
+    for (const [eq, m] of porInversor) {
+      for (const [t, b] of m) {
+        const dia = diaLocal(new Date(t));
+        const h = Math.floor((t - inicioDoDiaUtc(dia).getTime()) / 3_600_000);
+        const doDia = porDia.get(dia) ?? new Map<string, TonInversorDia>();
+        porDia.set(dia, doDia);
+        const a = doDia.get(eq) ?? { yieldKwh: null, integralKwh: 0, blocosSolares: 0 };
+        if (b.y != null && (a.yieldKwh == null || b.y > a.yieldKwh)) a.yieldKwh = b.y;
+        a.integralKwh += b.media * INTERVALO_H;
+        if (h >= SOLAR_INICIO_H && h < SOLAR_FIM_H) a.blocosSolares++;
+        doDia.set(eq, a);
+      }
+    }
+    const hoje = diaLocal(agora);
+    const out = new Map<string, TonDia>();
+    for (const d of diasEntre(diaInicio, diaFim > hoje ? hoje : diaFim, SEM_LIMITE)) {
+      out.set(d, agregarTonDia([...(porDia.get(d)?.values() ?? [])], ctx.inversores.length, blocosSolares(d, agora)));
+    }
     return out;
   }
 
-  /** Soma os intervalos de um dia local num resumo. */
-  resumir(dia: string, intervalos: Intervalo[]): ResumoDia {
+  /** Soma os intervalos de um dia local num resumo (com a TON do dia, quando calculada). */
+  resumir(dia: string, intervalos: Intervalo[], ton?: TonDia): ResumoDia {
     let real = 0, esperado = 0, realCom = 0, indisp = 0, projeto = 0, externa = 0, comDado = 0, comEsperado = 0;
     for (const i of intervalos) {
       if (i.realKw != null) { real += i.realKw * INTERVALO_H; comDado++; }
@@ -224,6 +286,8 @@ export class GeracaoAnaliseService {
       limitacaoExternaKwh: externa,
       intervalosComDado: comDado,
       intervalosComEsperado: comEsperado,
+      kwhTon: ton ? ton.kwh : comDado ? real : null,
+      tonCompleta: ton ? ton.completa : false,
     };
   }
 
@@ -238,7 +302,7 @@ export class GeracaoAnaliseService {
     if (passados.length) {
       const cache = await this.lerCache(ctx, passados);
       const limiteRevalidar = somarDias(hoje, -DIAS_REVALIDAR);
-      const hash = hashConfig(ctx);
+      const hash = hashConfig(ctx, this.versao());
       const faltando = passados.filter((d) => {
         const c = cache.get(d);
         if (!c || c.hash !== hash) return true;
@@ -256,14 +320,17 @@ export class GeracaoAnaliseService {
       const blocos = blocosContiguos(faltando, 31);
       for (let i = 0; i < blocos.length; i += 4) {
         await Promise.all(blocos.slice(i, i + 4).map(async (bloco) => {
-          const ints = await this.intervalos(ctx, bloco[0], bloco[bloco.length - 1], agora);
-          const resumos = bloco.map((d) => this.resumir(d, doDia(ints, d)));
+          const { ints, ton } = await this.calcular(ctx, bloco[0], bloco[bloco.length - 1], agora);
+          const resumos = bloco.map((d) => this.resumir(d, doDia(ints, d), ton.get(d)));
           await this.gravarCache(ctx, resumos);
           for (const r of resumos) out.set(r.dia, r);
         }));
       }
     }
-    if (dias.includes(hoje)) out.set(hoje, this.resumir(hoje, await this.intervalos(ctx, hoje, hoje, agora)));
+    if (dias.includes(hoje)) {
+      const { ints, ton } = await this.calcular(ctx, hoje, hoje, agora);
+      out.set(hoje, this.resumir(hoje, ints, ton.get(hoje)));
+    }
     return out;
   }
 
@@ -277,7 +344,27 @@ export class GeracaoAnaliseService {
   }
 
   private async lerCache(ctx: ContextoUsina, dias: string[]): Promise<Map<string, { hash: string | null; calculadoEm: number; resumo: ResumoDia }>> {
-    const rows = await this.prisma.$queryRaw<any[]>`
+    const comTon = this.colunasTon.disponivel();
+    let rows: any[] | null = null;
+    if (comTon) {
+      try {
+        rows = await this.prisma.$queryRaw<any[]>`
+          SELECT to_char(dia, 'YYYY-MM-DD') AS dia, real_kwh::float8 AS real, esperado_kwh::float8 AS esperado,
+                 COALESCE(real_com_esperado_kwh, 0)::float8 AS real_com, indisponibilidade_kwh::float8 AS indisp,
+                 limitacao_projeto_kwh::float8 AS projeto, limitacao_externa_kwh::float8 AS externa,
+                 intervalos_com_dado AS n, intervalos_com_esperado AS ne, config_hash,
+                 to_char(calculado_em, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS calculado_em,
+                 kwh_ton::float8 AS kwh_ton, ton_completa
+          FROM geracao_analise_diaria
+          WHERE unidade_id = ${ctx.unidade.id} AND dia = ANY(${dias}::date[])`;
+      } catch (e) {
+        if (!this.colunasTon.ausente(e)) throw e;
+        this.logger.warn('[analise] colunas kwh_ton/ton_completa ausentes (SQL 2026-10-21 não aplicado): TON pela integral');
+      }
+    }
+    // Sem as colunas (SQL não aplicado): kWh da TON = integral da potência; completa ≈ 70% de 48 blocos.
+    const semTon = rows == null;
+    rows ??= await this.prisma.$queryRaw<any[]>`
       SELECT to_char(dia, 'YYYY-MM-DD') AS dia, real_kwh::float8 AS real, esperado_kwh::float8 AS esperado,
              COALESCE(real_com_esperado_kwh, 0)::float8 AS real_com, indisponibilidade_kwh::float8 AS indisp,
              limitacao_projeto_kwh::float8 AS projeto, limitacao_externa_kwh::float8 AS externa,
@@ -292,34 +379,46 @@ export class GeracaoAnaliseService {
         dia: r.dia, realKwh: r.real, esperadoKwh: r.esperado, realComEsperadoKwh: r.real_com,
         indisponibilidadeKwh: r.indisp, limitacaoProjetoKwh: r.projeto, limitacaoExternaKwh: r.externa,
         intervalosComDado: Number(r.n) || 0, intervalosComEsperado: Number(r.ne) || 0,
+        kwhTon: semTon ? (r.real ?? null) : (r.kwh_ton ?? null),
+        tonCompleta: semTon ? (Number(r.n) || 0) >= 34 : r.ton_completa === true,
       },
     }]));
   }
 
   private async gravarCache(ctx: ContextoUsina, resumos: ResumoDia[]): Promise<void> {
     if (!resumos.length) return;
-    const hash = hashConfig(ctx);
+    const comTon = this.colunasTon.disponivel();
+    const hash = hashConfig(ctx, this.versao());
     const values = resumos.map((r) => Prisma.sql`(${ctx.unidade.id}, ${r.dia}::date, ${rn(r.realKwh)}, ${rn(r.esperadoKwh)},
       ${r2(r.realComEsperadoKwh)}, ${r2(r.indisponibilidadeKwh)}, ${r2(r.limitacaoProjetoKwh)}, ${r2(r.limitacaoExternaKwh)},
-      ${r.intervalosComDado}, ${r.intervalosComEsperado}, ${ctx.config.fonte}, ${hash}, now())`);
-    await this.prisma.$executeRaw(Prisma.sql`
-      INSERT INTO geracao_analise_diaria (unidade_id, dia, real_kwh, esperado_kwh, real_com_esperado_kwh,
-        indisponibilidade_kwh, limitacao_projeto_kwh, limitacao_externa_kwh, intervalos_com_dado,
-        intervalos_com_esperado, fonte, config_hash, calculado_em)
-      VALUES ${Prisma.join(values)}
-      ON CONFLICT (unidade_id, dia) DO UPDATE SET
-        real_kwh = EXCLUDED.real_kwh, esperado_kwh = EXCLUDED.esperado_kwh,
-        real_com_esperado_kwh = EXCLUDED.real_com_esperado_kwh,
-        indisponibilidade_kwh = EXCLUDED.indisponibilidade_kwh, limitacao_projeto_kwh = EXCLUDED.limitacao_projeto_kwh,
-        limitacao_externa_kwh = EXCLUDED.limitacao_externa_kwh, intervalos_com_dado = EXCLUDED.intervalos_com_dado,
-        intervalos_com_esperado = EXCLUDED.intervalos_com_esperado, fonte = EXCLUDED.fonte,
-        config_hash = EXCLUDED.config_hash, calculado_em = now()`);
+      ${r.intervalosComDado}, ${r.intervalosComEsperado}, ${ctx.config.fonte}, ${hash}, now()
+      ${comTon ? Prisma.sql`, ${rn(r.kwhTon)}, ${r.tonCompleta}` : Prisma.empty})`);
+    try {
+      await this.prisma.$executeRaw(Prisma.sql`
+        INSERT INTO geracao_analise_diaria (unidade_id, dia, real_kwh, esperado_kwh, real_com_esperado_kwh,
+          indisponibilidade_kwh, limitacao_projeto_kwh, limitacao_externa_kwh, intervalos_com_dado,
+          intervalos_com_esperado, fonte, config_hash, calculado_em
+          ${comTon ? Prisma.sql`, kwh_ton, ton_completa` : Prisma.empty})
+        VALUES ${Prisma.join(values)}
+        ON CONFLICT (unidade_id, dia) DO UPDATE SET
+          real_kwh = EXCLUDED.real_kwh, esperado_kwh = EXCLUDED.esperado_kwh,
+          real_com_esperado_kwh = EXCLUDED.real_com_esperado_kwh,
+          indisponibilidade_kwh = EXCLUDED.indisponibilidade_kwh, limitacao_projeto_kwh = EXCLUDED.limitacao_projeto_kwh,
+          limitacao_externa_kwh = EXCLUDED.limitacao_externa_kwh, intervalos_com_dado = EXCLUDED.intervalos_com_dado,
+          intervalos_com_esperado = EXCLUDED.intervalos_com_esperado, fonte = EXCLUDED.fonte,
+          ${comTon ? Prisma.sql`kwh_ton = EXCLUDED.kwh_ton, ton_completa = EXCLUDED.ton_completa,` : Prisma.empty}
+          config_hash = EXCLUDED.config_hash, calculado_em = now()`);
+    } catch (e) {
+      if (!comTon || !this.colunasTon.ausente(e)) throw e;
+      // Coluna sumiu entre a leitura e a gravação: grava sem ela (hash da versão sem TON).
+      await this.gravarCache(ctx, resumos);
+    }
   }
 
   /** Recalcula e grava um dia passado (job das 06h). Devolve os intervalos para os eventos. */
   async recalcularDia(ctx: ContextoUsina, dia: string, agora: Date): Promise<Intervalo[]> {
-    const ints = await this.intervalos(ctx, dia, dia, agora);
-    await this.gravarCache(ctx, [this.resumir(dia, ints)]);
+    const { ints, ton } = await this.calcular(ctx, dia, dia, agora);
+    await this.gravarCache(ctx, [this.resumir(dia, ints, ton.get(dia))]);
     return ints;
   }
 
@@ -353,13 +452,25 @@ export class GeracaoAnaliseService {
       throw new BadRequestException('data deve ser um dia válido no formato YYYY-MM-DD');
     }
     const referencia = dataQ && dataQ <= hoje ? dataQ : hoje;
-    const janela = janelaDoPeriodo(periodo, referencia, hoje);
+    let janela = janelaDoPeriodo(periodo, referencia, hoje);
 
     const ctx = await this.configs.contexto(uid);
     const ids = ctx.inversores.map((i) => i.id);
     const comFonte = ctx.config.fonte !== 'nenhuma';
     const tarifa = ctx.config.exibirRs ? ctx.tarifaRsKwh : null;
     const rs = (kwh: number | null) => (tarifa != null && kwh != null ? r2(kwh * tarifa) : null);
+
+    const [primeiro, primeiroNuvem, temNuvem] = await Promise.all([
+      this.primeiroDia(ids),
+      this.fontes.primeiroDiaNuvem(uid),
+      this.fontes.temNuvem(uid),
+    ]);
+    // Primeiro dia com geração em qualquer fonte (Total e histórico do fechamento).
+    const primeiroGeral = [primeiro, primeiroNuvem].filter((d): d is string => !!d).sort()[0] ?? null;
+    if (periodo === 'total') {
+      const anoIni = Math.max(ANO_MINIMO_TOTAL, Number((primeiroGeral ?? hoje).slice(0, 4)));
+      janela = { ...janela, inicio: `${Math.min(anoIni, Number(hoje.slice(0, 4)))}-01-01` };
+    }
 
     const base = {
       unidade_id: ctx.unidade.id,
@@ -377,89 +488,133 @@ export class GeracaoAnaliseService {
         potencia_ac_kw: ctx.potenciaAcKw,
         exibir_rs: ctx.config.exibirRs,
         tarifa_rs_kwh: tarifa != null ? Math.round(tarifa * 10000) / 10000 : null,
+        fonte_geracao: ctx.config.fonteGeracao,
       },
       tem_inversor: ids.length > 0,
     };
-    const primeiro = await this.primeiroDia(ids);
     if (!ids.length || !primeiro) {
       // Sem inversor ou inversor que nunca mandou leitura: a tela mostra o gráfico antigo.
-      return { ...base, tem_dados: false, agora: null, pontos: [], resumo: null, perdas: null, fechamento: null, previsao_amanha: null };
+      return {
+        ...base, tem_dados: false, agora: null, pontos: [], resumo: null, perdas: null, fechamento: null, previsao_amanha: null,
+        fonte_geracao: {
+          config: ctx.config.fonteGeracao, escolhida: null, divergem: false, selo: null, tem_nuvem: temNuvem,
+          kwh_ton: null, kwh_nuvem: null,
+        },
+      };
     }
 
     let pontos: any[];
     let resumos: ResumoDia[];
+    let ints: Intervalo[] = [];
+    if (periodo === 'dia') {
+      const calc = await this.calcular(ctx, referencia, referencia, agora);
+      ints = calc.ints;
+      resumos = [this.resumir(referencia, calc.ints, calc.ton.get(referencia))];
+      if (referencia < hoje) await this.gravarCache(ctx, resumos).catch(() => undefined);
+    } else {
+      const dias = diasEntre(janela.inicio, janela.fim, SEM_LIMITE);
+      const mapa = await this.resumosDiarios(ctx, dias, agora, primeiro);
+      resumos = dias.map((d) => mapa.get(d)).filter((r): r is ResumoDia => !!r);
+    }
+    // Fonte de cada dia (TON do cache × nuvem ao vivo: a escolha nunca fica congelada no cache).
+    const escolhas = await this.fontes.escolherComTon(
+      uid, ids, tonDosResumos(resumos), janela.inicio, janela.fim, agora, ctx.config.fonteGeracao,
+    );
+    const diasFonte = [...escolhas.values()];
+    const resumoPorDia = new Map(resumos.map((r) => [r.dia, r]));
+    const kwhPonto = (dias: DiaFonte[]) => {
+      const f = resumirFontes(dias);
+      return { real: rn(f.kwh), fonte: f.escolhida, kwh_ton: rn(f.kwhTon), kwh_nuvem: rn(f.kwhNuvem), divergem: f.divergem };
+    };
 
     if (periodo === 'dia') {
-      const ints = await this.intervalos(ctx, referencia, referencia, agora);
-      const resumo = this.resumir(referencia, ints);
-      resumos = [resumo];
+      const esc = escolhas.get(referencia);
+      // Nuvem escolhida: a curva sai do horário da nuvem (ou do fallback Fusion); sem curva, fica a da TON.
+      const curva = esc?.fonte === 'nuvem' ? await this.fontes.curvaNuvem(uid, ids, referencia) : null;
       const inicioDia = inicioDoDiaUtc(referencia).getTime();
       const porInicio = new Map(ints.map((i) => [i.inicio, i]));
       pontos = Array.from({ length: 96 }, (_, k) => {
         const t = inicioDia + k * INTERVALO_MS;
         const i = porInicio.get(t);
+        const futuro = t > agora.getTime();
+        let realKw = i?.realKw ?? null;
+        if (curva) {
+          realKw = curva.kw.get(t) ?? null;
+          // Madrugada sem snapshot no horário = sem sol (o horário só vale das 06h em diante).
+          if (realKw == null && curva.origem === 'horaria' && !futuro && k < 5 * 4) realKw = 0;
+        }
         return {
           rotulo: horaLocal(new Date(t)),
           data: referencia,
           inicio: isoLocal(new Date(t)),
-          real_kw: i?.realKw != null ? r2(i.realKw) : null,
+          real_kw: realKw != null ? r2(realKw) : null,
           esperado_kw: i?.esperadoKw != null ? r2(i.esperadoKw) : null,
-          real_kwh: i?.realKw != null ? r2(i.realKw * INTERVALO_H) : null,
+          real_kwh: realKw != null ? r2(realKw * INTERVALO_H) : null,
           esperado_kwh: i?.esperadoKw != null ? r2(i.esperadoKw * INTERVALO_H) : null,
-          sem_dados: i?.realKw == null,
-          futuro: t > agora.getTime(),
+          sem_dados: realKw == null,
+          futuro,
+          fonte: curva ? 'nuvem' : 'ton',
         };
       });
-      if (referencia < hoje) await this.gravarCache(ctx, [resumo]).catch(() => undefined);
+    } else if (periodo === 'ano' || periodo === 'total') {
+      const grupos = periodo === 'ano'
+        ? MESES.map((rot, m) => ({ rotulo: rot, prefixo: `${janela.inicio.slice(0, 4)}-${String(m + 1).padStart(2, '0')}` }))
+        : Array.from({ length: Number(hoje.slice(0, 4)) - Number(janela.inicio.slice(0, 4)) + 1 }, (_, k) => {
+            const ano = String(Number(janela.inicio.slice(0, 4)) + k);
+            return { rotulo: ano, prefixo: ano };
+          });
+      pontos = grupos.map(({ rotulo, prefixo }) => {
+        const data = prefixo.length === 4 ? `${prefixo}-01-01` : `${prefixo}-01`;
+        const doGrupo = resumos.filter((r) => r.dia.startsWith(prefixo));
+        const comEsp = doGrupo.filter((r) => r.esperadoKwh != null);
+        const k = kwhPonto(diasFonte.filter((d) => d.data.startsWith(prefixo)));
+        return {
+          rotulo,
+          data,
+          real_kwh: k.real,
+          esperado_kwh: comFonte && comEsp.length ? r2(comEsp.reduce((s, r) => s + (r.esperadoKwh as number), 0)) : null,
+          sem_dados: k.real == null && data <= hoje,
+          futuro: data > hoje,
+          fonte: k.fonte,
+          kwh_ton: k.kwh_ton,
+          kwh_nuvem: k.kwh_nuvem,
+          divergem: k.divergem,
+        };
+      });
     } else {
-      const dias = diasEntre(janela.inicio, janela.fim);
-      const mapa = await this.resumosDiarios(ctx, dias, agora, primeiro);
-      resumos = dias.map((d) => mapa.get(d)).filter((r): r is ResumoDia => !!r);
-      if (periodo === 'ano') {
-        pontos = MESES.map((rot, m) => {
-          const prefixo = `${janela.inicio.slice(0, 4)}-${String(m + 1).padStart(2, '0')}`;
-          const doMes = resumos.filter((r) => r.dia.startsWith(prefixo));
-          const comReal = doMes.filter((r) => r.realKwh != null);
-          const comEsp = doMes.filter((r) => r.esperadoKwh != null);
-          return {
-            rotulo: rot,
-            data: `${prefixo}-01`,
-            real_kwh: comReal.length ? r2(comReal.reduce((s, r) => s + (r.realKwh as number), 0)) : null,
-            esperado_kwh: comFonte && comEsp.length ? r2(comEsp.reduce((s, r) => s + (r.esperadoKwh as number), 0)) : null,
-            sem_dados: !comReal.length && `${prefixo}-01` <= hoje,
-            futuro: `${prefixo}-01` > hoje,
-          };
-        });
-      } else {
-        pontos = dias.map((d) => {
-          const r = mapa.get(d);
-          return {
-            rotulo: periodo === 'semana' ? `${DIAS_SEMANA[diasEntre(janela.inicio, d).length - 1]} ${d.slice(8, 10)}` : d.slice(8, 10),
-            data: d,
-            real_kwh: r?.realKwh != null ? r2(r.realKwh) : null,
-            // Hoje o satélite está ~2 h atrás do real: o marcador parcial enganaria na barra.
-            esperado_kwh: comFonte && d < hoje && r?.esperadoKwh != null ? r2(r.esperadoKwh) : null,
-            sem_dados: d <= hoje && r?.realKwh == null,
-            futuro: d > hoje,
-          };
-        });
-      }
+      pontos = diasEntre(janela.inicio, janela.fim).map((d) => {
+        const r = resumoPorDia.get(d);
+        const f = escolhas.get(d);
+        return {
+          rotulo: periodo === 'semana' ? `${DIAS_SEMANA[diasEntre(janela.inicio, d).length - 1]} ${d.slice(8, 10)}` : d.slice(8, 10),
+          data: d,
+          real_kwh: f?.kwh != null ? r2(f.kwh) : null,
+          // Hoje o satélite está ~2 h atrás do real: o marcador parcial enganaria na barra.
+          esperado_kwh: comFonte && d < hoje && r?.esperadoKwh != null ? r2(r.esperadoKwh) : null,
+          sem_dados: d <= hoje && f?.kwh == null,
+          futuro: d > hoje,
+          fonte: f?.fonte ?? null,
+          kwh_ton: rn(f?.kwhTon ?? null),
+          kwh_nuvem: rn(f?.kwhNuvem ?? null),
+          divergem: f?.motivo === 'divergem',
+        };
+      });
     }
 
-    // Resumo e perdas do período
-    const energia = resumos.reduce((s, r) => s + (r.realKwh ?? 0), 0);
+    // Resumo: energia = kWh da fonte escolhida; esperado e perdas seguem pelos intervalos da TON.
+    const energia = diasFonte.reduce((s, d) => s + (d.kwh ?? 0), 0);
     const comEsperado = resumos.filter((r) => r.esperadoKwh != null);
     const esperado = comFonte && comEsperado.length ? comEsperado.reduce((s, r) => s + (r.esperadoKwh as number), 0) : null;
     const realCom = comEsperado.reduce((s, r) => s + r.realComEsperadoKwh, 0);
     const kwp = ctx.config.kwpDc;
-    const diasNoPeriodo = periodo === 'dia' ? 1 : diasEntre(janela.inicio, janela.fim > hoje ? hoje : janela.fim).length;
+    const diasNoPeriodo = periodo === 'dia' ? 1 : diasEntre(janela.inicio, janela.fim > hoje ? hoje : janela.fim, SEM_LIMITE).length;
     const resumo = {
       energia_kwh: r2(energia),
       kwh_kwp: kwp ? r2(energia / kwp) : null,
       esperado_kwh: rn(esperado),
       pct_esperado: esperado != null ? rn(pctEsperado(realCom, esperado)) : null,
       valor_rs: rs(energia),
-      dias_com_dados: resumos.filter((r) => r.realKwh != null).length,
+      dias_com_dados: diasFonte.filter((d) => d.kwh != null).length,
       dias_no_periodo: diasNoPeriodo,
     };
 
@@ -488,8 +643,28 @@ export class GeracaoAnaliseService {
       };
     }
 
+    const rf = resumirFontes(diasFonte);
+    const fonteGeracao = {
+      config: ctx.config.fonteGeracao,
+      escolhida: rf.escolhida,
+      divergem: rf.divergem,
+      selo: rf.selo,
+      tem_nuvem: temNuvem,
+      kwh_ton: rn(rf.kwhTon),
+      kwh_nuvem: rn(rf.kwhNuvem),
+      // Dia: 1 item; Semana/Mês: 1 por dia até hoje; Ano/Total: por ponto.
+      ...(periodo === 'dia' || periodo === 'semana' || periodo === 'mes'
+        ? {
+            dias: diasFonte.map((d) => ({
+              data: d.data, kwh: rn(d.kwh), kwh_ton: rn(d.kwhTon), kwh_nuvem: rn(d.kwhNuvem), kwh_manual: rn(d.kwhManual),
+              fonte: d.fonte, motivo: d.motivo, divergencia_pct: d.divergenciaPct,
+            })),
+          }
+        : {}),
+    };
+
     const [fechamento, previsao, potAgora] = await Promise.all([
-      this.fechamento(ctx, agora, primeiro, rs),
+      this.fechamento(ctx, agora, primeiro, primeiroGeral, rs),
       comFonte ? this.previsaoAmanha(ctx, agora, rs) : Promise.resolve(null),
       periodo === 'dia' && referencia === hoje ? this.potenciaAgora(ids, agora) : Promise.resolve(null),
     ]);
@@ -498,38 +673,72 @@ export class GeracaoAnaliseService {
       ? { potencia_kw: potAgora != null ? r2(potAgora) : null, gerando: (potAgora ?? 0) > limiarGerando }
       : null;
 
-    return { ...base, tem_dados: true, agora: agoraResp, pontos, resumo, perdas, fechamento, previsao_amanha: previsao };
+    return {
+      ...base, tem_dados: true, agora: agoraResp, pontos, resumo, perdas, fechamento, previsao_amanha: previsao,
+      fonte_geracao: fonteGeracao,
+    };
   }
 
-  /** Fechamento do mês corrente (GER-26..29), sem meta (GER-30). */
-  private async fechamento(ctx: ContextoUsina, agora: Date, primeiro: string | null, rs: (k: number | null) => number | null) {
+  /**
+   * Fonte e kWh escolhido de cada dia pedido (NEXON-37): TON do cache diário da análise ×
+   * nuvem ao vivo. Dias depois de hoje ficam de fora.
+   */
+  private async escolhasDosDias(ctx: ContextoUsina, dias: string[], agora: Date, primeiro: string | null): Promise<Map<string, DiaFonteCalc>> {
+    if (!dias.length) return new Map();
+    const ordenados = [...dias].sort();
+    const ids = ctx.inversores.map((i) => i.id);
+    const resumos = ids.length && primeiro ? await this.resumosDiarios(ctx, ordenados, agora, primeiro) : new Map<string, ResumoDia>();
+    const todos = await this.fontes.escolherComTon(
+      ctx.unidade.id, ids, tonDosResumos(resumos.values()), ordenados[0], ordenados[ordenados.length - 1], agora, ctx.config.fonteGeracao,
+    );
+    const pedidos = new Set(dias);
+    return new Map([...todos].filter(([d]) => pedidos.has(d)));
+  }
+
+  /**
+   * Geração de cada dia pela fonte escolhida (boletim semanal e quem mais precisar do mesmo
+   * número da análise). Unidade sem inversor: só nuvem/manual.
+   */
+  async geracaoEscolhida(unidadeId: string, diaIni: string, diaFim: string, agora = new Date()): Promise<Map<string, DiaFonteCalc>> {
+    const ctx = await this.configs.contexto(unidadeId.trim());
+    const hoje = diaLocal(agora);
+    const fim = diaFim > hoje ? hoje : diaFim;
+    if (diaIni > fim) return new Map();
+    const primeiro = await this.primeiroDia(ctx.inversores.map((i) => i.id));
+    return this.escolhasDosDias(ctx, diasEntre(diaIni, fim, SEM_LIMITE), agora, primeiro);
+  }
+
+  /** Fechamento do mês corrente (GER-26..29), sem meta (GER-30), pelo kWh da fonte escolhida. */
+  private async fechamento(
+    ctx: ContextoUsina, agora: Date, primeiro: string | null, primeiroGeral: string | null, rs: (k: number | null) => number | null,
+  ) {
     const hoje = diaLocal(agora);
     const [a, m, d] = hoje.split('-').map(Number);
     const nDias = diasNoMes(a, m);
     const mes = hoje.slice(0, 7);
     const completos = d > 1 ? diasEntre(`${mes}-01`, somarDias(hoje, -1)) : [];
-    const mapa = completos.length ? await this.resumosDiarios(ctx, completos, agora, primeiro) : new Map<string, ResumoDia>();
+    const mapa = await this.escolhasDosDias(ctx, completos, agora, primeiro);
 
-    // Média do mesmo mês nos anos anteriores (só anos com dado).
+    // Média do mesmo mês nos anos anteriores (só anos com dado, em qualquer fonte).
     let mediaHistorica: number | null = null;
-    if (primeiro) {
+    if (primeiroGeral) {
       const diasHist: string[] = [];
-      for (let ano = a - 1; ano >= Number(primeiro.slice(0, 4)); ano--) {
+      for (let ano = a - 1; ano >= Number(primeiroGeral.slice(0, 4)); ano--) {
         const ini = `${ano}-${String(m).padStart(2, '0')}-01`;
         const fim = `${ano}-${String(m).padStart(2, '0')}-${String(diasNoMes(ano, m)).padStart(2, '0')}`;
-        if (fim < primeiro) break;
-        diasHist.push(...diasEntre(ini < primeiro ? primeiro : ini, fim));
+        if (fim < primeiroGeral) break;
+        diasHist.push(...diasEntre(ini < primeiroGeral ? primeiroGeral : ini, fim));
       }
       if (diasHist.length) {
-        const hist = await this.resumosDiarios(ctx, diasHist, agora, primeiro);
-        const vals = [...hist.values()].map((r) => r.realKwh).filter((v): v is number => v != null);
+        const hist = await this.escolhasDosDias(ctx, diasHist, agora, primeiro);
+        const vals = [...hist.values()].map((r) => r.kwh).filter((v): v is number => v != null);
         // Exige um mês com cobertura razoável (≥ 20 dias) para valer como histórico.
         if (vals.length >= 20) mediaHistorica = vals.reduce((s, v) => s + v, 0) / vals.length;
       }
     }
 
     const f = fechamentoDoMes({
-      diasCompletos: completos.map((dd) => mapa.get(dd)?.realKwh ?? null),
+      diasCompletos: completos.map((dd) => mapa.get(dd)?.kwh ?? null),
       diasDoMes: nDias,
       diaHoje: d,
       mediaHistorica,

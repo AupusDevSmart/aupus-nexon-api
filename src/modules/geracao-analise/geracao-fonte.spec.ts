@@ -2,7 +2,7 @@ import {
   agregarTonDia, blocosSolares, DiaFonte, divergencia, EntradaFonte, escolherFonte, fonteDoGrupo,
   normalizarFonteGeracao, resumirFontes, seloFonte,
 } from './geracao-fonte';
-import { inicioDoDiaUtc } from './geracao-datas';
+import { inicioDoDiaUtc, janelaDoPeriodo } from './geracao-datas';
 
 const base: EntradaFonte = {
   config: 'automatico', kwhTon: null, tonCompleta: true, kwhNuvem: null, nuvemCompleta: true, kwhManual: null,
@@ -157,5 +157,13 @@ describe('fonte do período', () => {
       escolhida: 'mista', divergem: true, selo: 'Fontes divergem — usando TON', kwh: 330, kwhTon: 280, kwhNuvem: 279,
     });
     expect(resumirFontes([]).kwhTon).toBeNull();
+  });
+});
+
+describe('período Total', () => {
+  it('janela de 2020 ao fim do ano corrente, sem anterior/próximo', () => {
+    expect(janelaDoPeriodo('total', '2026-10-21', '2026-10-21')).toEqual({
+      periodo: 'total', referencia: '2026-10-21', inicio: '2020-01-01', fim: '2026-12-31', anterior: null, proximo: null,
+    });
   });
 });

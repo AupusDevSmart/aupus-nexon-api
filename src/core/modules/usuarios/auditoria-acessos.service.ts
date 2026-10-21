@@ -29,7 +29,9 @@ export type AcaoAuditoria =
   // NEXON-25 (Configurações › Notificações)
   | 'regra_notificacao'
   // NEXON-31 (unifilar: layout e agrupamentos)
-  | 'diagrama_layout';
+  | 'diagrama_layout'
+  // NEXON-37 (config "Usina" da análise de geração, inclusive a fonte da geração)
+  | 'usina_config';
 
 export interface RegistroAcesso {
   autorId: string | null;

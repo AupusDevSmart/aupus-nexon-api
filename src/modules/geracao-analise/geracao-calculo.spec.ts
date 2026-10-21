@@ -176,6 +176,14 @@ describe('config "Usina" (seção 7)', () => {
   it('diff só do que mudou', () => {
     expect(diffConfig({ kwp_dc: 10, fonte: 'nenhuma' }, { kwp_dc: '10', fonte: 'satelite' })).toEqual({ fonte: { de: 'nenhuma', para: 'satelite' } });
   });
+  it('fonte da geração: ausente mantém a gravada, inválida bloqueia, diff com rótulo', () => {
+    const base = { fonte: 'nenhuma', kwp_dc: 10 };
+    expect(validarConfig(base, []).fonte_geracao).toBe('automatico');
+    expect(validarConfig(base, [], 'nuvem').fonte_geracao).toBe('nuvem');
+    expect(validarConfig({ ...base, fonte_geracao: 'TON' }, [], 'nuvem').fonte_geracao).toBe('ton');
+    expect(() => validarConfig({ ...base, fonte_geracao: 'satelite' }, [])).toThrow(/Fonte da geração inválida/);
+    expect(diffConfig({ fonte_geracao: 'automatico' }, { fonte_geracao: 'ton' })).toEqual({ fonte_geracao: { de: 'automatico', para: 'ton' } });
+  });
   it('potência técnica em W vira kW', () => {
     expect(potenciaTecnicaKw('333000', 'W')).toBe(333);
     expect(potenciaTecnicaKw('333,5', 'kW')).toBe(333.5);

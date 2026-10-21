@@ -1,13 +1,18 @@
 import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService, Prisma, ScopedUser } from '@/core';
 import { capacidades, papelCanonico } from '@/core/modules/auth/papeis';
+import { AuditoriaAcessosService } from '@/core/modules/usuarios/auditoria-acessos.service';
+import type { ClienteInfo } from '@/core/common/cliente-info';
+import { FONTES_GERACAO, FonteGeracaoConfig, normalizarFonteGeracao } from './geracao-fonte';
+import { ColunaOpcional } from './geracao-sql';
 
 /**
  * Grupo "Usina" da configuração da instalação (NEXON-16, seção 7). Tabela `unidade_usina_config`.
  * Ver e editar: só a equipe Aupus (admin e analistas, PER-41); proprietário e operador nem
- * recebem o grupo (403 no controller). Toda gravação deixa trilha
- * campo a campo em `unidade_usina_config_historico` e um evento no Registro (`logs_mqtt`,
- * comando_semantico = 'usina.config').
+ * recebem o grupo (403 no controller). Fixar a fonte da geração (NEXON-37): só admin.
+ * Toda gravação deixa trilha campo a campo em `unidade_usina_config_historico`, um evento
+ * no Registro (`logs_mqtt`, comando_semantico = 'usina.config') e uma linha no audit log
+ * (`auditoria_acessos`, acao 'usina_config').
  */
 
 export const FONTES = ['satelite', 'solarimetro', 'nenhuma'] as const;
@@ -51,6 +56,8 @@ export interface ConfigUsina {
   fatorDesempenho: number;
   exibirRs: boolean;
   tarifaConcessionariaId: string | null;
+  /** Fonte da geração (NEXON-37): automatico | ton | nuvem. */
+  fonteGeracao: FonteGeracaoConfig;
   atualizadoEm: string | null;
   atualizadoPor: string | null;
   /** true = existe linha gravada para a unidade. */
@@ -78,6 +85,8 @@ export interface ConfigUsinaInput {
   fator_desempenho?: number | null;
   exibir_rs?: boolean;
   tarifa_concessionaria_id?: string | null;
+  /** automatico | ton | nuvem. Ausente = mantém a gravada. Só admin muda. */
+  fonte_geracao?: string | null;
 }
 
 const ROTULOS: Record<string, string> = {
@@ -91,7 +100,10 @@ const ROTULOS: Record<string, string> = {
   fator_desempenho: 'Fator de desempenho',
   exibir_rs: 'Exibir valores em R$',
   tarifa_concessionaria_id: 'Tarifa de referência',
+  fonte_geracao: 'Fonte da geração',
 };
+
+export const MSG_SO_ADMIN_FONTE = 'Só admin pode fixar a fonte da geração';
 
 const num = (v: any): number | null => {
   if (v == null || v === '') return null;
@@ -112,10 +124,12 @@ export function potenciaTecnicaKw(valor: string | null, unidade: string | null):
 export function validarConfig(
   input: ConfigUsinaInput,
   solarimetrosDaUnidade: string[],
+  fonteGeracaoAtual: FonteGeracaoConfig = 'automatico',
 ): {
   fonte: FonteIrradiancia; solarimetro_equipamento_id: string | null; solarimetro_medicao: 'GHI' | 'POA' | null;
   kwp_dc: number; potencia_ac_kw: number | null; inclinacao_graus: number | null; azimute_graus: number | null;
   fator_desempenho: number; exibir_rs: boolean; tarifa_concessionaria_id: string | null;
+  fonte_geracao: FonteGeracaoConfig;
 } {
   const fonte = String(input.fonte ?? 'nenhuma').trim().toLowerCase() as FonteIrradiancia;
   if (!FONTES.includes(fonte)) throw new BadRequestException('Fonte de irradiância inválida (satelite, solarimetro ou nenhuma).');
@@ -150,11 +164,20 @@ export function validarConfig(
     throw new BadRequestException('Inclinação e azimute são obrigatórios com fonte de irradiância.');
   }
   const exibirRs = input.exibir_rs === true;
+  let fonteGeracao = fonteGeracaoAtual;
+  if (input.fonte_geracao != null && input.fonte_geracao !== '') {
+    const f = String(input.fonte_geracao).trim().toLowerCase();
+    if (!(FONTES_GERACAO as readonly string[]).includes(f)) {
+      throw new BadRequestException('Fonte da geração inválida (automatico, ton ou nuvem).');
+    }
+    fonteGeracao = f as FonteGeracaoConfig;
+  }
   return {
     fonte, solarimetro_equipamento_id: solarimetro, solarimetro_medicao: medicao,
     kwp_dc: kwp, potencia_ac_kw: ac, inclinacao_graus: inclinacao, azimute_graus: azimute,
     fator_desempenho: Math.round(fator * 1000) / 1000, exibir_rs: exibirRs,
     tarifa_concessionaria_id: exibirRs ? input.tarifa_concessionaria_id?.trim() || null : null,
+    fonte_geracao: fonteGeracao,
   };
 }
 
@@ -173,11 +196,21 @@ export function diffConfig(antes: Record<string, any>, depois: Record<string, an
 @Injectable()
 export class GeracaoConfigService {
   private readonly logger = new Logger(GeracaoConfigService.name);
+  /** unidade_usina_config.fonte_geracao (SQL 2026-10-21): sem ela, 'automatico'. */
+  private readonly colunaFonte = new ColunaOpcional(/fonte_geracao/);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly auditoria: AuditoriaAcessosService,
+  ) {}
 
   podeEditar(user?: ScopedUser): boolean {
     return capacidades(papelCanonico(user?.role)).configUsina;
+  }
+
+  /** Fixar a fonte da geração: só papel canônico admin (super_admin/admin). */
+  podeFixarFonte(user?: ScopedUser): boolean {
+    return papelCanonico(user?.role) === 'admin';
   }
 
   async unidade(unidadeId: string): Promise<UnidadeUsina> {
@@ -234,6 +267,23 @@ export class GeracaoConfigService {
   }
 
   private async linha(unidadeId: string): Promise<any | null> {
+    if (this.colunaFonte.disponivel()) {
+      try {
+        const rows = await this.prisma.$queryRaw<any[]>`
+          SELECT c.fonte_geracao, c.fonte_irradiancia, c.solarimetro_equipamento_id, c.solarimetro_medicao,
+                 c.kwp_dc::float8 AS kwp_dc, c.potencia_ac_kw::float8 AS potencia_ac_kw,
+                 c.inclinacao_graus::float8 AS inclinacao_graus, c.azimute_graus::float8 AS azimute_graus,
+                 c.fator_desempenho::float8 AS fator_desempenho, c.exibir_rs, c.tarifa_concessionaria_id,
+                 to_char(c.updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS atualizado_em, TRIM(u.nome) AS atualizado_por
+          FROM unidade_usina_config c
+          LEFT JOIN usuarios u ON TRIM(u.id) = TRIM(c.updated_by)
+          WHERE c.unidade_id = ${unidadeId} LIMIT 1`;
+        return rows[0] ?? null;
+      } catch (e) {
+        if (!this.colunaFonte.ausente(e)) throw e;
+        this.logger.warn('[usina] coluna fonte_geracao ausente (SQL 2026-10-21 não aplicado): fonte = automatico');
+      }
+    }
     const rows = await this.prisma.$queryRaw<any[]>`
       SELECT c.fonte_irradiancia, c.solarimetro_equipamento_id, c.solarimetro_medicao,
              c.kwp_dc::float8 AS kwp_dc, c.potencia_ac_kw::float8 AS potencia_ac_kw,
@@ -272,6 +322,7 @@ export class GeracaoConfigService {
       fatorDesempenho: row?.fator_desempenho ?? 0.8,
       exibirRs: row?.exibir_rs === true,
       tarifaConcessionariaId: row?.tarifa_concessionaria_id?.trim() || null,
+      fonteGeracao: normalizarFonteGeracao(row?.fonte_geracao),
       atualizadoEm: row?.atualizado_em ?? null,
       atualizadoPor: row?.atualizado_por ?? null,
       gravada: !!row,
@@ -341,6 +392,7 @@ export class GeracaoConfigService {
       unidade_id: ctx.unidade.id,
       unidade_nome: ctx.unidade.nome,
       pode_editar: this.podeEditar(user),
+      pode_fixar_fonte: this.podeFixarFonte(user),
       config: {
         fonte: c.fonte,
         solarimetro_equipamento_id: c.solarimetroEquipamentoId,
@@ -352,6 +404,7 @@ export class GeracaoConfigService {
         fator_desempenho: c.fatorDesempenho,
         exibir_rs: c.exibirRs,
         tarifa_concessionaria_id: c.tarifaConcessionariaId, // null = concessionária da instalação
+        fonte_geracao: c.fonteGeracao,
         atualizado_em: c.atualizadoEm,
         atualizado_por: c.atualizadoPor,
       },
@@ -368,35 +421,45 @@ export class GeracaoConfigService {
    * Grava a config (PUT). Devolve as alterações para o chamador limpar o cache da análise.
    * Trilha: histórico campo a campo + evento no Registro. A trilha nunca derruba a gravação.
    */
-  async salvar(unidadeId: string, input: ConfigUsinaInput, user?: ScopedUser): Promise<Record<string, { de: any; para: any }>> {
+  async salvar(
+    unidadeId: string, input: ConfigUsinaInput, user?: ScopedUser, cliente?: ClienteInfo,
+  ): Promise<Record<string, { de: any; para: any }>> {
     if (!this.podeEditar(user)) {
       throw new ForbiddenException('Recurso fora do escopo do usuario');
     }
     const ctx = await this.contexto(unidadeId);
     const uid = ctx.unidade.id;
     const solarimetros = await this.solarimetros(uid);
-    const v = validarConfig(input, solarimetros.map((s) => s.id));
-
     const c = ctx.config;
-    const antes = c.gravada
+    const v = validarConfig(input, solarimetros.map((s) => s.id), c.fonteGeracao);
+
+    // Sem linha gravada a fonte já é 'automatico': gravar a primeira config não "muda" a fonte.
+    const antes: Record<string, any> = c.gravada
       ? {
           fonte: c.fonte, solarimetro_equipamento_id: c.solarimetroEquipamentoId, solarimetro_medicao: c.solarimetroMedicao,
           kwp_dc: c.kwpDc, potencia_ac_kw: c.potenciaAcKwConfig, inclinacao_graus: c.inclinacaoGraus,
           azimute_graus: c.azimuteGraus, fator_desempenho: c.fatorDesempenho, exibir_rs: c.exibirRs,
-          tarifa_concessionaria_id: c.tarifaConcessionariaId,
+          tarifa_concessionaria_id: c.tarifaConcessionariaId, fonte_geracao: c.fonteGeracao,
         }
-      : {};
+      : { fonte_geracao: c.fonteGeracao };
     const alteracoes = diffConfig(antes, v);
     if (!Object.keys(alteracoes).length) return alteracoes;
+    const mudouFonte = 'fonte_geracao' in alteracoes;
+    if (mudouFonte && !this.podeFixarFonte(user)) throw new ForbiddenException(MSG_SO_ADMIN_FONTE);
 
     const userId = user?.id?.trim() || null;
-    await this.prisma.$executeRaw(Prisma.sql`
+    const comColuna = this.colunaFonte.disponivel();
+    if (mudouFonte && !comColuna) {
+      throw new BadRequestException('Fixar a fonte da geração depende do SQL 2026-10-21_fonte_geracao.sql, ainda não aplicado.');
+    }
+    const gravar = (comFonte: boolean) => this.prisma.$executeRaw(Prisma.sql`
       INSERT INTO unidade_usina_config
         (unidade_id, fonte_irradiancia, solarimetro_equipamento_id, solarimetro_medicao, kwp_dc, potencia_ac_kw,
-         inclinacao_graus, azimute_graus, fator_desempenho, exibir_rs, tarifa_concessionaria_id, updated_by, updated_at)
+         inclinacao_graus, azimute_graus, fator_desempenho, exibir_rs, tarifa_concessionaria_id,
+         ${comFonte ? Prisma.sql`fonte_geracao,` : Prisma.empty} updated_by, updated_at)
       VALUES (${uid}, ${v.fonte}, ${v.solarimetro_equipamento_id}, ${v.solarimetro_medicao}, ${v.kwp_dc}, ${v.potencia_ac_kw},
               ${v.inclinacao_graus}, ${v.azimute_graus}, ${v.fator_desempenho}, ${v.exibir_rs}, ${v.tarifa_concessionaria_id},
-              ${userId}, now())
+              ${comFonte ? Prisma.sql`${v.fonte_geracao},` : Prisma.empty} ${userId}, now())
       ON CONFLICT (unidade_id) DO UPDATE SET
         fonte_irradiancia = EXCLUDED.fonte_irradiancia,
         solarimetro_equipamento_id = EXCLUDED.solarimetro_equipamento_id,
@@ -405,24 +468,42 @@ export class GeracaoConfigService {
         inclinacao_graus = EXCLUDED.inclinacao_graus, azimute_graus = EXCLUDED.azimute_graus,
         fator_desempenho = EXCLUDED.fator_desempenho, exibir_rs = EXCLUDED.exibir_rs,
         tarifa_concessionaria_id = EXCLUDED.tarifa_concessionaria_id,
+        ${comFonte ? Prisma.sql`fonte_geracao = EXCLUDED.fonte_geracao,` : Prisma.empty}
         updated_by = EXCLUDED.updated_by, updated_at = now()`);
+    try {
+      await gravar(comColuna);
+    } catch (e) {
+      if (!comColuna || !this.colunaFonte.ausente(e)) throw e;
+      if (mudouFonte) {
+        throw new BadRequestException('Fixar a fonte da geração depende do SQL 2026-10-21_fonte_geracao.sql, ainda não aplicado.');
+      }
+      await gravar(false);
+    }
 
-    await this.registrarTrilha(ctx, alteracoes, user).catch((e) =>
+    const nome = await this.nomeUsuario(userId).catch(() => null);
+    await this.registrarTrilha(ctx, alteracoes, user, nome).catch((e) =>
       this.logger.warn(`Trilha da config da usina ${uid} falhou: ${e?.message ?? e}`),
     );
+    await this.registrarAuditoria(ctx, alteracoes, user, nome, cliente);
     return alteracoes;
   }
 
-  private async registrarTrilha(ctx: ContextoUsina, alteracoes: Record<string, { de: any; para: any }>, user?: ScopedUser) {
+  private async nomeUsuario(userId: string | null): Promise<string | null> {
+    if (!userId) return null;
+    const r = await this.prisma.$queryRaw<Array<{ nome: string }>>`SELECT TRIM(nome) AS nome FROM usuarios WHERE id = ${userId}::bpchar LIMIT 1`;
+    return r[0]?.nome ?? null;
+  }
+
+  private resumoAlteracoes(alteracoes: Record<string, { de: any; para: any }>): string {
     const fmt = (v: any) => (v == null || v === '' ? '—' : typeof v === 'boolean' ? (v ? 'sim' : 'não') : String(v));
-    const partes = Object.entries(alteracoes).map(([k, d]) => `${ROTULOS[k] ?? k}: ${fmt(d.de)} → ${fmt(d.para)}`);
-    const resumo = `Configuração da usina alterada: ${partes.join('; ')}`.slice(0, 500);
+    return Object.entries(alteracoes).map(([k, d]) => `${ROTULOS[k] ?? k}: ${fmt(d.de)} → ${fmt(d.para)}`).join('; ');
+  }
+
+  private async registrarTrilha(
+    ctx: ContextoUsina, alteracoes: Record<string, { de: any; para: any }>, user: ScopedUser | undefined, nome: string | null,
+  ) {
+    const resumo = `Configuração da usina alterada: ${this.resumoAlteracoes(alteracoes)}`.slice(0, 500);
     const userId = user?.id?.trim() || null;
-    let nome: string | null = null;
-    if (userId) {
-      const r = await this.prisma.$queryRaw<Array<{ nome: string }>>`SELECT TRIM(nome) AS nome FROM usuarios WHERE id = ${userId}::bpchar LIMIT 1`;
-      nome = r[0]?.nome ?? null;
-    }
     await this.prisma.$executeRaw(Prisma.sql`
       INSERT INTO unidade_usina_config_historico (unidade_id, usuario_id, usuario_nome, usuario_papel, campos, alteracoes, resumo)
       VALUES (${ctx.unidade.id}, ${userId}, ${nome}, ${user?.role ?? null}, ${Object.keys(alteracoes)}::text[],
@@ -437,6 +518,49 @@ export class GeracaoConfigService {
           mensagem: resumo, usuario_id: userId, comando_semantico: 'usina.config',
         },
       });
+    }
+  }
+
+  /**
+   * Audit log (auditoria_acessos, acao 'usina_config'): toda alteração do grupo Usina, com a
+   * unidade (id e nome), quem (id, nome, papel), os campos e o de/para. Busca por unidade:
+   * unidade_ids / objeto_id; por campo: detalhes->'campos_alterados'. Nunca derruba a gravação.
+   */
+  private async registrarAuditoria(
+    ctx: ContextoUsina, alteracoes: Record<string, { de: any; para: any }>, user: ScopedUser | undefined,
+    nome: string | null, cliente?: ClienteInfo,
+  ): Promise<void> {
+    try {
+      const uid = ctx.unidade.id;
+      const p = await this.prisma.$queryRaw<Array<{ planta_id: string | null }>>`
+        SELECT TRIM(planta_id) AS planta_id FROM unidades WHERE id = ${uid}::bpchar LIMIT 1`;
+      const plantaId = p[0]?.planta_id || null;
+      const campos = Object.keys(alteracoes);
+      await this.auditoria.registrar({
+        autorId: user?.id ?? null,
+        alvoUsuarioId: null,
+        acao: 'usina_config',
+        mensagem: `Configuração da usina alterada — ${ctx.unidade.nome}: ${this.resumoAlteracoes(alteracoes)}`,
+        plantaIds: plantaId ? [plantaId] : [],
+        unidadeIds: [uid],
+        dispositivo: cliente?.dispositivo ?? null,
+        objetoTipo: 'unidade',
+        objetoId: uid,
+        resultado: 'ok',
+        autorNome: nome,
+        rota: `/geracao-analise/unidades/${uid}/config`,
+        detalhes: {
+          usuario: user ? { id: user.id?.trim() ?? null, nome, papel: papelCanonico(user.role) } : null,
+          unidade: { id: uid, nome: ctx.unidade.nome },
+          planta_id: plantaId,
+          campos_alterados: campos,
+          alteracoes: campos.map((k) => ({ campo: k, rotulo: ROTULOS[k] ?? k, de: alteracoes[k].de, para: alteracoes[k].para })),
+          ip: cliente?.ip ?? null,
+          user_agent: cliente?.userAgent ?? null,
+        },
+      });
+    } catch (e) {
+      this.logger.warn(`[auditoria] config da usina ${ctx.unidade.id} não registrada: ${(e as Error)?.message ?? e}`);
     }
   }
 
