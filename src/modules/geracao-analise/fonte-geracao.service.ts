@@ -51,6 +51,8 @@ export class FonteGeracaoService {
   private readonly coluna = new ColunaOpcional(/fonte_geracao/);
   private readonly cache = new Map<string, { ts: number; valor: Map<string, Map<string, DiaFonteCalc>> }>();
   private readonly cacheInversores = new Map<string, { ts: number; valor: Map<string, string[]> }>();
+  /** TON de dias passados (estável): 10 min por conjunto de inversores e janela. */
+  private readonly cacheTonPassado = new Map<string, { ts: number; valor: Map<string, Map<string, TonInversorDia>> }>();
 
   constructor(private readonly prisma: PrismaService) {}
 
@@ -281,7 +283,7 @@ export class FonteGeracaoService {
     const [configs, inversores] = await Promise.all([this.configs(ids), this.inversoresPorUnidade(ids)]);
     const todos = [...inversores.values()].flat();
     const [ton, nuvem] = await Promise.all([
-      this.tonPorInversorDia(todos, diaIni, fim, agora),
+      this.tonComCache(todos, diaIni, fim, agora),
       this.nuvemPorDia(ids, diaIni, fim, agora, inversores),
     ]);
     const dias = diasEntre(diaIni, fim, SEM_LIMITE);
@@ -298,6 +300,30 @@ export class FonteGeracaoService {
 
     if (this.cache.size > 100) this.cache.clear();
     this.cache.set(chave, { ts: agora.getTime(), valor: out });
+    return out;
+  }
+
+  /** TON da janela: dias passados com cache de 10 min (o COA pede ontem a cada 60 s), hoje sempre lido. */
+  private async tonComCache(inversorIds: string[], diaIni: string, diaFim: string, agora: Date) {
+    const hoje = diaLocal(agora);
+    const fimPassado = diaFim < hoje ? diaFim : somarDias(hoje, -1);
+    if (!inversorIds.length || diaIni > fimPassado) return this.tonPorInversorDia(inversorIds, diaIni, diaFim, agora);
+    const chave = `${[...inversorIds].sort().join(',')}|${diaIni}|${fimPassado}`;
+    const c = this.cacheTonPassado.get(chave);
+    let passado = c && agora.getTime() - c.ts < 10 * 60_000 && agora.getTime() >= c.ts ? c.valor : null;
+    const [p, h] = await Promise.all([
+      passado ? Promise.resolve(passado) : this.tonPorInversorDia(inversorIds, diaIni, fimPassado, agora),
+      diaFim >= hoje ? this.tonPorInversorDia(inversorIds, hoje, hoje, agora) : Promise.resolve(new Map<string, Map<string, TonInversorDia>>()),
+    ]);
+    if (!passado) {
+      passado = p;
+      if (this.cacheTonPassado.size > 50) this.cacheTonPassado.clear();
+      this.cacheTonPassado.set(chave, { ts: agora.getTime(), valor: p });
+    }
+    const out = new Map<string, Map<string, TonInversorDia>>();
+    for (const fonte of [passado, h]) {
+      for (const [eq, m] of fonte) out.set(eq, new Map([...(out.get(eq) ?? new Map()), ...m]));
+    }
     return out;
   }
 
@@ -390,6 +416,7 @@ export class FonteGeracaoService {
   limpar(): void {
     this.cache.clear();
     this.cacheInversores.clear();
+    this.cacheTonPassado.clear();
   }
 }
 
