@@ -5,7 +5,7 @@ import { CalculoCustosService } from '../equipamentos-dados/services/calculo-cus
 import { detectarOverflowUint, ehPotenciaGlitch, CAP_POTENCIA_GLITCH_KW } from '../../shared/util/inverter-overflow';
 import { CATEGORIA_SINAL_PAIRS } from '../../shared/util/categoria-fluxo.backend';
 import { condicaoStatus } from '../logs-mqtt/logs-mqtt-filtros';
-import { DiaFonteCalc, FonteGeracaoService } from '../geracao-analise/fonte-geracao.service';
+import { DiaFonteCalc, FonteGeracaoService, InversorFonte } from '../geracao-analise/fonte-geracao.service';
 
 /** Energia de ontem por unidade + parcela dos inversores (cache de 10 min). */
 interface EnergiaOntem {
@@ -19,8 +19,8 @@ interface ParcelaInversores {
   kwh: number;
   /** Fator de perdas da config de demanda (1 = sem perdas). */
   fator: number;
-  /** Config de demanda inclui inversor; null = legado (somar tudo): decide a lista de inversores. */
-  temInv: boolean | null;
+  /** Inversores somados (chave do tópico MQTT, ou id), já com o recorte do operador. */
+  chaves: string[];
 }
 
 export interface DashboardData {
@@ -563,18 +563,24 @@ export class CoaService {
         this.logger.warn(`[COA] fonte da geração falhou (energia pelo método antigo): ${e instanceof Error ? e.message : e}`);
         return new Map<string, Map<string, DiaFonteCalc>>();
       }),
-      this.fontes.inversoresPorUnidade(comFonte).catch(() => new Map<string, string[]>()),
+      this.fontes.inversoresComChave(comFonte).catch(() => new Map<string, InversorFonte[]>()),
     ]);
     // Geração do dia pela fonte escolhida: tira a parcela dos inversores já somada e põe o kWh
-    // escolhido (com as mesmas perdas). Consumo e o resto da energia seguem iguais.
+    // escolhido (com as mesmas perdas) — só quando a parcela soma exatamente os mesmos inversores
+    // do serviço. Config de demanda com parte dos inversores, ou recorte do operador, mantém a base.
+    // Consumo e o resto da energia seguem iguais.
     const energiaComFonte = (
       uid: string, base: number, parcela: ParcelaInversores | undefined, esc: DiaFonteCalc | undefined,
       semTelemetria: boolean, fallback: number,
     ): number => {
       if (esc?.kwh != null) {
-        const comInv = parcela?.temInv ?? (inversoresFonte.get(uid)?.length ?? 0) > 0;
-        if (comInv) return base - (parcela?.kwh ?? 0) + esc.kwh * (parcela?.fator ?? 1);
-        if (semTelemetria) return esc.kwh;
+        const servico = new Set((inversoresFonte.get(uid) ?? []).map((i) => i.chave));
+        if (parcela) {
+          const mesmos = servico.size > 0 && parcela.chaves.length === servico.size && parcela.chaves.every((c) => servico.has(c));
+          if (mesmos) return base - parcela.kwh + esc.kwh * parcela.fator;
+        } else if (semTelemetria) {
+          return esc.kwh;
+        }
       }
       return semTelemetria ? fallback : base;
     };
@@ -947,7 +953,8 @@ export class CoaService {
         SELECT s.unidade_id, e.id AS equipamento_id, cs.sinal, s.aplicar_perdas, s.fator_perdas,
                -- inversor = mesma detecção da análise de geração (NEXON-37: parcela trocada pela fonte)
                (COALESCE(e.tipo_equipamento, '') NOT ILIKE 'TON%'
-                AND CONCAT_WS(' ', te.codigo, te.nome, e.tipo_equipamento, e.topico_mqtt, ce.nome) ~* 'INVERSOR') AS inversor
+                AND CONCAT_WS(' ', te.codigo, te.nome, e.tipo_equipamento, e.topico_mqtt, ce.nome) ~* 'INVERSOR') AS inversor,
+               COALESCE(NULLIF(TRIM(e.topico_mqtt), ''), TRIM(e.id)) AS chave
         FROM sel s
         JOIN equipamentos e ON trim(e.id) = s.equipamento_id AND e.deleted_at IS NULL ${soLiberados}
         JOIN tipos_equipamentos te ON te.id = e.tipo_equipamento_id
@@ -982,7 +989,7 @@ export class CoaService {
                COALESCE(ed.energia_total, 0)
                * CASE WHEN d.aplicar_perdas AND d.fator_perdas > 0 THEN 1 - d.fator_perdas / 100.0 ELSE 1 END
              END)::float8 AS inv_kwh,
-             BOOL_OR(d.inversor AND d.sinal = 1) AS tem_inv,
+             COALESCE(array_agg(DISTINCT d.chave) FILTER (WHERE d.inversor AND d.sinal = 1), ARRAY[]::text[]) AS inv_chaves,
              MAX(CASE WHEN d.aplicar_perdas AND d.fator_perdas > 0 THEN 1 - d.fator_perdas / 100.0 ELSE 1 END)::float8 AS fator
       FROM dev d
       LEFT JOIN energia_device ed ON ed.equipamento_id = d.equipamento_id
@@ -994,7 +1001,7 @@ export class CoaService {
     for (const row of energiaConfigDia) {
       const uid = String(row.unidade_id).trim();
       energiaDiaPorUnidade.set(uid, Number(row.energia_dia_kwh) || 0);
-      parcela?.set(uid, { kwh: Number(row.inv_kwh) || 0, fator: Number(row.fator) || 1, temInv: row.tem_inv === true });
+      parcela?.set(uid, { kwh: Number(row.inv_kwh) || 0, fator: Number(row.fator) || 1, chaves: row.inv_chaves ?? [] });
     }
 
     // Fallback legado: unidades SEM configuracao_demanda (ou sem equipamento que
@@ -1069,20 +1076,32 @@ export class CoaService {
             AND tipo_equipamento NOT ILIKE '%M160%'
           GROUP BY unidade_id
         ),
+        ChavesInversores AS (
+          -- inversores que o legado soma (mesma detecção do EnergiaInversores), com o recorte do
+          -- operador: o COA só troca a parcela pela fonte se for o mesmo conjunto do serviço.
+          SELECT e.unidade_id, array_agg(DISTINCT COALESCE(NULLIF(TRIM(e.topico_mqtt), ''), TRIM(e.id))) AS chaves
+          FROM equipamentos e
+          JOIN tipos_equipamentos te ON te.id = e.tipo_equipamento_id
+          WHERE e.deleted_at IS NULL AND e.unidade_id = ANY(${faltantes}::text[]) AND te.nome ILIKE '%INVERSOR%'
+            ${soLiberados}
+          GROUP BY e.unidade_id
+        ),
         EnergiaUnificada AS (
           SELECT unidade_id, energia_dia_kwh, false AS inv FROM EnergiaM160
           UNION ALL SELECT unidade_id, energia_dia_kwh, true FROM EnergiaInversores
           UNION ALL SELECT unidade_id, energia_dia_kwh, false FROM EnergiaOutros
         )
-        SELECT unidade_id, SUM(energia_dia_kwh) as energia_dia_kwh,
-               SUM(CASE WHEN inv THEN energia_dia_kwh END)::float8 AS inv_kwh
-        FROM EnergiaUnificada
-        GROUP BY unidade_id
+        SELECT eu.unidade_id, SUM(eu.energia_dia_kwh) as energia_dia_kwh,
+               SUM(CASE WHEN eu.inv THEN eu.energia_dia_kwh END)::float8 AS inv_kwh,
+               COALESCE(MAX(ci.chaves), ARRAY[]::text[]) AS inv_chaves
+        FROM EnergiaUnificada eu
+        LEFT JOIN ChavesInversores ci ON ci.unidade_id = eu.unidade_id
+        GROUP BY eu.unidade_id
       `;
       for (const row of energiaLegado) {
         const uid = String(row.unidade_id).trim();
         energiaDiaPorUnidade.set(uid, Number(row.energia_dia_kwh) || 0);
-        parcela?.set(uid, { kwh: Number(row.inv_kwh) || 0, fator: 1, temInv: null });
+        parcela?.set(uid, { kwh: Number(row.inv_kwh) || 0, fator: 1, chaves: row.inv_chaves ?? [] });
       }
     }
     this.logger.log(`[COA] Energia ${legadoInicio ? 'ontem' : 'hoje'}: ${energiaConfigDia.length} unidade(s) via config de demanda, ${faltantes.length} via fallback legado (somar tudo)`);
