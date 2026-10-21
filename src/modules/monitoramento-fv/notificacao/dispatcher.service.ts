@@ -3,6 +3,8 @@ import { randomBytes } from 'crypto';
 import { PrismaService, Prisma } from '@/core';
 import { WhatsappService } from './whatsapp.service';
 import { AlarmesComunicacaoService } from '../../alarmes-comunicacao/alarmes-comunicacao.service';
+import { DiaFonteCalc, FonteGeracaoService } from '../../geracao-analise/fonte-geracao.service';
+import { Confianca, LinhaGeracao, linhaBoletim } from './boletim-linha';
 
 export interface EnvioConfig {
   ativo: boolean;
@@ -37,16 +39,7 @@ export interface DispatchResult {
 
 const CFG_ID = 'cfgdefault0000000000000000';
 
-export type Confianca = 'alta' | 'media' | 'baixa';
-export interface LinhaGeracao {
-  unidade_id: string;
-  nome: string;
-  kwh_realizado: number;
-  kwh_previsto: number;
-  fonte: 'api' | 'ton' | 'manual' | 'bdo';
-  confianca: Confianca;
-  motivo: string;
-}
+export type { Confianca, LinhaGeracao };
 
 /**
  * Dispatcher do boletim diário de geração via WhatsApp — migrado do bdo-aupus-api pro NexON.
@@ -65,6 +58,7 @@ export class NotificacaoDispatcherService {
     private readonly prisma: PrismaService,
     private readonly whats: WhatsappService,
     private readonly comunicacao: AlarmesComunicacaoService,
+    private readonly fontes: FonteGeracaoService,
   ) {}
 
   async getConfig(): Promise<EnvioConfig> {
@@ -160,7 +154,8 @@ export class NotificacaoDispatcherService {
    * (2) o BROKER — leituras das TONs em `equipamentos_dados` (daily_yield de cada inversor).
    * Usinas sem API (só TON) passam a entrar no boletim; com as duas fontes, uma confere a outra.
    *
-   * Valor: manual/BDO vence; senão API; API ausente/zerada → valor do broker.
+   * Valor (NEXON-37): o kWh do FonteGeracaoService — manual/BDO vence; senão TON × API pela
+   * regra da fonte (a mesma do COA e da análise). Ver boletim-linha.ts.
    * Confiança: alta = 2 fontes batem (≤10%) ou conferido à mão; media = 1 fonte completa;
    * baixa = dado incompleto (inversor faltando / leitura parada antes das 17h) ou fontes divergentes.
    * Broker: deduplica por TÓPICO (cadastro duplicado no mesmo tópico contava 2×) e só lê de 04h
@@ -240,49 +235,33 @@ export class NotificacaoDispatcherService {
       const t = new Date(new Date(d).getTime() - 3 * 3600_000);
       return `${String(t.getUTCHours()).padStart(2, '0')}:${String(t.getUTCMinutes()).padStart(2, '0')}`;
     };
-    const fmt = (v: number) => this.fmtKwh(v);
     const porUnidade = new Map<string, LinhaGeracao>();
     const tonPor = new Map(ton.map((t) => [t.unidade_id, t]));
     const regPor = new Map(regs.map((r) => [r.unidade_id, r]));
     const unidades = new Set<string>([...regPor.keys(), ...tonPor.keys()]);
+    const fontes = await this.fontes.porDias([...unidades], data, data).catch((e) => {
+      this.logger.warn(`[boletim] fonte da geração falhou: ${e?.message ?? e}`);
+      return new Map<string, Map<string, DiaFonteCalc>>();
+    });
 
     for (const uid of unidades) {
       const r = regPor.get(uid);
       const t = tonPor.get(uid);
-      const tonKwh = t ? Number(t.kwh) || 0 : 0;
-      const tonOk = tonKwh > 0;
       const faltaInv = t && t.esperado > t.inv ? `${t.inv}/${t.esperado} inversores` : '';
       const parou = t && new Date(t.ult_min).getTime() < fimSol ? `leitura até ${hhmm(t.ult_min)}` : '';
-      const parcial = [faltaInv, parou].filter(Boolean).join(', ');
-      const tonCompleto = tonOk && !parcial;
-      const dup = t?.dup ? ' · ⚠️ inversor cadastrado 2×' : '';
-      const nome = r?.nome ?? t?.nome ?? uid;
       const origem = (r?.origem ?? 'nuvem').toLowerCase();
-      const apiKwh = r ? Number(r.kwh) || 0 : 0;
-      const previsto = r && Number(r.previsto) > 0 ? Number(r.previsto) : Number(t?.meta) || 0;
-      let linha: LinhaGeracao | null = null;
-
-      if (r && apiKwh > 0 && (origem === 'manual' || origem === 'bdo')) {
-        linha = { unidade_id: uid, nome, kwh_realizado: apiKwh, kwh_previsto: previsto, fonte: origem as any,
-          confianca: 'alta', motivo: origem === 'manual' ? 'conferido manualmente' : 'conferido no BDO' };
-      } else if (r && apiKwh > 0) {
-        if (tonCompleto) {
-          const diff = Math.abs(apiKwh - tonKwh) / Math.max(apiKwh, tonKwh);
-          const pct = Math.round(diff * 100);
-          linha = { unidade_id: uid, nome, kwh_realizado: apiKwh, kwh_previsto: previsto, fonte: 'api',
-            confianca: diff <= 0.1 ? 'alta' : diff <= 0.3 ? 'media' : 'baixa',
-            motivo: diff <= 0.1 ? 'API e TON batem' : `API ${fmt(apiKwh)} × TON ${fmt(tonKwh)} kWh (${pct}%)` };
-        } else {
-          linha = { unidade_id: uid, nome, kwh_realizado: apiKwh, kwh_previsto: previsto, fonte: 'api',
-            confianca: 'media', motivo: tonOk ? `só API (TON parcial: ${parcial})` : 'só API' };
-        }
-      } else if (tonOk) {
-        const semApi = r ? 'API sem dado' : 'sem API';
-        linha = { unidade_id: uid, nome, kwh_realizado: tonKwh, kwh_previsto: previsto, fonte: 'ton',
-          confianca: tonCompleto ? 'media' : 'baixa',
-          motivo: tonCompleto ? `via TON (${semApi})` : `via TON, parcial: ${parcial} (${semApi})` };
-      }
-      if (linha) { linha.motivo += dup; porUnidade.set(uid, linha); }
+      const linha = linhaBoletim({
+        unidadeId: uid,
+        nome: r?.nome ?? t?.nome ?? uid,
+        previsto: r && Number(r.previsto) > 0 ? Number(r.previsto) : Number(t?.meta) || 0,
+        escolha: fontes.get(uid)?.get(data),
+        origemManual: origem === 'manual' || origem === 'bdo' ? origem : null,
+        temApi: !!r && origem !== 'manual' && origem !== 'bdo',
+        parcial: [faltaInv, parou].filter(Boolean).join(', '),
+        aviso: t?.dup ? ' · ⚠️ inversor cadastrado 2×' : '',
+        fmtKwh: (v) => this.fmtKwh(v),
+      });
+      if (linha) porUnidade.set(uid, linha);
     }
     return [...porUnidade.values()].sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
   }
