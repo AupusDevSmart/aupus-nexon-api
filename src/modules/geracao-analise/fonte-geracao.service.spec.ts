@@ -61,13 +61,13 @@ describe('FonteGeracaoService.porDias (NEXON-37)', () => {
     expect(d).toMatchObject({ fonte: 'nuvem', motivo: 'ton_incompleta', kwh: 650, tonCompleta: false, nuvemCompleta: true });
   });
 
-  it('horário parado há mais de 2 h hoje = nuvem incompleta → ton (divergem)', async () => {
+  it('horário parado há mais de 2 h hoje = nuvem incompleta → ton (em_andamento)', async () => {
     const s = new FonteGeracaoService(prismaFalso({
       inversores, ton: [{ eq: 'E1', dia: '2026-10-21', y: 300, integ: 300, blocos: 24 }],
       horaria: [{ u: 'U1', dia: '2026-10-21', kwh: 650, ultima: '2026-10-21T08:00:00' }],
     }));
     const d = (await s.porDias(['U1'], '2026-10-21', '2026-10-21', agora)).get('U1')?.get('2026-10-21');
-    expect(d).toMatchObject({ fonte: 'ton', motivo: 'divergem', nuvemCompleta: false });
+    expect(d).toMatchObject({ fonte: 'ton', motivo: 'em_andamento', nuvemCompleta: false });
   });
 
   it('manual no diário vence; fonte fixada lida da config', async () => {
@@ -113,7 +113,7 @@ describe('FonteGeracaoService.porDias (NEXON-37)', () => {
     const dados = { inversores, ton: [{ eq: 'E1', dia: '2026-10-21', y: 300, integ: 300, blocos: 24 }],
       diaria: [{ u: 'U1', dia: '2026-10-21', kwh: 650, origem: 'nuvem' }] };
     const cedo = (await new FonteGeracaoService(prismaFalso(dados)).porDias(['U1'], '2026-10-21', '2026-10-21', agora)).get('U1')?.get('2026-10-21');
-    expect(cedo).toMatchObject({ nuvemCompleta: false, fonte: 'ton', motivo: 'divergem' });
+    expect(cedo).toMatchObject({ nuvemCompleta: false, fonte: 'ton', motivo: 'em_andamento' });
     const noite = new Date('2026-10-22T00:30:00Z'); // 21:30 local
     const tarde = (await new FonteGeracaoService(prismaFalso({ ...dados, ton: [{ eq: 'E1', dia: '2026-10-21', y: 300, integ: 300, blocos: 48 }] }))
       .porDias(['U1'], '2026-10-21', '2026-10-21', noite)).get('U1')?.get('2026-10-21');

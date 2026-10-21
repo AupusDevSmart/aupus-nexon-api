@@ -31,7 +31,7 @@ fuso America/Sao_Paulo). Semana = segunda a domingo.
   "fonte_geracao": {                   // NEXON-37 — de onde veio o kWh do período (ver "Fonte da geração")
     "config": "automatico",
     "escolhida": "ton",                // ton | nuvem | manual | mista | null (período sem dado)
-    "divergem": false,                 // algum dia do período com motivo "divergem"
+    "divergem": false,                 // algum dia FECHADO com motivo "divergem" (hoje antes das 21h vira "em_andamento")
     "selo": "Fonte: TON",              // "Fonte: TON" | "Fonte: nuvem" | "Fonte: manual" | "Fontes: TON e nuvem"
                                        //   | "Fontes divergem — usando TON" | null (sem dado)
     "tem_nuvem": true,                 // integração de nuvem ativa (unidade_fv_config.ativo)
