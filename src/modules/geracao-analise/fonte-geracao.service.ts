@@ -50,6 +50,7 @@ export class FonteGeracaoService {
   private readonly logger = new Logger(FonteGeracaoService.name);
   private readonly coluna = new ColunaOpcional(/fonte_geracao/);
   private readonly cache = new Map<string, { ts: number; valor: Map<string, Map<string, DiaFonteCalc>> }>();
+  private readonly cacheInversores = new Map<string, { ts: number; valor: Map<string, string[]> }>();
 
   constructor(private readonly prisma: PrismaService) {}
 
@@ -71,11 +72,17 @@ export class FonteGeracaoService {
     return out;
   }
 
-  /** Inversores de cada unidade (mesmo filtro de GeracaoConfigService.inversores()). */
+  /**
+   * Inversores de cada unidade (mesmo filtro de GeracaoConfigService.inversores()). Cache de
+   * 60 s: o COA pergunta e logo depois o porDias usa a mesma lista.
+   */
   async inversoresPorUnidade(unidadeIds: string[]): Promise<Map<string, string[]>> {
     const out = new Map<string, string[]>();
-    const ids = [...new Set(unidadeIds.map((i) => i.trim()).filter(Boolean))];
+    const ids = [...new Set(unidadeIds.map((i) => i.trim()).filter(Boolean))].sort();
     if (!ids.length) return out;
+    const chave = ids.join(',');
+    const c = this.cacheInversores.get(chave);
+    if (c && Date.now() - c.ts < CACHE_MS) return c.valor;
     const rows = await this.prisma.$queryRaw<Array<{ u: string; id: string }>>`
       SELECT TRIM(e.unidade_id) AS u, TRIM(e.id) AS id
       FROM equipamentos e
@@ -85,6 +92,8 @@ export class FonteGeracaoService {
         AND COALESCE(e.tipo_equipamento, '') NOT ILIKE 'TON%'
         AND CONCAT_WS(' ', t.codigo, t.nome, e.tipo_equipamento, e.topico_mqtt, c.nome) ~* 'INVERSOR'`;
     for (const r of rows) out.set(r.u, [...(out.get(r.u) ?? []), r.id]);
+    if (this.cacheInversores.size > 100) this.cacheInversores.clear();
+    this.cacheInversores.set(chave, { ts: Date.now(), valor: out });
     return out;
   }
 
@@ -380,6 +389,7 @@ export class FonteGeracaoService {
   /** Esquece o cache em memória (config da fonte mudou). */
   limpar(): void {
     this.cache.clear();
+    this.cacheInversores.clear();
   }
 }
 

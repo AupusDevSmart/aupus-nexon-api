@@ -5,6 +5,23 @@ import { CalculoCustosService } from '../equipamentos-dados/services/calculo-cus
 import { detectarOverflowUint, ehPotenciaGlitch, CAP_POTENCIA_GLITCH_KW } from '../../shared/util/inverter-overflow';
 import { CATEGORIA_SINAL_PAIRS } from '../../shared/util/categoria-fluxo.backend';
 import { condicaoStatus } from '../logs-mqtt/logs-mqtt-filtros';
+import { DiaFonteCalc, FonteGeracaoService } from '../geracao-analise/fonte-geracao.service';
+
+/** Energia de ontem por unidade + parcela dos inversores (cache de 10 min). */
+interface EnergiaOntem {
+  valores: Map<string, number>;
+  parcela: Map<string, ParcelaInversores>;
+}
+
+/** Parcela dos inversores na energia do dia de uma unidade (para trocar pela fonte escolhida). */
+interface ParcelaInversores {
+  /** kWh dos inversores já somado na energia (com perdas). */
+  kwh: number;
+  /** Fator de perdas da config de demanda (1 = sem perdas). */
+  fator: number;
+  /** Config de demanda inclui inversor; null = legado (somar tudo): decide a lista de inversores. */
+  temInv: boolean | null;
+}
 
 export interface DashboardData {
   timestamp: Date;
@@ -51,6 +68,8 @@ export interface UnidadeResumo {
   nuvem?: boolean; // sem TON ao vivo, mas com geração de NUVEM recente (cor própria, não é offline)
   tonViva?: boolean; // TON dá sinal de vida no broker (liveness). OFFLINE+tonViva = device/Modbus (âmbar), não internet (cinza)
   fonteDados?: 'ton' | 'nuvem'; // origem de potência/energia (nuvem = fallback: sem TON ao vivo, dado do portal do provedor)
+  fonteGeracao?: 'ton' | 'nuvem' | 'manual' | null; // NEXON-37: fonte da geração de hoje (FonteGeracaoService)
+  fontesDivergem?: boolean; // NEXON-37: TON e nuvem divergem hoje (> 5%, usando TON)
   nuvemAtualizadoEm?: string | null; // horário local (SP) do snapshot de nuvem usado no fallback
   naoComissionados?: string[]; // pontos monitorados desta unidade ainda sem comissionamento (dado não validado)
   equipamentosOffline?: string[]; // nomes de equipamentos sem comunicação (pior-caso do status)
@@ -93,6 +112,7 @@ export class CoaService {
     private readonly prisma: PrismaService,
     private readonly calculoCustosService: CalculoCustosService,
     private readonly scopeService: PermissionScopeService,
+    private readonly fontes: FonteGeracaoService,
   ) {}
 
   /**
@@ -348,15 +368,17 @@ export class CoaService {
       ', ',
     );
 
-    const energiaDiaPorUnidade = await this.energiaPorUnidade(unidadeIds, dataInicioBRT, dataFimBRT, null, catSinalValues, eqScope);
+    const parcelaHoje = new Map<string, ParcelaInversores>();
+    const energiaDiaPorUnidade = await this.energiaPorUnidade(unidadeIds, dataInicioBRT, dataFimBRT, null, catSinalValues, eqScope, parcelaHoje);
 
     // [apps v2] Energia de ONTEM (D-1 BRT) pelo MESMO método — "12% acima de ontem"
     // no Início. Cache de 10 min por conjunto de unidades (dado de ontem é estável).
     const dataOntemBRT = new Date(dataInicioBRT.getTime() - 24 * 60 * 60 * 1000);
-    const energiaOntemPorUnidade = await this.energiaOntemCacheada(unidadeIds, hojeSP, () =>
-      this.energiaPorUnidade(unidadeIds, dataOntemBRT, dataInicioBRT, dataOntemBRT, catSinalValues, eqScope),
-      eqScope,
-    );
+    const { valores: energiaOntemPorUnidade, parcela: parcelaOntem } = await this.energiaOntemCacheada(unidadeIds, hojeSP, async () => {
+      const parcela = new Map<string, ParcelaInversores>();
+      const valores = await this.energiaPorUnidade(unidadeIds, dataOntemBRT, dataInicioBRT, dataOntemBRT, catSinalValues, eqScope, parcela);
+      return { valores, parcela };
+    }, eqScope);
 
     // 4. Criar mapa de leituras por unidade
     const leiturasPorUnidade = new Map<string, any[]>();
@@ -530,11 +552,32 @@ export class CoaService {
     // [apps v2] Alarmes ativos da trilha, equipamentos do arqIoT e nuvem de ontem.
     const ontemSP = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' })
       .format(dataOntemBRT.getTime() + 12 * 60 * 60 * 1000);
-    const [alarmesAtivos, scsPorUnidade, nuvemOntem] = await Promise.all([
+    // NEXON-37: fonte da geração (TON × nuvem × manual) de ontem e hoje, um lote por dashboard.
+    // Só onde a geração da usina é visível (operador com "Ver geração").
+    const comFonte = unidadeIds.filter(nuvemLiberada);
+    const [alarmesAtivos, scsPorUnidade, nuvemOntem, fontes, inversoresFonte] = await Promise.all([
       this.alarmesLogsAtivos(unidadeIds, eqScope),
       this.equipamentosScsPorUnidade(unidadeIds, eqScope),
-      this.nuvemOntemPorUnidade(unidadeIds.filter(nuvemLiberada), ontemSP),
+      this.nuvemOntemPorUnidade(comFonte, ontemSP),
+      this.fontes.porDias(comFonte, ontemSP, hojeSP, agora).catch((e) => {
+        this.logger.warn(`[COA] fonte da geração falhou (energia pelo método antigo): ${e instanceof Error ? e.message : e}`);
+        return new Map<string, Map<string, DiaFonteCalc>>();
+      }),
+      this.fontes.inversoresPorUnidade(comFonte).catch(() => new Map<string, string[]>()),
     ]);
+    // Geração do dia pela fonte escolhida: tira a parcela dos inversores já somada e põe o kWh
+    // escolhido (com as mesmas perdas). Consumo e o resto da energia seguem iguais.
+    const energiaComFonte = (
+      uid: string, base: number, parcela: ParcelaInversores | undefined, esc: DiaFonteCalc | undefined,
+      semTelemetria: boolean, fallback: number,
+    ): number => {
+      if (esc?.kwh != null) {
+        const comInv = parcela?.temInv ?? (inversoresFonte.get(uid)?.length ?? 0) > 0;
+        if (comInv) return base - (parcela?.kwh ?? 0) + esc.kwh * (parcela?.fator ?? 1);
+        if (semTelemetria) return esc.kwh;
+      }
+      return semTelemetria ? fallback : base;
+    };
 
     for (const planta of plantas) {
       const unidadesPlanta = unidadesPorPlanta.get(planta.id) || [];
@@ -752,6 +795,9 @@ export class CoaService {
 
         // Buscar custo desta unidade (se calculado)
         const custoUnidade = custosPorUnidade.get(unidade.id);
+        const uidT = unidade.id.trim();
+        const escHoje = fontes.get(uidT)?.get(hojeSP);
+        const escOntem = fontes.get(uidT)?.get(ontemSP);
 
         unidadesProcessadas.push({
           id: unidade.id,
@@ -779,16 +825,23 @@ export class CoaService {
           estado: unidade.estado || undefined,
           potenciaInstalada: Number(unidade.potencia) || 0, // ✅ Potência instalada em kW
           ...(scsPorUnidade ? { equipamentosScs: scsPorUnidade.get(unidade.id.trim()) ?? 0 } : {}),
+          fonteGeracao: escHoje?.fonte ?? null,
+          fontesDivergem: escHoje?.motivo === 'divergem',
           metricas: {
             potenciaAtual: Math.round((fonteDados === 'nuvem' ? potenciaNuvem : potenciaTotal) * 100) / 100,
-            energiaHoje: Math.round((fonteDados === 'nuvem' ? energiaNuvem : energiaTotal) * 100) / 100,
+            // Geração pela fonte escolhida (NEXON-37); sem escolha, o método antigo.
+            energiaHoje: Math.round(
+              energiaComFonte(uidT, energiaTotal, parcelaHoje.get(uidT), escHoje, fonteDados === 'nuvem', energiaNuvem) * 100,
+            ) / 100,
             // D-1: telemetria pelo mesmo método; unidade que hoje vem da nuvem (ou
             // sem telemetria ontem) usa o fechamento diário da nuvem.
             energiaOntem:
               Math.round(
-                (fonteDados === 'nuvem' || !energiaOntemPorUnidade.has(unidade.id.trim())
-                  ? nuvemOntem.get(unidade.id.trim()) ?? energiaOntemPorUnidade.get(unidade.id.trim()) ?? 0
-                  : energiaOntemPorUnidade.get(unidade.id.trim()) ?? 0) * 100,
+                energiaComFonte(
+                  uidT, energiaOntemPorUnidade.get(uidT) ?? 0, parcelaOntem.get(uidT), escOntem,
+                  fonteDados === 'nuvem' || !energiaOntemPorUnidade.has(uidT),
+                  nuvemOntem.get(uidT) ?? energiaOntemPorUnidade.get(uidT) ?? 0,
+                ) * 100,
               ) / 100,
             fatorPotencia: Math.round(fatorPotencia * 100) / 100,
             custoEnergiaHoje: custoUnidade !== undefined ? Math.round(custoUnidade * 100) / 100 : undefined,
@@ -865,6 +918,7 @@ export class CoaService {
     legadoInicio: Date | null,
     catSinalValues: Prisma.Sql,
     eqScope: string[] | null = null,
+    parcela?: Map<string, ParcelaInversores>,
   ): Promise<Map<string, number>> {
     // Operador: soma só os equipamentos liberados (PER-24), sem rótulo do recorte.
     const soLiberados = eqScope ? Prisma.sql`AND trim(e.id) = ANY(${eqScope}::text[])` : Prisma.empty;
@@ -890,7 +944,10 @@ export class CoaService {
       dev AS (
         -- categoria + sinal; INNER JOIN cat_sinal exclui NEUTRO/AMBIGUO/categoria nula.
         -- equipamentos.id e char(26) padded; sel.equipamento_id veio trimado do JSON.
-        SELECT s.unidade_id, e.id AS equipamento_id, cs.sinal, s.aplicar_perdas, s.fator_perdas
+        SELECT s.unidade_id, e.id AS equipamento_id, cs.sinal, s.aplicar_perdas, s.fator_perdas,
+               -- inversor = mesma detecção da análise de geração (NEXON-37: parcela trocada pela fonte)
+               (COALESCE(e.tipo_equipamento, '') NOT ILIKE 'TON%'
+                AND CONCAT_WS(' ', te.codigo, te.nome, e.tipo_equipamento, e.topico_mqtt, ce.nome) ~* 'INVERSOR') AS inversor
         FROM sel s
         JOIN equipamentos e ON trim(e.id) = s.equipamento_id AND e.deleted_at IS NULL ${soLiberados}
         JOIN tipos_equipamentos te ON te.id = e.tipo_equipamento_id
@@ -920,7 +977,13 @@ export class CoaService {
                COALESCE(ed.energia_total, 0) * d.sinal
                * CASE WHEN d.sinal = 1 AND d.aplicar_perdas AND d.fator_perdas > 0
                       THEN 1 - d.fator_perdas / 100.0 ELSE 1 END
-             ) AS energia_dia_kwh
+             ) AS energia_dia_kwh,
+             SUM(CASE WHEN d.inversor AND d.sinal = 1 THEN
+               COALESCE(ed.energia_total, 0)
+               * CASE WHEN d.aplicar_perdas AND d.fator_perdas > 0 THEN 1 - d.fator_perdas / 100.0 ELSE 1 END
+             END)::float8 AS inv_kwh,
+             BOOL_OR(d.inversor AND d.sinal = 1) AS tem_inv,
+             MAX(CASE WHEN d.aplicar_perdas AND d.fator_perdas > 0 THEN 1 - d.fator_perdas / 100.0 ELSE 1 END)::float8 AS fator
       FROM dev d
       LEFT JOIN energia_device ed ON ed.equipamento_id = d.equipamento_id
       GROUP BY d.unidade_id
@@ -929,7 +992,9 @@ export class CoaService {
     // Mapa de energia diaria por unidade (config-driven)
     const energiaDiaPorUnidade = new Map<string, number>();
     for (const row of energiaConfigDia) {
-      energiaDiaPorUnidade.set(String(row.unidade_id).trim(), Number(row.energia_dia_kwh) || 0);
+      const uid = String(row.unidade_id).trim();
+      energiaDiaPorUnidade.set(uid, Number(row.energia_dia_kwh) || 0);
+      parcela?.set(uid, { kwh: Number(row.inv_kwh) || 0, fator: Number(row.fator) || 1, temInv: row.tem_inv === true });
     }
 
     // Fallback legado: unidades SEM configuracao_demanda (ou sem equipamento que
@@ -1005,16 +1070,19 @@ export class CoaService {
           GROUP BY unidade_id
         ),
         EnergiaUnificada AS (
-          SELECT * FROM EnergiaM160
-          UNION ALL SELECT * FROM EnergiaInversores
-          UNION ALL SELECT * FROM EnergiaOutros
+          SELECT unidade_id, energia_dia_kwh, false AS inv FROM EnergiaM160
+          UNION ALL SELECT unidade_id, energia_dia_kwh, true FROM EnergiaInversores
+          UNION ALL SELECT unidade_id, energia_dia_kwh, false FROM EnergiaOutros
         )
-        SELECT unidade_id, SUM(energia_dia_kwh) as energia_dia_kwh
+        SELECT unidade_id, SUM(energia_dia_kwh) as energia_dia_kwh,
+               SUM(CASE WHEN inv THEN energia_dia_kwh END)::float8 AS inv_kwh
         FROM EnergiaUnificada
         GROUP BY unidade_id
       `;
       for (const row of energiaLegado) {
-        energiaDiaPorUnidade.set(String(row.unidade_id).trim(), Number(row.energia_dia_kwh) || 0);
+        const uid = String(row.unidade_id).trim();
+        energiaDiaPorUnidade.set(uid, Number(row.energia_dia_kwh) || 0);
+        parcela?.set(uid, { kwh: Number(row.inv_kwh) || 0, fator: 1, temInv: null });
       }
     }
     this.logger.log(`[COA] Energia ${legadoInicio ? 'ontem' : 'hoje'}: ${energiaConfigDia.length} unidade(s) via config de demanda, ${faltantes.length} via fallback legado (somar tudo)`);
@@ -1024,14 +1092,14 @@ export class CoaService {
     return energiaDiaPorUnidade;
   }
 
-  private energiaOntemCache = new Map<string, { dia: string; ts: number; valores: Map<string, number> }>();
+  private energiaOntemCache = new Map<string, { dia: string; ts: number; valores: EnergiaOntem }>();
 
   private async energiaOntemCacheada(
     unidadeIds: string[],
     hojeSP: string,
-    calcular: () => Promise<Map<string, number>>,
+    calcular: () => Promise<EnergiaOntem>,
     eqScope: string[] | null = null,
-  ): Promise<Map<string, number>> {
+  ): Promise<EnergiaOntem> {
     // Recorte do operador entra na chave: mesma instalação, outros equipamentos.
     const chave = [...unidadeIds].sort().join(',') + (eqScope ? `|eq:${[...eqScope].sort().join(',')}` : '');
     const c = this.energiaOntemCache.get(chave);
@@ -1043,7 +1111,7 @@ export class CoaService {
       return valores;
     } catch (e) {
       this.logger.warn(`[COA] energia de ontem falhou (campo omitido): ${e instanceof Error ? e.message : e}`);
-      return new Map();
+      return { valores: new Map(), parcela: new Map() };
     }
   }
 
