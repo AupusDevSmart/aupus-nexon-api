@@ -1,5 +1,8 @@
 import { Injectable, Logger, NotFoundException, ForbiddenException } from '@nestjs/common';
 import { PrismaService, PermissionScopeService, ScopedUser, Prisma } from '@/core';
+import { GeracaoAnaliseService } from '../geracao-analise/geracao-analise.service';
+import type { DiaFonteCalc } from '../geracao-analise/fonte-geracao.service';
+import { diasEntre, somarDias } from '../geracao-analise/geracao-datas';
 
 /**
  * Monta o PAYLOAD do boletim semanal (contrato de bdo_semanal/dados_exemplo.json) a
@@ -15,6 +18,7 @@ export class BoletimSemanalService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly scope: PermissionScopeService,
+    private readonly analise: GeracaoAnaliseService,
   ) {}
 
   private mwh(v: any): number {
@@ -83,24 +87,49 @@ export class BoletimSemanalService {
         (SELECT SUM(kwh_previsto)  FROM geracao_diaria_plantas WHERE TRIM(unidade_id)=${uid} AND date_trunc('year',data)=date_trunc('year',${sFim}::date)) AS ano_prev
     `;
     const a = g[0];
-    const semReal = this.mwh(a.sem_real), semPrev = this.mwh(a.sem_prev);
-    const antReal = this.mwh(a.ant_real), antPrev = this.mwh(a.ant_prev);
-    const mesReal = this.mwh(a.mes_real);
-    const anoReal = this.mwh(a.ano_real), anoPrev = this.mwh(a.ano_prev);
+    // Geração realizada pela fonte escolhida (NEXON-37): o mesmo kWh da análise, do COA e do
+    // boletim diário (manual vence; TON × nuvem pela regra). Falhou → diário da nuvem, como antes.
+    const anoIni = `${sFim.slice(0, 4)}-01-01`;
+    const mesIni = `${sFim.slice(0, 7)}-01`;
+    let escolhas: Map<string, DiaFonteCalc> | null = null;
+    try {
+      escolhas = await this.analise.geracaoEscolhida(uid, aIni < anoIni ? aIni : anoIni, `${sFim.slice(0, 4)}-12-31`);
+    } catch (e) {
+      this.logger.warn(`[boletim semanal] fonte da geração indisponível (${uid}): ${(e as Error)?.message ?? e}`);
+    }
+    const soma = (ini: string, fim: string): number | null => {
+      if (!escolhas) return null;
+      let t = 0;
+      for (const [d, x] of escolhas) if (d >= ini && d <= fim && x.kwh != null) t += x.kwh;
+      return t;
+    };
+    const fimMes = somarDias(`${sFim.slice(0, 7)}-28`, 4).slice(0, 7) + '-01';
+    const semReal = this.mwh(soma(sIni, sFim) ?? a.sem_real), semPrev = this.mwh(a.sem_prev);
+    const antReal = this.mwh(soma(aIni, aFim) ?? a.ant_real), antPrev = this.mwh(a.ant_prev);
+    const mesReal = this.mwh(soma(mesIni, somarDias(fimMes, -1)) ?? a.mes_real);
+    const anoReal = this.mwh(soma(anoIni, `${sFim.slice(0, 4)}-12-31`) ?? a.ano_real), anoPrev = this.mwh(a.ano_prev);
 
     // Série diária (uma linha por dia com dado)
-    const serieRows = await this.prisma.$queryRaw<Array<{ rotulo: string; dow: number; atual: number; esperado: number }>>`
-      SELECT to_char(data,'DD/MM') AS rotulo, EXTRACT(DOW FROM data)::int AS dow,
+    const serieRows = await this.prisma.$queryRaw<Array<{ data: string; rotulo: string; dow: number; atual: number; esperado: number }>>`
+      SELECT to_char(data,'YYYY-MM-DD') AS data, to_char(data,'DD/MM') AS rotulo, EXTRACT(DOW FROM data)::int AS dow,
              COALESCE(kwh_realizado,0)::float8 AS atual, COALESCE(kwh_previsto,0)::float8 AS esperado
       FROM geracao_diaria_plantas WHERE TRIM(unidade_id)=${uid} AND data BETWEEN ${sIni}::date AND ${sFim}::date ORDER BY data
     `;
-    const serie_diaria = serieRows.map((r) => ({
-      rotulo: r.rotulo,
-      dia: this.DIAS_PT[Number(r.dow)] ?? '',
-      atual: this.mwh(r.atual),
-      esperado: this.mwh(r.esperado),
-      anterior: null,
-    }));
+    const previstoDe = new Map(serieRows.map((r) => [r.data, r]));
+    const diasSerie = escolhas
+      ? diasEntre(sIni, sFim).filter((d) => escolhas?.get(d)?.kwh != null || previstoDe.has(d))
+      : serieRows.map((r) => r.data);
+    const serie_diaria = diasSerie.map((d) => {
+      const r = previstoDe.get(d);
+      const dow = new Date(`${d}T12:00:00Z`).getUTCDay();
+      return {
+        rotulo: `${d.slice(8, 10)}/${d.slice(5, 7)}`,
+        dia: this.DIAS_PT[dow] ?? '',
+        atual: this.mwh(escolhas ? escolhas.get(d)?.kwh ?? 0 : r?.atual),
+        esperado: this.mwh(r?.esperado),
+        anterior: null,
+      };
+    });
 
     const alarmeSemana = await this.contarAlarmes(uid, sIni, sFim, eqScope);
     const alarmeAnterior = await this.contarAlarmes(uid, aIni, aFim, eqScope);
