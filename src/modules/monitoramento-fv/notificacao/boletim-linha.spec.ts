@@ -1,4 +1,4 @@
-import { EntradaLinha, linhaBoletim } from './boletim-linha';
+import { EntradaLinha, linhaBoletim, linhaBoletimLegado } from './boletim-linha';
 
 const base: EntradaLinha = {
   unidadeId: 'u1', nome: 'UFV Teste', previsto: 1000, escolha: undefined, origemManual: null, temApi: true, parcial: '',
@@ -51,5 +51,18 @@ describe('linha do boletim diário pela fonte escolhida (NEXON-37)', () => {
     const l = linhaBoletim({ ...base, escolha: esc({ fonte: 'nuvem', motivo: 'fixada', kwh: 1000, kwhTon: 1020, divergenciaPct: 2 }) });
     expect(l).toMatchObject({ fonte: 'api', confianca: 'alta' });
     expect(l?.motivo).toMatch(/^fonte fixada: API/);
+  });
+});
+
+describe('regra antiga (serviço da fonte fora do ar)', () => {
+  const leg = { unidadeId: 'u1', nome: 'UFV', previsto: 0, parcial: '', fmtKwh: (v: number) => v.toFixed(1) };
+  it('API vence e confere com a TON', () => {
+    expect(linhaBoletimLegado({ ...leg, api: { kwh: 1000, origem: 'nuvem' }, tonKwh: 1020 }))
+      .toMatchObject({ kwh_realizado: 1000, fonte: 'api', confianca: 'alta', motivo: 'API e TON batem' });
+  });
+  it('sem API → TON; manual vence', () => {
+    expect(linhaBoletimLegado({ ...leg, api: null, tonKwh: 800 })).toMatchObject({ kwh_realizado: 800, fonte: 'ton', motivo: 'via TON (sem API)' });
+    expect(linhaBoletimLegado({ ...leg, api: { kwh: 700, origem: 'manual' }, tonKwh: 800 })).toMatchObject({ kwh_realizado: 700, fonte: 'manual' });
+    expect(linhaBoletimLegado({ ...leg, api: null, tonKwh: 0 })).toBeNull();
   });
 });

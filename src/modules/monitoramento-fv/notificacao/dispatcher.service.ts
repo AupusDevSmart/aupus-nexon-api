@@ -4,7 +4,7 @@ import { PrismaService, Prisma } from '@/core';
 import { WhatsappService } from './whatsapp.service';
 import { AlarmesComunicacaoService } from '../../alarmes-comunicacao/alarmes-comunicacao.service';
 import { DiaFonteCalc, FonteGeracaoService } from '../../geracao-analise/fonte-geracao.service';
-import { Confianca, LinhaGeracao, linhaBoletim } from './boletim-linha';
+import { Confianca, LinhaGeracao, linhaBoletim, linhaBoletimLegado } from './boletim-linha';
 
 export interface EnvioConfig {
   ativo: boolean;
@@ -239,10 +239,13 @@ export class NotificacaoDispatcherService {
     const tonPor = new Map(ton.map((t) => [t.unidade_id, t]));
     const regPor = new Map(regs.map((r) => [r.unidade_id, r]));
     const unidades = new Set<string>([...regPor.keys(), ...tonPor.keys()]);
-    const fontes = await this.fontes.porDias([...unidades], data, data).catch((e) => {
-      this.logger.warn(`[boletim] fonte da geração falhou: ${e?.message ?? e}`);
-      return new Map<string, Map<string, DiaFonteCalc>>();
-    });
+    // Serviço da fonte falhou → regra antiga com o que já foi lido (o boletim não sai vazio).
+    let fontes: Map<string, Map<string, DiaFonteCalc>> | null = null;
+    try {
+      fontes = await this.fontes.porDias([...unidades], data, data);
+    } catch (e) {
+      this.logger.error(`[boletim] fonte da geração falhou, usando a regra antiga: ${(e as Error)?.message ?? e}`);
+    }
 
     for (const uid of unidades) {
       const r = regPor.get(uid);
@@ -250,17 +253,26 @@ export class NotificacaoDispatcherService {
       const faltaInv = t && t.esperado > t.inv ? `${t.inv}/${t.esperado} inversores` : '';
       const parou = t && new Date(t.ult_min).getTime() < fimSol ? `leitura até ${hhmm(t.ult_min)}` : '';
       const origem = (r?.origem ?? 'nuvem').toLowerCase();
-      const linha = linhaBoletim({
+      const comum = {
         unidadeId: uid,
         nome: r?.nome ?? t?.nome ?? uid,
         previsto: r && Number(r.previsto) > 0 ? Number(r.previsto) : Number(t?.meta) || 0,
-        escolha: fontes.get(uid)?.get(data),
-        origemManual: origem === 'manual' || origem === 'bdo' ? origem : null,
-        temApi: !!r && origem !== 'manual' && origem !== 'bdo',
         parcial: [faltaInv, parou].filter(Boolean).join(', '),
         aviso: t?.dup ? ' · ⚠️ inversor cadastrado 2×' : '',
-        fmtKwh: (v) => this.fmtKwh(v),
-      });
+        fmtKwh: (v: number) => this.fmtKwh(v),
+      };
+      const linha = fontes
+        ? linhaBoletim({
+            ...comum,
+            escolha: fontes.get(uid)?.get(data),
+            origemManual: origem === 'manual' || origem === 'bdo' ? origem : null,
+            temApi: !!r && origem !== 'manual' && origem !== 'bdo',
+          })
+        : linhaBoletimLegado({
+            ...comum,
+            api: r ? { kwh: Number(r.kwh) || 0, origem } : null,
+            tonKwh: t ? Number(t.kwh) || 0 : 0,
+          });
       if (linha) porUnidade.set(uid, linha);
     }
     return [...porUnidade.values()].sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));

@@ -107,3 +107,50 @@ export function linhaBoletim(e: EntradaLinha): LinhaGeracao | null {
     motivo: motivo + (e.aviso ?? ''),
   };
 }
+
+export interface EntradaLegado {
+  unidadeId: string;
+  nome: string;
+  previsto: number;
+  /** Linha do diário (API, manual ou BDO); null = sem linha. */
+  api: { kwh: number; origem: string } | null;
+  /** kWh da TON pela consulta do próprio boletim (deduplicada por tópico); 0 = sem dado. */
+  tonKwh: number;
+  parcial: string;
+  aviso?: string;
+  fmtKwh: (v: number) => string;
+}
+
+/**
+ * Regra de antes do NEXON-37, usada só quando o FonteGeracaoService falha (o boletim não pode
+ * sair vazio): manual/BDO vence; senão API; API ausente/zerada → TON.
+ */
+export function linhaBoletimLegado(e: EntradaLegado): LinhaGeracao | null {
+  const fmt = e.fmtKwh;
+  const tonOk = e.tonKwh > 0;
+  const tonCompleto = tonOk && !e.parcial;
+  const origem = (e.api?.origem ?? 'nuvem').toLowerCase();
+  const apiKwh = e.api?.kwh ?? 0;
+  const base = { unidade_id: e.unidadeId, nome: e.nome, kwh_previsto: e.previsto };
+  let linha: LinhaGeracao | null = null;
+  if (e.api && apiKwh > 0 && (origem === 'manual' || origem === 'bdo')) {
+    linha = { ...base, kwh_realizado: apiKwh, fonte: origem, confianca: 'alta',
+      motivo: origem === 'manual' ? 'conferido manualmente' : 'conferido no BDO' };
+  } else if (e.api && apiKwh > 0) {
+    if (tonCompleto) {
+      const diff = Math.abs(apiKwh - e.tonKwh) / Math.max(apiKwh, e.tonKwh);
+      linha = { ...base, kwh_realizado: apiKwh, fonte: 'api',
+        confianca: diff <= 0.1 ? 'alta' : diff <= 0.3 ? 'media' : 'baixa',
+        motivo: diff <= 0.1 ? 'API e TON batem' : `API ${fmt(apiKwh)} × TON ${fmt(e.tonKwh)} kWh (${Math.round(diff * 100)}%)` };
+    } else {
+      linha = { ...base, kwh_realizado: apiKwh, fonte: 'api', confianca: 'media',
+        motivo: tonOk ? `só API (TON parcial: ${e.parcial})` : 'só API' };
+    }
+  } else if (tonOk) {
+    const semApi = e.api ? 'API sem dado' : 'sem API';
+    linha = { ...base, kwh_realizado: e.tonKwh, fonte: 'ton', confianca: tonCompleto ? 'media' : 'baixa',
+      motivo: tonCompleto ? `via TON (${semApi})` : `via TON, parcial: ${e.parcial} (${semApi})` };
+  }
+  if (linha) linha.motivo += e.aviso ?? '';
+  return linha;
+}
