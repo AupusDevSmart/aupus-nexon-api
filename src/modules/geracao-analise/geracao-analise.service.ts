@@ -28,6 +28,8 @@ interface BucketInversor {
   limiteAtivo: boolean;
   /** MAX(daily_yield) válido no intervalo (kWh); null = sem daily_yield. */
   y: number | null;
+  /** false = só linhas com daily_yield, sem potência: não entra na curva nem nas perdas. */
+  temPotencia: boolean;
 }
 
 export interface Intervalo {
@@ -57,15 +59,15 @@ export interface ResumoDia {
 
 /**
  * Hash do que muda o resultado de um dia: config mudou → o dia em cache não vale.
- * `versao` muda quando o cálculo do dia muda (NEXON-37: TON sem NUVEM_FUSION + kWh da TON no
- * cache; sem as colunas do SQL 2026-10-21 o hash é outro, e o dia é refeito quando o SQL entra).
+ * `versao` muda quando o cálculo do dia muda (NEXON-37: TON sem NUVEM_FUSION, inversor por
+ * tópico e kWh da TON no cache). A fonte da geração NÃO entra: o cache só guarda a TON.
  */
 export function hashConfig(ctx: ContextoUsina, versao = ''): string {
   const c = ctx.config;
   return createHash('sha1').update(JSON.stringify([
     c.fonte, c.kwpDc, ctx.potenciaAcKw, c.fatorDesempenho, c.inclinacaoGraus, c.azimuteGraus,
     c.solarimetroEquipamentoId, c.solarimetroMedicao, ctx.inversores.map((i) => [i.id, i.potenciaKw]),
-    c.fonteGeracao, versao,
+    versao,
   ])).digest('hex');
 }
 
@@ -102,8 +104,9 @@ export class GeracaoAnaliseService {
 
   /** geracao_analise_diaria.kwh_ton/ton_completa (SQL 2026-10-21). */
   private readonly colunasTon = new ColunaOpcional(/kwh_ton|ton_completa/);
+  /** O SQL 2026-10-21 entra antes do deploy: uma versão só (sem invalidação extra quando ele entra). */
   private versao(): string {
-    return this.colunasTon.disponivel() ? VERSAO_CACHE : `${VERSAO_CACHE}-sem-ton`;
+    return VERSAO_CACHE;
   }
 
   // ── Leitura dos inversores ────────────────────────────────────────────────
@@ -114,7 +117,7 @@ export class GeracaoAnaliseService {
     if (!ids.length) return out;
     const rows = await this.prisma.$queryRaw<any[]>`
       SELECT TRIM(equipamento_id) AS eq, (floor(extract(epoch FROM timestamp_dados) / 900) * 900)::bigint AS b,
-             AVG(GREATEST(p, 0))::float8 AS media, MIN(p)::float8 AS min, MAX(p)::float8 AS max, COUNT(*)::int AS n,
+             AVG(CASE WHEN pv IS NOT NULL THEN GREATEST(pv, 0) END)::float8 AS media, MIN(pv)::float8 AS min, MAX(pv)::float8 AS max, COUNT(pv)::int AS n,
              bool_or(st ~* '(fault|falha|alarm|trip|erro)') AS falha,
              bool_or(st ~* '(stop|shutdown|deslig|emergenc|power ?off)') AS desligado,
              MIN(lim)::float8 AS lim,
@@ -129,12 +132,15 @@ export class GeracaoAnaliseService {
           AND timestamp_dados >= ${sqlUtc(ini)}::timestamp AND timestamp_dados < ${sqlUtc(fim)}::timestamp
           AND ${FILTRO_TON}
       ) x
-      WHERE p IS NOT NULL AND abs(p) < 1000000
+      CROSS JOIN LATERAL (SELECT CASE WHEN abs(p) < 1000000 THEN p END AS pv) v
+      -- linha só com daily_yield (sem campo de potência) entra para o kWh da TON
+      WHERE (p IS NOT NULL AND abs(p) < 1000000) OR y IS NOT NULL
       GROUP BY 1, 2`;
     for (const r of rows) {
       const m = out.get(r.eq) ?? new Map<number, BucketInversor>();
       m.set(Number(r.b) * 1000, {
         media: Number(r.media) || 0, min: r.min, max: r.max, leituras: Number(r.n) || 0,
+        temPotencia: Number(r.n) > 0,
         falha: r.falha === true, desligado: r.desligado === true,
         limiteAtivo: r.lim != null && Number(r.lim) >= 0 && Number(r.lim) < 100,
         y: r.y == null ? null : Number(r.y),
@@ -205,6 +211,7 @@ export class GeracaoAnaliseService {
       let algumDado = false;
       for (const inv of ctx.inversores) {
         let b = porInversor.get(inv.id)?.get(t) ?? null;
+        if (b && !b.temPotencia) b = null;
         let preenchido = false;
         if (b) ultimo.set(inv.id, { b, idx });
         else {
@@ -249,7 +256,7 @@ export class GeracaoAnaliseService {
         porDia.set(dia, doDia);
         const a = doDia.get(eq) ?? { yieldKwh: null, integralKwh: 0, blocosSolares: 0 };
         if (b.y != null && (a.yieldKwh == null || b.y > a.yieldKwh)) a.yieldKwh = b.y;
-        a.integralKwh += b.media * INTERVALO_H;
+        if (b.temPotencia) a.integralKwh += b.media * INTERVALO_H;
         if (h >= SOLAR_INICIO_H && h < SOLAR_FIM_H) a.blocosSolares++;
         doDia.set(eq, a);
       }
@@ -462,12 +469,12 @@ export class GeracaoAnaliseService {
 
     const [primeiro, primeiroNuvem, temNuvem] = await Promise.all([
       this.primeiroDia(ids),
-      this.fontes.primeiroDiaNuvem(uid),
+      // Só o Total precisa do primeiro dia da nuvem (começa no primeiro ano com dado em qualquer fonte).
+      periodo === 'total' ? this.fontes.primeiroDiaNuvem(uid) : Promise.resolve(null),
       this.fontes.temNuvem(uid),
     ]);
-    // Primeiro dia com geração em qualquer fonte (Total e histórico do fechamento).
-    const primeiroGeral = [primeiro, primeiroNuvem].filter((d): d is string => !!d).sort()[0] ?? null;
     if (periodo === 'total') {
+      const primeiroGeral = [primeiro, primeiroNuvem].filter((d): d is string => !!d).sort()[0] ?? null;
       const anoIni = Math.max(ANO_MINIMO_TOTAL, Number((primeiroGeral ?? hoje).slice(0, 4)));
       janela = { ...janela, inicio: `${Math.min(anoIni, Number(hoje.slice(0, 4)))}-01-01` };
     }
@@ -664,7 +671,7 @@ export class GeracaoAnaliseService {
     };
 
     const [fechamento, previsao, potAgora] = await Promise.all([
-      this.fechamento(ctx, agora, primeiro, primeiroGeral, rs),
+      this.fechamento(ctx, agora, primeiro, rs),
       comFonte ? this.previsaoAmanha(ctx, agora, rs) : Promise.resolve(null),
       periodo === 'dia' && referencia === hoje ? this.potenciaAgora(ids, agora) : Promise.resolve(null),
     ]);
@@ -709,9 +716,7 @@ export class GeracaoAnaliseService {
   }
 
   /** Fechamento do mês corrente (GER-26..29), sem meta (GER-30), pelo kWh da fonte escolhida. */
-  private async fechamento(
-    ctx: ContextoUsina, agora: Date, primeiro: string | null, primeiroGeral: string | null, rs: (k: number | null) => number | null,
-  ) {
+  private async fechamento(ctx: ContextoUsina, agora: Date, primeiro: string | null, rs: (k: number | null) => number | null) {
     const hoje = diaLocal(agora);
     const [a, m, d] = hoje.split('-').map(Number);
     const nDias = diasNoMes(a, m);
@@ -719,15 +724,15 @@ export class GeracaoAnaliseService {
     const completos = d > 1 ? diasEntre(`${mes}-01`, somarDias(hoje, -1)) : [];
     const mapa = await this.escolhasDosDias(ctx, completos, agora, primeiro);
 
-    // Média do mesmo mês nos anos anteriores (só anos com dado, em qualquer fonte).
+    // Média do mesmo mês nos anos anteriores (só anos com leitura da TON), pelo kWh escolhido.
     let mediaHistorica: number | null = null;
-    if (primeiroGeral) {
+    if (primeiro) {
       const diasHist: string[] = [];
-      for (let ano = a - 1; ano >= Number(primeiroGeral.slice(0, 4)); ano--) {
+      for (let ano = a - 1; ano >= Number(primeiro.slice(0, 4)); ano--) {
         const ini = `${ano}-${String(m).padStart(2, '0')}-01`;
         const fim = `${ano}-${String(m).padStart(2, '0')}-${String(diasNoMes(ano, m)).padStart(2, '0')}`;
-        if (fim < primeiroGeral) break;
-        diasHist.push(...diasEntre(ini < primeiroGeral ? primeiroGeral : ini, fim));
+        if (fim < primeiro) break;
+        diasHist.push(...diasEntre(ini < primeiro ? primeiro : ini, fim));
       }
       if (diasHist.length) {
         const hist = await this.escolhasDosDias(ctx, diasHist, agora, primeiro);

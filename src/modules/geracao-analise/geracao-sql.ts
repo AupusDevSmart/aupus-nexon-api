@@ -5,6 +5,12 @@ export function sqlNum(expr: string): Prisma.Sql {
   return Prisma.raw(`(CASE WHEN (${expr}) ~ '^\\s*-?[0-9]+(\\.[0-9]+)?([eE][-+]?[0-9]+)?\\s*$' THEN (${expr})::numeric END)`);
 }
 
+/**
+ * Chave de dedup do inversor (alias `e` = equipamentos): o broker grava uma linha por
+ * equipamento inscrito no mesmo tópico MQTT — mesma chave = mesmo inversor físico.
+ */
+export const SQL_CHAVE_INVERSOR = `COALESCE(NULLIF(TRIM(e.topico_mqtt), ''), TRIM(e.id))`;
+
 /** Potência ativa (kW) de uma linha de equipamentos_dados. */
 export const POTENCIA_KW = Prisma.sql`COALESCE(potencia_ativa_kw,
   ${sqlNum("dados->'power'->>'active_total'")} / 1000.0,

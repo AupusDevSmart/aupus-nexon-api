@@ -4,7 +4,7 @@ import { capacidades, papelCanonico } from '@/core/modules/auth/papeis';
 import { AuditoriaAcessosService } from '@/core/modules/usuarios/auditoria-acessos.service';
 import type { ClienteInfo } from '@/core/common/cliente-info';
 import { FONTES_GERACAO, FonteGeracaoConfig, normalizarFonteGeracao } from './geracao-fonte';
-import { ColunaOpcional } from './geracao-sql';
+import { ColunaOpcional, SQL_CHAVE_INVERSOR } from './geracao-sql';
 
 /**
  * Grupo "Usina" da configuração da instalação (NEXON-16, seção 7). Tabela `unidade_usina_config`.
@@ -227,10 +227,16 @@ export class GeracaoConfigService {
     };
   }
 
-  /** Inversores da instalação (mesma detecção do alarme de comunicação e do COA). */
+  /**
+   * Inversores da instalação (mesma detecção do alarme de comunicação e do COA), um por tópico
+   * MQTT: o broker grava uma linha por equipamento inscrito no mesmo tópico, e inversor
+   * cadastrado 2× dobraria geração e potência (NEXON-37; mesma dedup do FonteGeracaoService).
+   */
   async inversores(unidadeId: string): Promise<Inversor[]> {
     const rows = await this.prisma.$queryRaw<any[]>`
-      SELECT TRIM(e.id) AS id, TRIM(e.nome) AS nome, pot.valor, pot.unidade,
+      SELECT * FROM (
+      SELECT DISTINCT ON (${Prisma.raw(SQL_CHAVE_INVERSOR)})
+             TRIM(e.id) AS id, TRIM(e.nome) AS nome, pot.valor, pot.unidade,
              (SELECT (d.dados->'info'->>'nominal_power') FROM equipamentos_dados d
                WHERE d.equipamento_id = e.id ORDER BY d.timestamp_dados DESC LIMIT 1) AS nominal_info
       FROM equipamentos e
@@ -245,7 +251,8 @@ export class GeracaoConfigService {
       WHERE e.unidade_id = ${unidadeId}::bpchar AND e.deleted_at IS NULL
         AND COALESCE(e.tipo_equipamento, '') NOT ILIKE 'TON%'
         AND CONCAT_WS(' ', t.codigo, t.nome, e.tipo_equipamento, e.topico_mqtt, c.nome) ~* 'INVERSOR'
-      ORDER BY TRIM(e.nome)`;
+      ORDER BY ${Prisma.raw(SQL_CHAVE_INVERSOR)}, TRIM(e.id)
+      ) x ORDER BY nome`;
     return rows.map((r) => ({
       id: r.id,
       nome: r.nome,

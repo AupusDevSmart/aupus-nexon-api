@@ -1,11 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { PrismaService } from '@/core';
+import { PrismaService, Prisma } from '@/core';
 import {
   agregarTonDia, blocosSolares, DiaFonte, escolherFonte, FonteGeracaoConfig, normalizarFonteGeracao, TonDia,
   TonInversorDia,
 } from './geracao-fonte';
 import { diaLocal, diasEntre, inicioDoDiaUtc, somarDias, sqlUtc } from './geracao-datas';
-import { ColunaOpcional, FILTRO_TON, POTENCIA_KW, YIELD_KWH, YIELD_MAX_KWH } from './geracao-sql';
+import { ColunaOpcional, FILTRO_TON, POTENCIA_KW, SQL_CHAVE_INVERSOR, YIELD_KWH, YIELD_MAX_KWH } from './geracao-sql';
 
 /** Dia escolhido + completude de cada fonte (para quem quer explicar a escolha). */
 export interface DiaFonteCalc extends DiaFonte {
@@ -30,29 +30,43 @@ const HORA_MS = 3_600_000;
 /** Dias sem limite prático (período Total). */
 const SEM_LIMITE = 20_000;
 const CACHE_MS = 60_000;
+const CACHE_PASSADO_MS = 10 * 60_000;
+
+const unicos = (ids: string[]) => [...new Set(ids.map((i) => i.trim()).filter(Boolean))].sort();
+
+export interface InversorFonte {
+  id: string;
+  /** COALESCE(tópico MQTT, id): mesma chave = mesmo inversor físico. */
+  chave: string;
+}
 
 /** 'YYYY-MM-DDTHH:MI:SS' local (SP, sem fuso) → instante. */
 const instanteLocal = (s: string | null): number | null => (s ? Date.parse(`${s}-03:00`) : null);
+
 
 /**
  * Fonte da geração (NEXON-37): por unidade e dia BRT, qual kWh vale — TON, nuvem ou manual.
  * Regra pura em geracao-fonte.ts (escolherFonte); aqui só as leituras, em lote (o COA chama
  * para todas as unidades a cada 60 s: poucas consultas, agrupadas por unidade e dia).
  *
- * - TON: Σ por inversor (mesma lista de GeracaoConfigService.inversores()) de MAX(daily_yield)
- *   do dia, sem as linhas NUVEM_FUSION; inversor sem daily_yield usa a integral da potência.
+ * - TON: Σ por inversor (mesma lista de GeracaoConfigService.inversores(), um por tópico MQTT)
+ *   de MAX(daily_yield) do dia, sem as linhas NUVEM_FUSION; sem daily_yield, a integral da potência.
  * - Nuvem: MAX(kwh_acumulado) do horário (06h em diante); sem horário, o diário (origem
- *   nuvem/api); sem os dois, hoje/ontem, o fallback Fusion gravado em equipamentos_dados.
+ *   nuvem/api); sem os dois, hoje/ontem e só em unidade Fusion, o fallback gravado em
+ *   equipamentos_dados (NUVEM_FUSION).
  * - Manual: geracao_diaria_plantas com origem manual/bdo.
+ *
+ * Cache por unidade (não por conjunto pedido: recortes de usuário diferentes reaproveitam):
+ * dias passados 10 min, hoje 60 s.
  */
 @Injectable()
 export class FonteGeracaoService {
   private readonly logger = new Logger(FonteGeracaoService.name);
   private readonly coluna = new ColunaOpcional(/fonte_geracao/);
-  private readonly cache = new Map<string, { ts: number; valor: Map<string, Map<string, DiaFonteCalc>> }>();
-  private readonly cacheInversores = new Map<string, { ts: number; valor: Map<string, string[]> }>();
-  /** TON de dias passados (estável): 10 min por conjunto de inversores e janela. */
-  private readonly cacheTonPassado = new Map<string, { ts: number; valor: Map<string, Map<string, TonInversorDia>> }>();
+  /** `${unidade}|${ini}|${fim}` → dias calculados. */
+  private readonly cacheDias = new Map<string, { ts: number; valor: Map<string, DiaFonteCalc> }>();
+  /** unidade → inversores {id, chave do tópico}. */
+  private readonly cacheInversores = new Map<string, { ts: number; valor: InversorFonte[] }>();
 
   constructor(private readonly prisma: PrismaService) {}
 
@@ -61,13 +75,14 @@ export class FonteGeracaoService {
   /** fonte_geracao gravada de cada unidade (ausente ou SQL não aplicado = automatico). */
   async configs(unidadeIds: string[]): Promise<Map<string, FonteGeracaoConfig>> {
     const out = new Map<string, FonteGeracaoConfig>();
-    const ids = [...new Set(unidadeIds.map((i) => i.trim()).filter(Boolean))];
+    const ids = unicos(unidadeIds);
     if (!ids.length || !this.coluna.disponivel()) return out;
     try {
+      // unidade_usina_config.unidade_id é varchar gravado sem padding.
       const rows = await this.prisma.$queryRaw<Array<{ u: string; f: string | null }>>`
-        SELECT TRIM(unidade_id) AS u, fonte_geracao AS f FROM unidade_usina_config
-        WHERE TRIM(unidade_id) = ANY(${ids}::text[])`;
-      for (const r of rows) out.set(r.u, normalizarFonteGeracao(r.f));
+        SELECT unidade_id AS u, fonte_geracao AS f FROM unidade_usina_config
+        WHERE unidade_id = ANY(${ids}::text[])`;
+      for (const r of rows) out.set(r.u.trim(), normalizarFonteGeracao(r.f));
     } catch (e) {
       if (!this.coluna.ausente(e)) this.logger.warn(`[fonte] config falhou: ${(e as Error)?.message ?? e}`);
     }
@@ -75,28 +90,44 @@ export class FonteGeracaoService {
   }
 
   /**
-   * Inversores de cada unidade (mesmo filtro de GeracaoConfigService.inversores()). Cache de
-   * 60 s: o COA pergunta e logo depois o porDias usa a mesma lista.
+   * Inversores de cada unidade, um por tópico MQTT (mesmo filtro e mesma dedup de
+   * GeracaoConfigService.inversores()). Cache de 60 s por unidade.
    */
-  async inversoresPorUnidade(unidadeIds: string[]): Promise<Map<string, string[]>> {
-    const out = new Map<string, string[]>();
-    const ids = [...new Set(unidadeIds.map((i) => i.trim()).filter(Boolean))].sort();
-    if (!ids.length) return out;
-    const chave = ids.join(',');
-    const c = this.cacheInversores.get(chave);
-    if (c && Date.now() - c.ts < CACHE_MS) return c.valor;
-    const rows = await this.prisma.$queryRaw<Array<{ u: string; id: string }>>`
-      SELECT TRIM(e.unidade_id) AS u, TRIM(e.id) AS id
-      FROM equipamentos e
-      LEFT JOIN tipos_equipamentos t ON t.id = e.tipo_equipamento_id
-      LEFT JOIN categorias_equipamentos c ON c.id = t.categoria_id
-      WHERE e.unidade_id = ANY(${ids}::bpchar[]) AND e.deleted_at IS NULL
-        AND COALESCE(e.tipo_equipamento, '') NOT ILIKE 'TON%'
-        AND CONCAT_WS(' ', t.codigo, t.nome, e.tipo_equipamento, e.topico_mqtt, c.nome) ~* 'INVERSOR'`;
-    for (const r of rows) out.set(r.u, [...(out.get(r.u) ?? []), r.id]);
-    if (this.cacheInversores.size > 100) this.cacheInversores.clear();
-    this.cacheInversores.set(chave, { ts: Date.now(), valor: out });
+  async inversoresComChave(unidadeIds: string[]): Promise<Map<string, InversorFonte[]>> {
+    const ids = unicos(unidadeIds);
+    const out = new Map<string, InversorFonte[]>();
+    const agora = Date.now();
+    const faltam = ids.filter((u) => {
+      const c = this.cacheInversores.get(u);
+      if (c && agora - c.ts < CACHE_MS) { out.set(u, c.valor); return false; }
+      return true;
+    });
+    if (faltam.length) {
+      const rows = await this.prisma.$queryRaw<Array<{ u: string; id: string; chave: string }>>`
+        SELECT DISTINCT ON (TRIM(e.unidade_id), ${Prisma.raw(SQL_CHAVE_INVERSOR)})
+               TRIM(e.unidade_id) AS u, TRIM(e.id) AS id, ${Prisma.raw(SQL_CHAVE_INVERSOR)} AS chave
+        FROM equipamentos e
+        LEFT JOIN tipos_equipamentos t ON t.id = e.tipo_equipamento_id
+        LEFT JOIN categorias_equipamentos c ON c.id = t.categoria_id
+        WHERE e.unidade_id = ANY(${faltam}::bpchar[]) AND e.deleted_at IS NULL
+          AND COALESCE(e.tipo_equipamento, '') NOT ILIKE 'TON%'
+          AND CONCAT_WS(' ', t.codigo, t.nome, e.tipo_equipamento, e.topico_mqtt, c.nome) ~* 'INVERSOR'
+        ORDER BY TRIM(e.unidade_id), ${Prisma.raw(SQL_CHAVE_INVERSOR)}, TRIM(e.id)`;
+      const novos = new Map<string, InversorFonte[]>(faltam.map((u) => [u, []]));
+      for (const r of rows) novos.get(r.u)?.push({ id: r.id, chave: r.chave });
+      if (this.cacheInversores.size > 2000) this.cacheInversores.clear();
+      for (const [u, v] of novos) {
+        this.cacheInversores.set(u, { ts: agora, valor: v });
+        out.set(u, v);
+      }
+    }
     return out;
+  }
+
+  /** Ids dos inversores de cada unidade (um por tópico). */
+  async inversoresPorUnidade(unidadeIds: string[]): Promise<Map<string, string[]>> {
+    const m = await this.inversoresComChave(unidadeIds);
+    return new Map([...m].map(([u, v]) => [u, v.map((i) => i.id)]));
   }
 
   /** TON por inversor e dia: daily_yield, integral e blocos solares com leitura. */
@@ -113,7 +144,7 @@ export class FonteGeracaoService {
                to_char(timestamp_dados - interval '3 hours', 'YYYY-MM-DD') AS dia,
                floor(extract(epoch FROM timestamp_dados) / 900) AS b,
                MIN(extract(hour FROM timestamp_dados - interval '3 hours'))::int AS h,
-               AVG(GREATEST(p, 0)) AS media,
+               AVG(CASE WHEN abs(p) < 1000000 THEN GREATEST(p, 0) END) AS media,
                MAX(CASE WHEN y >= 0 AND y < ${YIELD_MAX_KWH} THEN y END) AS y
         FROM (
           SELECT equipamento_id, timestamp_dados, ${POTENCIA_KW} AS p, ${YIELD_KWH} AS y
@@ -122,7 +153,8 @@ export class FonteGeracaoService {
             AND timestamp_dados >= ${sqlUtc(ini)}::timestamp AND timestamp_dados < ${sqlUtc(fim)}::timestamp
             AND ${FILTRO_TON}
         ) x
-        WHERE p IS NOT NULL AND abs(p) < 1000000
+        -- linha só com daily_yield (sem campo de potência) também conta
+        WHERE (p IS NOT NULL AND abs(p) < 1000000) OR y IS NOT NULL
         GROUP BY 1, 2, 3
       ) b
       GROUP BY eq, dia`;
@@ -134,24 +166,27 @@ export class FonteGeracaoService {
     return out;
   }
 
-  /** Nuvem e manual por unidade e dia. `inversores` habilita o fallback Fusion de hoje/ontem. */
+  /**
+   * Nuvem e manual por unidade e dia. O fallback Fusion só entra para unidade com provedor
+   * fusion_solar ativo, nos dias (hoje/ontem) sem horário nem diário.
+   */
   async nuvemPorDia(
     unidadeIds: string[], diaIni: string, diaFim: string, agora: Date, inversores: Map<string, string[]>,
   ): Promise<Map<string, Map<string, NuvemDia>>> {
-    const ids = [...new Set(unidadeIds.map((i) => i.trim()).filter(Boolean))];
+    const ids = unicos(unidadeIds);
     const out = new Map<string, Map<string, NuvemDia>>();
     if (!ids.length) return out;
     const hoje = diaLocal(agora);
     const fimDia = diaFim > hoje ? hoje : diaFim;
     const iniFusion = diaIni > somarDias(hoje, -1) ? diaIni : somarDias(hoje, -1);
-    const invFusion = ids.flatMap((u) => inversores.get(u) ?? []);
 
-    const [horaria, diaria, fusion] = await Promise.all([
+    // unidade_id das tabelas da nuvem é char(26): comparar com bpchar usa o índice.
+    const [horaria, diaria, fusionUnidades] = await Promise.all([
       this.prisma.$queryRaw<Array<{ u: string; dia: string; kwh: number | null; ultima: string }>>`
         SELECT TRIM(unidade_id) AS u, to_char(hora::date, 'YYYY-MM-DD') AS dia,
                MAX(kwh_acumulado)::float8 AS kwh, to_char(MAX(hora), 'YYYY-MM-DD"T"HH24:MI:SS') AS ultima
         FROM geracao_horaria_plantas
-        WHERE TRIM(unidade_id) = ANY(${ids}::text[])
+        WHERE unidade_id = ANY(${ids}::bpchar[])
           AND hora >= ${diaIni}::date AND hora < (${fimDia}::date + 1)
           AND EXTRACT(HOUR FROM hora) > 5               -- madrugada = resíduo de ontem na nuvem
           AND COALESCE(origem, 'nuvem') <> 'manual'
@@ -160,9 +195,14 @@ export class FonteGeracaoService {
         SELECT TRIM(unidade_id) AS u, to_char(data, 'YYYY-MM-DD') AS dia, kwh_realizado::float8 AS kwh,
                lower(COALESCE(origem, 'nuvem')) AS origem
         FROM geracao_diaria_plantas
-        WHERE TRIM(unidade_id) = ANY(${ids}::text[]) AND data BETWEEN ${diaIni}::date AND ${fimDia}::date`
+        WHERE unidade_id = ANY(${ids}::bpchar[]) AND data BETWEEN ${diaIni}::date AND ${fimDia}::date`
         .catch((e) => this.falhou('diária', e)),
-      iniFusion <= fimDia && invFusion.length ? this.fusionPorInversorDia(invFusion, iniFusion, fimDia, agora) : Promise.resolve([]),
+      iniFusion <= fimDia
+        ? this.prisma.$queryRaw<Array<{ u: string }>>`
+            SELECT TRIM(unidade_id) AS u FROM unidade_fv_config
+            WHERE unidade_id = ANY(${ids}::bpchar[]) AND provedor_monitoramento = 'fusion_solar' AND ativo = true`
+            .catch((e) => this.falhou('provedor', e))
+        : Promise.resolve([] as Array<{ u: string }>),
     ]);
 
     const pega = (u: string, d: string) => {
@@ -175,29 +215,36 @@ export class FonteGeracaoService {
     const recente = (ult: number | null) => ult != null && agora.getTime() - ult <= 2 * HORA_MS;
     const ate17 = (dia: string, ult: number | null) => ult != null && ult >= inicioDoDiaUtc(dia).getTime() + 17 * HORA_MS;
     const completa = (dia: string, ult: number | null) => (dia < hoje ? ate17(dia, ult) : recente(ult));
+    // Diário de hoje só fecha o dia a partir das 21h locais (hora do sync); dia passado, sempre.
+    const diarioFechou = (dia: string) => dia < hoje || agora.getTime() >= inicioDoDiaUtc(dia).getTime() + 21 * HORA_MS;
 
-    const comHoraria = new Set<string>();
+    const comNuvem = new Set<string>();
     for (const r of horaria) {
       if (r.kwh == null) continue;
       const v = pega(r.u, r.dia);
       v.kwhNuvem = Number(r.kwh);
       v.nuvemCompleta = completa(r.dia, instanteLocal(r.ultima));
-      comHoraria.add(`${r.u}|${r.dia}`);
+      comNuvem.add(`${r.u}|${r.dia}`);
     }
-    const comDiaria = new Set<string>();
     for (const r of diaria) {
       if (r.kwh == null) continue;
       const v = pega(r.u, r.dia);
       if (r.origem === 'manual' || r.origem === 'bdo') { v.kwhManual = Number(r.kwh); continue; }
       if (r.origem !== 'nuvem' && r.origem !== 'api') continue;
-      comDiaria.add(`${r.u}|${r.dia}`);
-      // Fechamento diário (21h) = dia completo na nuvem; o kWh segue o horário quando houver.
-      v.nuvemCompleta = true;
-      if (!comHoraria.has(`${r.u}|${r.dia}`)) v.kwhNuvem = Number(r.kwh);
+      if (diarioFechou(r.dia)) v.nuvemCompleta = true;
+      // O kWh segue o horário quando houver.
+      if (!comNuvem.has(`${r.u}|${r.dia}`)) v.kwhNuvem = Number(r.kwh);
+      comNuvem.add(`${r.u}|${r.dia}`);
     }
-    if (fusion.length) {
+
+    // Fallback Fusion: só unidades fusion_solar, só nos dias (hoje/ontem) ainda sem nuvem.
+    const diasFusion = iniFusion <= fimDia ? diasEntre(iniFusion, fimDia) : [];
+    const precisam = fusionUnidades.map((r) => r.u).filter((u) => diasFusion.some((d) => !comNuvem.has(`${u}|${d}`)));
+    const invFusion = precisam.flatMap((u) => inversores.get(u) ?? []);
+    if (invFusion.length) {
+      const fusion = await this.fusionPorInversorDia(invFusion, iniFusion, fimDia, agora);
       const unidadeDe = new Map<string, string>();
-      for (const [u, invs] of inversores) for (const i of invs) unidadeDe.set(i, u);
+      for (const u of precisam) for (const i of inversores.get(u) ?? []) unidadeDe.set(i, u);
       const porUnidadeDia = new Map<string, { kwh: number; ult: number | null }>();
       for (const r of fusion) {
         const u = unidadeDe.get(r.eq);
@@ -210,7 +257,7 @@ export class FonteGeracaoService {
         porUnidadeDia.set(k, a);
       }
       for (const [k, a] of porUnidadeDia) {
-        if (comHoraria.has(k) || comDiaria.has(k)) continue;
+        if (comNuvem.has(k)) continue;
         const [u, dia] = k.split('|');
         const v = pega(u, dia);
         v.kwhNuvem = a.kwh;
@@ -267,23 +314,47 @@ export class FonteGeracaoService {
 
   /**
    * Escolha de várias unidades em vários dias (COA, boletins). unidade → dia → escolha.
-   * Dias depois de hoje ficam de fora. Cache de 60 s por conjunto de unidades e janela.
+   * Dias depois de hoje ficam de fora. Cache por unidade: dias passados 10 min, hoje 60 s.
    */
   async porDias(unidadeIds: string[], diaIni: string, diaFim: string, agora = new Date()): Promise<Map<string, Map<string, DiaFonteCalc>>> {
-    const ids = [...new Set(unidadeIds.map((i) => i.trim()).filter(Boolean))].sort();
-    const out = new Map<string, Map<string, DiaFonteCalc>>();
+    const ids = unicos(unidadeIds);
     const hoje = diaLocal(agora);
     const fim = diaFim > hoje ? hoje : diaFim;
-    if (!ids.length || diaIni > fim) return out;
+    if (!ids.length || diaIni > fim) return new Map();
+    const out = new Map<string, Map<string, DiaFonteCalc>>(ids.map((u) => [u, new Map()]));
 
-    const chave = `${ids.join(',')}|${diaIni}|${fim}`;
-    const c = this.cache.get(chave);
-    if (c && agora.getTime() - c.ts < CACHE_MS && agora.getTime() >= c.ts) return c.valor;
+    const ontem = somarDias(hoje, -1);
+    const partes: Array<{ ini: string; fim: string; ttl: number }> = [];
+    if (diaIni <= ontem) partes.push({ ini: diaIni, fim: fim < hoje ? fim : ontem, ttl: CACHE_PASSADO_MS });
+    if (fim === hoje) partes.push({ ini: hoje, fim: hoje, ttl: CACHE_MS });
 
+    for (const p of partes) {
+      const faltam: string[] = [];
+      for (const u of ids) {
+        const c = this.cacheDias.get(`${u}|${p.ini}|${p.fim}`);
+        if (c && agora.getTime() - c.ts < p.ttl && agora.getTime() >= c.ts) {
+          for (const [d, v] of c.valor) out.get(u)?.set(d, v);
+        } else faltam.push(u);
+      }
+      if (!faltam.length) continue;
+      const calc = await this.calcularLote(faltam, p.ini, p.fim, agora);
+      if (this.cacheDias.size > 5000) this.cacheDias.clear();
+      for (const u of faltam) {
+        const valor = calc.get(u) ?? new Map<string, DiaFonteCalc>();
+        this.cacheDias.set(`${u}|${p.ini}|${p.fim}`, { ts: agora.getTime(), valor });
+        for (const [d, v] of valor) out.get(u)?.set(d, v);
+      }
+    }
+    return out;
+  }
+
+  /** Cálculo em lote (sem cache) das unidades pedidas na janela. */
+  private async calcularLote(ids: string[], diaIni: string, fim: string, agora: Date): Promise<Map<string, Map<string, DiaFonteCalc>>> {
+    const out = new Map<string, Map<string, DiaFonteCalc>>();
     const [configs, inversores] = await Promise.all([this.configs(ids), this.inversoresPorUnidade(ids)]);
     const todos = [...inversores.values()].flat();
     const [ton, nuvem] = await Promise.all([
-      this.tonComCache(todos, diaIni, fim, agora),
+      this.tonPorInversorDia(todos, diaIni, fim, agora),
       this.nuvemPorDia(ids, diaIni, fim, agora, inversores),
     ]);
     const dias = diasEntre(diaIni, fim, SEM_LIMITE);
@@ -296,33 +367,6 @@ export class FonteGeracaoService {
         m.set(d, this.montar(d, configs.get(u) ?? 'automatico', tonDia, nuvem.get(u)?.get(d)));
       }
       out.set(u, m);
-    }
-
-    if (this.cache.size > 100) this.cache.clear();
-    this.cache.set(chave, { ts: agora.getTime(), valor: out });
-    return out;
-  }
-
-  /** TON da janela: dias passados com cache de 10 min (o COA pede ontem a cada 60 s), hoje sempre lido. */
-  private async tonComCache(inversorIds: string[], diaIni: string, diaFim: string, agora: Date) {
-    const hoje = diaLocal(agora);
-    const fimPassado = diaFim < hoje ? diaFim : somarDias(hoje, -1);
-    if (!inversorIds.length || diaIni > fimPassado) return this.tonPorInversorDia(inversorIds, diaIni, diaFim, agora);
-    const chave = `${[...inversorIds].sort().join(',')}|${diaIni}|${fimPassado}`;
-    const c = this.cacheTonPassado.get(chave);
-    let passado = c && agora.getTime() - c.ts < 10 * 60_000 && agora.getTime() >= c.ts ? c.valor : null;
-    const [p, h] = await Promise.all([
-      passado ? Promise.resolve(passado) : this.tonPorInversorDia(inversorIds, diaIni, fimPassado, agora),
-      diaFim >= hoje ? this.tonPorInversorDia(inversorIds, hoje, hoje, agora) : Promise.resolve(new Map<string, Map<string, TonInversorDia>>()),
-    ]);
-    if (!passado) {
-      passado = p;
-      if (this.cacheTonPassado.size > 50) this.cacheTonPassado.clear();
-      this.cacheTonPassado.set(chave, { ts: agora.getTime(), valor: p });
-    }
-    const out = new Map<string, Map<string, TonInversorDia>>();
-    for (const fonte of [passado, h]) {
-      for (const [eq, m] of fonte) out.set(eq, new Map([...(out.get(eq) ?? new Map()), ...m]));
     }
     return out;
   }
@@ -353,7 +397,7 @@ export class FonteGeracaoService {
   async temNuvem(unidadeId: string): Promise<boolean> {
     try {
       const r = await this.prisma.$queryRaw<Array<{ ok: boolean }>>`
-        SELECT EXISTS (SELECT 1 FROM unidade_fv_config WHERE TRIM(unidade_id) = ${unidadeId.trim()} AND ativo = true) AS ok`;
+        SELECT EXISTS (SELECT 1 FROM unidade_fv_config WHERE unidade_id = ${unidadeId.trim()}::bpchar AND ativo = true) AS ok`;
       return r[0]?.ok === true;
     } catch (e) {
       this.logger.warn(`[fonte] unidade_fv_config falhou: ${(e as Error)?.message ?? e}`);
@@ -367,9 +411,9 @@ export class FonteGeracaoService {
     const r = await this.prisma.$queryRaw<Array<{ d: string | null }>>`
       SELECT to_char(LEAST(
         (SELECT MIN(data) FROM geracao_diaria_plantas
-          WHERE TRIM(unidade_id) = ${uid} AND data >= '2020-01-01' AND COALESCE(kwh_realizado, 0) > 0),
+          WHERE unidade_id = ${uid}::bpchar AND data >= '2020-01-01' AND COALESCE(kwh_realizado, 0) > 0),
         (SELECT MIN(hora)::date FROM geracao_horaria_plantas
-          WHERE TRIM(unidade_id) = ${uid} AND hora >= '2020-01-01' AND COALESCE(kwh_acumulado, 0) > 0)
+          WHERE unidade_id = ${uid}::bpchar AND hora >= '2020-01-01' AND COALESCE(kwh_acumulado, 0) > 0)
       ), 'YYYY-MM-DD') AS d`.catch(() => [] as Array<{ d: string | null }>);
     return r[0]?.d ?? null;
   }
@@ -385,7 +429,7 @@ export class FonteGeracaoService {
     const horas = await this.prisma.$queryRaw<Array<{ h: number; kwh: number | null }>>`
       SELECT EXTRACT(HOUR FROM hora)::int AS h, SUM(kwh_hora)::float8 AS kwh
       FROM geracao_horaria_plantas
-      WHERE TRIM(unidade_id) = ${uid} AND hora::date = ${dia}::date AND EXTRACT(HOUR FROM hora) > 5
+      WHERE unidade_id = ${uid}::bpchar AND hora >= ${dia}::date AND hora < (${dia}::date + 1) AND EXTRACT(HOUR FROM hora) > 5
         AND COALESCE(origem, 'nuvem') <> 'manual'
       GROUP BY 1`.catch((e) => this.falhou('curva horária', e));
     if (horas.length) {
@@ -401,7 +445,7 @@ export class FonteGeracaoService {
     const blocos = await this.prisma.$queryRaw<Array<{ b: bigint | number; kw: number | null }>>`
       SELECT b, SUM(media)::float8 AS kw FROM (
         SELECT equipamento_id, (floor(extract(epoch FROM timestamp_dados) / 900) * 900)::bigint AS b,
-               AVG(GREATEST(${POTENCIA_KW}, 0)) AS media
+               AVG(CASE WHEN (${POTENCIA_KW}) IS NOT NULL THEN GREATEST(${POTENCIA_KW}, 0) END) AS media
         FROM equipamentos_dados
         WHERE equipamento_id = ANY(${inversorIds}::bpchar[])
           AND timestamp_dados >= ${sqlUtc(new Date(ini))}::timestamp AND timestamp_dados < ${sqlUtc(fim)}::timestamp
@@ -414,9 +458,8 @@ export class FonteGeracaoService {
 
   /** Esquece o cache em memória (config da fonte mudou). */
   limpar(): void {
-    this.cache.clear();
+    this.cacheDias.clear();
     this.cacheInversores.clear();
-    this.cacheTonPassado.clear();
   }
 }
 

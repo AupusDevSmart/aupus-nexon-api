@@ -151,8 +151,8 @@ Registro da instalação (`logs_mqtt`, `comando_semantico = 'usina.config'`) e a
 (`auditoria_acessos`, `acao = 'usina_config'`, `objeto_tipo = 'unidade'`, `objeto_id` = unidade,
 `unidade_ids`; `detalhes`: `usuario` {id, nome, papel}, `unidade` {id, nome}, `campos_alterados`,
 `alteracoes` [{campo, rotulo, de, para}], ip, user_agent). Buscar por campo:
-`detalhes->'campos_alterados' ? 'fonte_geracao'`. Mudar a fonte limpa o cache da análise e o cache em
-memória do `FonteGeracaoService`. Responde como o GET.
+`detalhes->'campos_alterados' ? 'fonte_geracao'`. Mudar só a fonte limpa o cache em memória do
+`FonteGeracaoService` (o cache diário da análise guarda só a TON e fica). Responde como o GET.
 
 ## Cálculo (resumo)
 
@@ -180,6 +180,10 @@ pelo COA (`energiaHoje`/`energiaOntem`, `fonteGeracao`, `fontesDivergem`) e pelo
 (WhatsApp) e semanal (PDF) — o mesmo número em todo lugar.
 
 Entradas do dia:
+- Inversores: `GeracaoConfigService.inversores()` e o serviço usam a mesma lista, **um por tópico
+  MQTT** (`COALESCE(topico_mqtt, id)`): o broker grava uma linha por equipamento inscrito no mesmo
+  tópico, e inversor cadastrado 2× dobraria geração e potência. Linha só com `daily_yield` (sem
+  potência) conta para o kWh, não para a curva nem para as perdas.
 - `kwh_ton` = Σ por inversor (lista de `GeracaoConfigService.inversores()`) de `MAX(daily_yield)` do
   dia, **sem** as linhas `equipamentos_dados.fonte = 'NUVEM_FUSION'` (fallback de nuvem do Fusion) e
   sem `qualidade = 'MOCK'`. `daily_yield` só conta a partir das 04:00 (inversor que zera tarde manda
@@ -189,9 +193,10 @@ Entradas do dia:
   agora). Inversor sem leitura = incompleta.
 - `kwh_nuvem` = `MAX(kwh_acumulado)` do dia em `geracao_horaria_plantas` (06h em diante — a madrugada
   traz o total de ontem; origem ≠ manual); sem horário, `geracao_diaria_plantas.kwh_realizado` com
-  origem nuvem/api; sem os dois, hoje/ontem, o fallback Fusion (`NUVEM_FUSION`, Σ `daily_yield`).
-- `nuvem_completa` = dia passado com diário ou horário até ≥ 17h; hoje: snapshot nas últimas 2 h (ou
-  o diário das 21h).
+  origem nuvem/api; sem os dois, hoje/ontem e só em unidade com provedor `fusion_solar` ativo, o
+  fallback Fusion (`NUVEM_FUSION`, Σ `daily_yield`).
+- `nuvem_completa` = dia passado com diário ou horário até ≥ 17h; hoje: snapshot nas últimas 2 h, ou
+  o diário depois das 21h locais.
 - `kwh_manual` = `geracao_diaria_plantas` com origem manual/bdo.
 
 Escolha (`fonte`, `motivo`), nesta ordem: manual (`manual`, vence até fonte fixada) → fonte fixada
@@ -201,10 +206,12 @@ divergência `|ton − nuvem| / max ≤ 5%` (`ton`, `concordam`) → TON incompl
 (`nuvem`, `ton_incompleta`) → senão `ton`, `divergem`.
 
 Cache: `geracao_analise_diaria` guarda só a TON do dia (`kwh_ton`, `ton_completa`); a nuvem é lida a
-cada pedido e a escolha refeita (a nuvem chega às 21h, a escolha nunca fica congelada). Sem o SQL
-2026-10-21, a TON do cache sai da integral da potência e o dia é refeito quando o SQL entra.
+cada pedido e a escolha refeita (a nuvem chega às 21h, a escolha nunca fica congelada). A fonte não
+entra no hash do cache: mudar só `fonte_geracao` não recalcula a análise. Sem o SQL 2026-10-21, a TON
+do cache sai da integral da potência (o SQL deve entrar antes do deploy).
 O `porDias` (COA, boletins) lê em lote: inversores, config, TON (agregada por inversor e dia no SQL),
-horário, diário e fallback Fusion — 6 consultas por chamada, cache de 60 s.
+horário, diário, provedor e, quando precisa, o fallback Fusion. Cache por unidade (outro recorte de
+usuário reaproveita): dias passados 10 min, hoje 60 s.
 
 No Dia com fonte nuvem, os 96 pontos saem do horário da nuvem: o snapshot das H h traz o kWh desde o
 anterior e vira `real_kw = kwh_hora` nos 4 blocos da hora que terminou (H−1 h); sem horário (Fusion),
@@ -212,9 +219,12 @@ a potência do fallback `NUVEM_FUSION`; sem nenhum, fica a curva da TON (`fonte:
 
 COA (`GET /coa/dashboard`, por unidade): `fonteGeracao` (ton|nuvem|manual|null) e `fontesDivergem`
 de hoje. Em `energiaHoje`/`energiaOntem` a parcela dos inversores (já com as perdas da config de
-demanda) sai e entra o kWh escolhido × o mesmo fator de perdas; consumo e o resto seguem iguais.
+demanda) sai e entra o kWh escolhido × o mesmo fator de perdas — só quando a parcela soma
+exatamente os mesmos inversores do serviço (por tópico). Config de demanda com parte dos inversores
+ou recorte do operador mantém o número de antes. Consumo e o resto seguem iguais.
 `fonteDados` (layout do web) não mudou. Operador só com "Ver geração" na instalação.
 
 Boletim diário: o kWh da linha é o escolhido; a confiança continua dizendo se TON e API batem e se a
-TON veio completa (`boletim-linha.ts`). Boletim semanal: semana, semana anterior, mês, ano e série
+TON veio completa (`boletim-linha.ts`). Se o serviço falhar, a linha sai pela regra antiga (API vence,
+TON na falta) e o erro vai para o log. Boletim semanal: semana, semana anterior, mês, ano e série
 diária pelo kWh escolhido (previsto segue do diário).

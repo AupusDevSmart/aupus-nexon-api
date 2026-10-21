@@ -67,9 +67,10 @@ export class GeracaoAnaliseController {
     this.exigirConfigUsina(user);
     if (user) await this.scope.assertEntityInScope('unidade', unidadeId.trim(), user);
     const alteracoes = await this.configs.salvar(unidadeId, body, user, cliente);
-    if (Object.keys(alteracoes).length) {
-      // Fonte da geração mudou: o COA e os boletins também param de usar a escolha antiga.
-      if ('fonte_geracao' in alteracoes) this.fontes.limpar();
+    // Fonte da geração mudou: o COA e os boletins param de usar a escolha antiga. O cache diário
+    // da análise só guarda a TON, então a fonte sozinha não o invalida.
+    if ('fonte_geracao' in alteracoes) this.fontes.limpar();
+    if (Object.keys(alteracoes).some((k) => k !== 'fonte_geracao')) {
       // Esperado depende de toda a config: o cache diário recomeça. Inclinação, azimute ou fonte
       // mudam a própria irradiância no plano dos módulos.
       await this.analise.limparCache(unidadeId);
