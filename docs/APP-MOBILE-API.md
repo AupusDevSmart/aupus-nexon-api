@@ -92,6 +92,10 @@ ambíguo como "Local/Remoto" → `null`). Espelho de vínculos vazio → cai em 
   (configuração de demanda com sinal/perdas; fallback legado somando tudo). Unidade que hoje vem
   da nuvem (ou sem telemetria ontem) usa `geracao_diaria_plantas.kwh_realizado` de ontem.
   Cache de 10 min.
+- NEXON-37: a geração (parcela dos inversores) de `energiaHoje`/`energiaOntem` é o kWh da fonte
+  escolhida pelo `FonteGeracaoService` (TON × nuvem × manual, mesma regra da análise de geração);
+  consumo segue igual. Por unidade: `fonteGeracao` (`ton`|`nuvem`|`manual`|`null`) e
+  `fontesDivergem` (bool) de hoje. `fonteDados` não mudou. Regra em `docs/GERACAO-ANALISE.md`.
 - `unidades[].equipamentosScs`: equipamentos da unidade no arqIoT = componente do diagrama IoT
   (menos a própria TON) ou ponto com vínculo ativo. `0` = "Sem instrumentação". Omitido em erro.
 - Corrigido: o sinóptico (`/sinoptico/...`) contava comando como alarme.
