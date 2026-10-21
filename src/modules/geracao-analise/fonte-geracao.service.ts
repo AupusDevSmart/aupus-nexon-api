@@ -292,8 +292,10 @@ export class FonteGeracaoService {
 
   // ── Escolha ───────────────────────────────────────────────────────────────
 
-  private montar(dia: string, config: FonteGeracaoConfig, ton: TonDia | undefined, nuvem: NuvemDia | undefined): DiaFonteCalc {
+  private montar(dia: string, config: FonteGeracaoConfig, ton: TonDia | undefined, nuvem: NuvemDia | undefined, agora: Date): DiaFonteCalc {
     const entrada = {
+      // Dia em andamento: a nuvem chega por hora (ou só às 21h), então diferença com a TON ao vivo não é divergência.
+      diaFechado: dia < diaLocal(agora) || agora.getTime() >= inicioDoDiaUtc(dia).getTime() + 21 * HORA_MS,
       config,
       kwhTon: ton?.kwh ?? null,
       tonCompleta: ton?.completa ?? false,
@@ -364,7 +366,7 @@ export class FonteGeracaoService {
       for (const d of dias) {
         const leituras = invs.map((i) => ton.get(i)?.get(d)).filter((x): x is TonInversorDia => !!x);
         const tonDia = agregarTonDia(leituras, invs.length, blocosSolares(d, agora));
-        m.set(d, this.montar(d, configs.get(u) ?? 'automatico', tonDia, nuvem.get(u)?.get(d)));
+        m.set(d, this.montar(d, configs.get(u) ?? 'automatico', tonDia, nuvem.get(u)?.get(d), agora));
       }
       out.set(u, m);
     }
@@ -389,7 +391,7 @@ export class FonteGeracaoService {
       this.nuvemPorDia([uid], diaIni, fim, agora, new Map([[uid, inversorIds]])),
     ]);
     const n = nuvem.get(uid);
-    for (const d of diasEntre(diaIni, fim, SEM_LIMITE)) out.set(d, this.montar(d, cfg, ton.get(d), n?.get(d)));
+    for (const d of diasEntre(diaIni, fim, SEM_LIMITE)) out.set(d, this.montar(d, cfg, ton.get(d), n?.get(d), agora));
     return out;
   }
 

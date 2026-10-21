@@ -80,6 +80,12 @@ describe('escolha da fonte (NEXON-37)', () => {
       expect(escolherFonte(e({ kwhTon: 400, tonCompleta: false, kwhNuvem: 1000, nuvemCompleta: false }))).toMatchObject({ fonte: 'ton', motivo: 'divergem' });
     });
 
+    it('dia em andamento: nuvem atrasada não é divergência → ton, em_andamento', () => {
+      // UFV SOLAR POWER às 10h40 de 21/10: TON ao vivo × snapshot horário da nuvem das 10h.
+      expect(escolherFonte(e({ kwhTon: 2100, kwhNuvem: 1700, diaFechado: false }))).toMatchObject({ fonte: 'ton', motivo: 'em_andamento' });
+      expect(escolherFonte(e({ kwhTon: 2100, kwhNuvem: 1700, diaFechado: true })).motivo).toBe('divergem');
+    });
+
     it('as duas zeradas concordam', () => {
       expect(escolherFonte(e({ kwhTon: 0, kwhNuvem: 0 }))).toMatchObject({ fonte: 'ton', motivo: 'concordam', divergenciaPct: 0 });
     });

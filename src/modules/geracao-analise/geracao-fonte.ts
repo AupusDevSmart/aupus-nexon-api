@@ -20,6 +20,7 @@ export type MotivoFonte =
   | 'nuvem_zerada'
   | 'concordam'
   | 'ton_incompleta'
+  | 'em_andamento'
   | 'divergem';
 
 /** Diferença relativa até a qual TON e nuvem "concordam". */
@@ -47,6 +48,8 @@ export interface EntradaFonte {
   nuvemCompleta: boolean;
   /** Lançamento manual/BDO do dia; null = não há. */
   kwhManual: number | null;
+  /** Dia passado ou depois das 21h locais. Ausente = fechado. */
+  diaFechado?: boolean;
 }
 
 export interface EscolhaFonte {
@@ -73,7 +76,8 @@ export function divergencia(ton: number | null, nuvem: number | null): number | 
  * 4. nuvem = 0 e TON > 0 → ton (nuvem_zerada);
  * 5. divergência ≤ 5% → ton (concordam);
  * 6. TON incompleta e nuvem completa → nuvem (ton_incompleta);
- * 7. senão → ton (divergem).
+ * 7. dia ainda em andamento → ton (em_andamento): a nuvem vem atrasada, não é divergência;
+ * 8. senão → ton (divergem).
  */
 export function escolherFonte(e: EntradaFonte): EscolhaFonte {
   const div = divergencia(e.kwhTon, e.kwhNuvem);
@@ -109,6 +113,7 @@ export function escolherFonte(e: EntradaFonte): EscolhaFonte {
   if (nuvem === 0 && ton > 0) return r('ton', 'nuvem_zerada');
   if ((div as number) <= LIMIAR_CONCORDAM) return r('ton', 'concordam');
   if (!e.tonCompleta && e.nuvemCompleta) return r('nuvem', 'ton_incompleta');
+  if (e.diaFechado === false) return r('ton', 'em_andamento');
   return r('ton', 'divergem');
 }
 
