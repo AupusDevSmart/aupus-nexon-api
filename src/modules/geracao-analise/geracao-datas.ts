@@ -7,8 +7,8 @@
 export const OFFSET_BRT_H = -3;
 const OFFSET_MS = OFFSET_BRT_H * 3_600_000;
 
-export type Periodo = 'dia' | 'semana' | 'mes' | 'ano';
-export const PERIODOS: Periodo[] = ['dia', 'semana', 'mes', 'ano'];
+export type Periodo = 'dia' | 'semana' | 'mes' | 'ano' | 'total';
+export const PERIODOS: Periodo[] = ['dia', 'semana', 'mes', 'ano', 'total'];
 
 const pad = (n: number) => String(n).padStart(2, '0');
 
@@ -68,18 +68,30 @@ export interface JanelaPeriodo {
   referencia: string;
   inicio: string;
   fim: string;
-  anterior: string;
-  /** null quando o próximo período começa depois de hoje. */
+  /** null no período Total (não há período anterior). */
+  anterior: string | null;
+  /** null quando o próximo período começa depois de hoje (e no Total). */
   proximo: string | null;
 }
 
-/** Normaliza o período pedido: semana = segunda a domingo; mês e ano civis. */
+/** Primeiro ano do período Total quando não se sabe o primeiro dado. */
+export const ANO_MINIMO_TOTAL = 2020;
+
+/**
+ * Normaliza o período pedido: semana = segunda a domingo; mês e ano civis; total = de 2020 ao
+ * fim do ano corrente (a análise troca o início pelo primeiro ano com dado).
+ */
 export function janelaDoPeriodo(periodo: Periodo, referencia: string, hoje: string): JanelaPeriodo {
   const [a, m] = referencia.split('-').map(Number);
   let inicio: string;
   let fim: string;
   let anterior: string;
   let proximo: string;
+  if (periodo === 'total') {
+    return {
+      periodo, referencia, inicio: `${ANO_MINIMO_TOTAL}-01-01`, fim: `${hoje.slice(0, 4)}-12-31`, anterior: null, proximo: null,
+    };
+  }
   if (periodo === 'dia') {
     inicio = fim = referencia;
     anterior = somarDias(referencia, -1);

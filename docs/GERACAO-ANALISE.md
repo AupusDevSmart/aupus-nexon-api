@@ -1,14 +1,15 @@
 # Análise de geração (NEXON-16)
 
 Spec: card NEXON-16 ("Spec NexON — Análise de geração"). Vale para web e apps.
-Módulo: `src/modules/geracao-analise/`. SQL: `db/manual-migrations/2026-10-20_geracao_analise.sql`.
+Módulo: `src/modules/geracao-analise/`. SQL: `db/manual-migrations/2026-10-20_geracao_analise.sql` e
+`2026-10-21_fonte_geracao.sql` (fonte da geração, NEXON-37 — ver a seção "Fonte da geração").
 
 A análise olha **só os inversores** da instalação (GER-2). Carga, medidor e líquido continuam
 vindo dos endpoints de sempre.
 
 ## Endpoints (prefixo `/api/v1`, JWT; resposta no envelope `{success, data}` de sempre)
 
-### `GET /geracao-analise/unidades/:unidadeId?periodo=dia|semana|mes|ano&data=YYYY-MM-DD`
+### `GET /geracao-analise/unidades/:unidadeId?periodo=dia|semana|mes|ano|total&data=YYYY-MM-DD`
 
 Qualquer usuário com acesso à instalação. `data` = qualquer dia dentro do período (padrão: hoje,
 fuso America/Sao_Paulo). Semana = segunda a domingo.
@@ -16,15 +17,29 @@ fuso America/Sao_Paulo). Semana = segunda a domingo.
 ```jsonc
 {
   "unidade_id": "cmh...", "unidade_nome": "UFV SOLAR POWER",
-  "periodo": "dia",                    // dia | semana | mes | ano
+  "periodo": "dia",                    // dia | semana | mes | ano | total
   "referencia": "2026-10-20",          // a data pedida (normalizada)
   "inicio": "2026-10-20", "fim": "2026-10-20",   // primeiro e último dia do período
-  "anterior": "2026-10-19", "proximo": null,     // data para < e > (null = futuro, não navega)
+  "anterior": "2026-10-19", "proximo": null,     // data para < e > (null = futuro, não navega; Total: os dois null)
   "hoje": "2026-10-20",
   "config": {
     "fonte": "satelite",               // satelite | solarimetro | nenhuma
     "kwp_dc": 1512, "potencia_ac_kw": 999,
-    "exibir_rs": false, "tarifa_rs_kwh": null   // tarifa só vem quando exibir_rs = true
+    "exibir_rs": false, "tarifa_rs_kwh": null,  // tarifa só vem quando exibir_rs = true
+    "fonte_geracao": "automatico"      // automatico | ton | nuvem (NEXON-37)
+  },
+  "fonte_geracao": {                   // NEXON-37 — de onde veio o kWh do período (ver "Fonte da geração")
+    "config": "automatico",
+    "escolhida": "ton",                // ton | nuvem | manual | mista | null (período sem dado)
+    "divergem": false,                 // algum dia do período com motivo "divergem"
+    "selo": "Fonte: TON",              // "Fonte: TON" | "Fonte: nuvem" | "Fonte: manual" | "Fontes: TON e nuvem"
+                                       //   | "Fontes divergem — usando TON" | null (sem dado)
+    "tem_nuvem": true,                 // integração de nuvem ativa (unidade_fv_config.ativo)
+    "kwh_ton": 6100.2, "kwh_nuvem": 6080.0,     // somas do período (null sem dado)
+    "dias": [                          // Dia: 1 item; Semana/Mês: 1 por dia até hoje; Ano/Total: omitido
+      { "data": "2026-10-20", "kwh": 6100.2, "kwh_ton": 6100.2, "kwh_nuvem": 6080.0, "kwh_manual": null,
+        "fonte": "ton", "motivo": "concordam", "divergencia_pct": 0.3 }
+    ]
   },
   "tem_inversor": true,                // false = instalação sem geração (não mostrar a análise)
   "tem_dados": true,                   // false = inversores nunca mandaram leitura → pontos vazio e
@@ -33,7 +48,8 @@ fuso America/Sao_Paulo). Semana = segunda a domingo.
     "potencia_kw": 0.0,                // soma dos inversores na última leitura (≤ 15 min)
     "gerando": false                   // false depois do pôr do sol → destacar o resumo do dia (GER-24)
   },
-  // Dia: 96 pontos de 15 min. Semana/Mês: 1 por dia. Ano: 1 por mês.
+  // Dia: 96 pontos de 15 min. Semana/Mês: 1 por dia. Ano: 1 por mês. Total: 1 por ano (do primeiro
+  //   ano com dado em qualquer fonte, ≥ 2020, até o atual; rotulo "2025", data "2025-01-01").
   "pontos": [
     {
       "rotulo": "06:15",               // Dia "HH:mm" · Semana "seg 20" · Mês "20" · Ano "out"
@@ -44,11 +60,14 @@ fuso America/Sao_Paulo). Semana = segunda a domingo.
       "real_kwh": 3.07,                // energia do ponto; null = sem dados (nunca 0 inventado, GER-22)
       "esperado_kwh": 3.77,            // null quando não há esperado
       "sem_dados": false,              // true = barra ausente com "sem dados" (só passado/hoje)
-      "futuro": false                  // true = depois de agora: não desenhar nada nem "sem dados"
+      "futuro": false,                 // true = depois de agora: não desenhar nada nem "sem dados"
+      "fonte": "ton",                  // Dia: "ton" | "nuvem" (curva da nuvem). Demais: ton|nuvem|manual|mista|null
+      "kwh_ton": 6100.2, "kwh_nuvem": 6080.0,  // só Semana/Mês/Ano/Total: kWh de cada fonte no ponto
+      "divergem": false                // só Semana/Mês/Ano/Total: algum dia do ponto divergiu
     }
   ],
   "resumo": {
-    "energia_kwh": 8315.2,
+    "energia_kwh": 8315.2,             // kWh da fonte escolhida (soma dos dias)
     "kwh_kwp": 5.5,                    // energia_kwh / kwp_dc (null se kwp_dc ausente)
     "esperado_kwh": 9100.0,            // null sem fonte
     "pct_esperado": 91.4,              // 0–100+ (pode passar de 100); null sem fonte
@@ -68,7 +87,7 @@ fuso America/Sao_Paulo). Semana = segunda a domingo.
     "mes": "2026-10",
     "disponivel": true,                // false antes do dia 5 sem histórico do mesmo mês (GER-28)
     "motivo": null,                    // "Disponível a partir do dia 5" quando disponivel=false
-    "acumulado_kwh": 120000.0,         // dias completos do mês (até ontem)
+    "acumulado_kwh": 120000.0,         // dias completos do mês (até ontem), kWh da fonte escolhida
     "estimativa_kwh": 190000.0,
     "faixa_kwh": 8000.0,               // ± (GER-29)
     "valor_rs": null,
@@ -90,6 +109,11 @@ Regras de exibição:
   Ano = barras por mês; esperado = marcador horizontal sobre cada barra (GER-21). Tocar numa barra
   abre aquele dia (semana/mês) ou mês (ano) — usar `pontos[i].data`.
 - `sem_dados = true` → sem barra, mostrar "sem dados" (nunca zero).
+- `real_kwh` (Semana/Mês/Ano/Total), `resumo.energia_kwh` e `fechamento` usam o kWh da fonte
+  escolhida; `perdas`, `pct_esperado` e `esperado_*` continuam pelos intervalos da TON (a nuvem não
+  tem os estados dos inversores para classificar perda).
+- Selo da fonte perto do total: cinza; âmbar quando `fonte_geracao.divergem`. Toque/tooltip do dia:
+  `kwh_ton` × `kwh_nuvem`.
 
 ### `GET /geracao-analise/unidades/:unidadeId/config`
 
@@ -100,8 +124,10 @@ Regras de exibição:
     "fonte": "nenhuma", "solarimetro_equipamento_id": null, "solarimetro_medicao": null,
     "kwp_dc": 1512, "potencia_ac_kw": null, "inclinacao_graus": 16, "azimute_graus": 0,
     "fator_desempenho": 0.8, "exibir_rs": false, "tarifa_concessionaria_id": null,
+    "fonte_geracao": "automatico",               // automatico | ton | nuvem
     "atualizado_em": null, "atualizado_por": null
   },
+  "pode_fixar_fonte": false,                     // true só para papel canônico admin (super_admin/admin)
   "sugestoes": { "kwp_dc": 1512, "potencia_ac_kw": 999, "inclinacao_graus": 16, "azimute_graus": 0 },
   "faixas": { "kwp_dc": [1, 100000], "potencia_ac_kw": [1, 100000], "inclinacao_graus": [0, 90],
               "azimute_graus": [0, 359], "fator_desempenho": [0.5, 1.0] },
@@ -117,8 +143,16 @@ Regras de exibição:
 Corpo: os campos de `config` (sem `atualizado_*`). Valor fora da faixa → 400 com a mensagem.
 `kwp_dc` obrigatório. `potencia_ac_kw = null` = soma dos inversores. Fonte `solarimetro` exige
 `solarimetro_equipamento_id` (equipamento da instalação) e `solarimetro_medicao` (`GHI`|`POA`).
-Grava histórico (`unidade_usina_config_historico`, campo a campo antigo → novo) e evento no
-Registro da instalação (`logs_mqtt`, `comando_semantico = 'usina.config'`). Responde como o GET.
+`fonte_geracao` ausente = mantém a gravada; mudar `fonte_geracao` sem ser admin → 403
+"Só admin pode fixar a fonte da geração" (o resto da config segue editável pelos analistas); antes do
+SQL 2026-10-21 aplicado, mudar a fonte → 400.
+Grava histórico (`unidade_usina_config_historico`, campo a campo antigo → novo), evento no
+Registro da instalação (`logs_mqtt`, `comando_semantico = 'usina.config'`) e audit log
+(`auditoria_acessos`, `acao = 'usina_config'`, `objeto_tipo = 'unidade'`, `objeto_id` = unidade,
+`unidade_ids`; `detalhes`: `usuario` {id, nome, papel}, `unidade` {id, nome}, `campos_alterados`,
+`alteracoes` [{campo, rotulo, de, para}], ip, user_agent). Buscar por campo:
+`detalhes->'campos_alterados' ? 'fonte_geracao'`. Mudar só a fonte limpa o cache em memória do
+`FonteGeracaoService` (o cache diário da análise guarda só a TON e fica). Responde como o GET.
 
 ## Cálculo (resumo)
 
@@ -137,3 +171,60 @@ Registro da instalação (`logs_mqtt`, `comando_semantico = 'usina.config'`). Re
 - Jobs: a cada hora (irradiância das últimas horas + dia de hoje), 06:00 (refaz ontem consolidado e
   registra "Limitação externa" no Registro), 18:00 (previsão de amanhã).
 - Resumo diário em cache (`geracao_analise_diaria`); mudar a config limpa o cache da instalação.
+
+## Fonte da geração (NEXON-37)
+
+`FonteGeracaoService` (`fonte-geracao.service.ts`; regra pura em `geracao-fonte.ts`, testada em
+`geracao-fonte.spec.ts`) decide, por unidade e por dia BRT, de onde vem o kWh. Usado pela análise,
+pelo COA (`energiaHoje`/`energiaOntem`, `fonteGeracao`, `fontesDivergem`) e pelos boletins diário
+(WhatsApp) e semanal (PDF) — o mesmo número em todo lugar.
+
+Entradas do dia:
+- Inversores: `GeracaoConfigService.inversores()` e o serviço usam a mesma lista, **um por tópico
+  MQTT** (`COALESCE(topico_mqtt, id)`): o broker grava uma linha por equipamento inscrito no mesmo
+  tópico, e inversor cadastrado 2× dobraria geração e potência. Linha só com `daily_yield` (sem
+  potência) conta para o kWh, não para a curva nem para as perdas.
+- `kwh_ton` = Σ por inversor (lista de `GeracaoConfigService.inversores()`) de `MAX(daily_yield)` do
+  dia, **sem** as linhas `equipamentos_dados.fonte = 'NUVEM_FUSION'` (fallback de nuvem do Fusion) e
+  sem `qualidade = 'MOCK'`. `daily_yield` só conta a partir das 04:00 (inversor que zera tarde manda
+  o total de ontem de madrugada) e só entre 0 e 20 000 kWh (teto anti-glitch). Inversor sem
+  `daily_yield` usa a integral da potência. null = nenhum inversor com leitura.
+- `ton_completa` = todo inversor com leitura em ≥ 70% dos blocos de 15 min de 06:00–18:00 (hoje: até
+  agora). Inversor sem leitura = incompleta.
+- `kwh_nuvem` = `MAX(kwh_acumulado)` do dia em `geracao_horaria_plantas` (06h em diante — a madrugada
+  traz o total de ontem; origem ≠ manual); sem horário, `geracao_diaria_plantas.kwh_realizado` com
+  origem nuvem/api; sem os dois, hoje/ontem e só em unidade com provedor `fusion_solar` ativo, o
+  fallback Fusion (`NUVEM_FUSION`, Σ `daily_yield`).
+- `nuvem_completa` = dia passado com diário ou horário até ≥ 17h; hoje: snapshot nas últimas 2 h, ou
+  o diário depois das 21h locais.
+- `kwh_manual` = `geracao_diaria_plantas` com origem manual/bdo.
+
+Escolha (`fonte`, `motivo`), nesta ordem: manual (`manual`, vence até fonte fixada) → fonte fixada
+(`fixada`; sem dado nela e com dado na outra, a outra com `fixada_sem_dado`) → só uma com dado
+(`so_ton`/`so_nuvem`; nenhuma: `null`, `sem_dados`) → nuvem = 0 e TON > 0 (`ton`, `nuvem_zerada`) →
+divergência `|ton − nuvem| / max ≤ 5%` (`ton`, `concordam`) → TON incompleta e nuvem completa
+(`nuvem`, `ton_incompleta`) → senão `ton`, `divergem`.
+
+Cache: `geracao_analise_diaria` guarda só a TON do dia (`kwh_ton`, `ton_completa`); a nuvem é lida a
+cada pedido e a escolha refeita (a nuvem chega às 21h, a escolha nunca fica congelada). A fonte não
+entra no hash do cache: mudar só `fonte_geracao` não recalcula a análise. Sem o SQL 2026-10-21, a TON
+do cache sai da integral da potência (o SQL deve entrar antes do deploy).
+O `porDias` (COA, boletins) lê em lote: inversores, config, TON (agregada por inversor e dia no SQL),
+horário, diário, provedor e, quando precisa, o fallback Fusion. Cache por unidade (outro recorte de
+usuário reaproveita): dias passados 10 min, hoje 60 s.
+
+No Dia com fonte nuvem, os 96 pontos saem do horário da nuvem: o snapshot das H h traz o kWh desde o
+anterior e vira `real_kw = kwh_hora` nos 4 blocos da hora que terminou (H−1 h); sem horário (Fusion),
+a potência do fallback `NUVEM_FUSION`; sem nenhum, fica a curva da TON (`fonte: "ton"`).
+
+COA (`GET /coa/dashboard`, por unidade): `fonteGeracao` (ton|nuvem|manual|null) e `fontesDivergem`
+de hoje. Em `energiaHoje`/`energiaOntem` a parcela dos inversores (já com as perdas da config de
+demanda) sai e entra o kWh escolhido × o mesmo fator de perdas — só quando a parcela soma
+exatamente os mesmos inversores do serviço (por tópico). Config de demanda com parte dos inversores
+ou recorte do operador mantém o número de antes. Consumo e o resto seguem iguais.
+`fonteDados` (layout do web) não mudou. Operador só com "Ver geração" na instalação.
+
+Boletim diário: o kWh da linha é o escolhido; a confiança continua dizendo se TON e API batem e se a
+TON veio completa (`boletim-linha.ts`). Se o serviço falhar, a linha sai pela regra antiga (API vence,
+TON na falta) e o erro vai para o log. Boletim semanal: semana, semana anterior, mês, ano e série
+diária pelo kWh escolhido (previsto segue do diário).

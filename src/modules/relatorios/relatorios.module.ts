@@ -13,9 +13,10 @@ import { BoletimConsumoEnvioService } from './boletim-consumo-envio.service';
 import { BoletimConsumoCron } from './boletim-consumo.cron';
 import { WhatsappService } from '../monitoramento-fv/notificacao/whatsapp.service';
 import { EquipamentosDadosModule } from '../equipamentos-dados/equipamentos-dados.module';
+import { GeracaoAnaliseModule } from '../geracao-analise/geracao-analise.module';
 
 @Module({
-  imports: [PrismaModule, EquipamentosDadosModule],
+  imports: [PrismaModule, EquipamentosDadosModule, GeracaoAnaliseModule],
   controllers: [
     RelatoriosController,
     RelatoriosPublicController,

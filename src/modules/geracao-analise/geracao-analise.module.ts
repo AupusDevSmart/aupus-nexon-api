@@ -4,6 +4,7 @@ import { GeracaoAnaliseController } from './geracao-analise.controller';
 import { GeracaoAnaliseService } from './geracao-analise.service';
 import { GeracaoAnaliseJobs } from './geracao-analise.jobs';
 import { GeracaoConfigService } from './geracao-config.service';
+import { FonteGeracaoService } from './fonte-geracao.service';
 import { IrradianciaService } from './irradiancia/irradiancia.service';
 import { IRRADIANCE_PROVIDER } from './irradiancia/irradiance-provider';
 import { OpenMeteoProvider } from './irradiancia/open-meteo.provider';
@@ -18,10 +19,11 @@ import { OpenMeteoProvider } from './irradiancia/open-meteo.provider';
   providers: [
     GeracaoAnaliseService,
     GeracaoConfigService,
+    FonteGeracaoService,
     IrradianciaService,
     GeracaoAnaliseJobs,
     { provide: IRRADIANCE_PROVIDER, useClass: OpenMeteoProvider },
   ],
-  exports: [GeracaoAnaliseService, GeracaoConfigService],
+  exports: [GeracaoAnaliseService, GeracaoConfigService, FonteGeracaoService],
 })
 export class GeracaoAnaliseModule {}

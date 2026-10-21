@@ -1,6 +1,8 @@
 import { Body, Controller, ForbiddenException, Get, Param, Put, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard, CurrentUser, ScopedUser, PermissionScopeService } from '@/core';
+import { Cliente, type ClienteInfo } from '@/core/common/cliente-info';
+import { FonteGeracaoService } from './fonte-geracao.service';
 import { GeracaoAnaliseService } from './geracao-analise.service';
 import { ConfigUsinaInput, GeracaoConfigService } from './geracao-config.service';
 import { IrradianciaService } from './irradiancia/irradiancia.service';
@@ -19,10 +21,11 @@ export class GeracaoAnaliseController {
     private readonly configs: GeracaoConfigService,
     private readonly irradiancia: IrradianciaService,
     private readonly scope: PermissionScopeService,
+    private readonly fontes: FonteGeracaoService,
   ) {}
 
   @Get(':unidadeId')
-  @ApiOperation({ summary: 'Análise de geração do período (dia | semana | mes | ano)' })
+  @ApiOperation({ summary: 'Análise de geração do período (dia | semana | mes | ano | total)' })
   async obter(
     @Param('unidadeId') unidadeId: string,
     @Query('periodo') periodo?: string,
@@ -54,12 +57,20 @@ export class GeracaoAnaliseController {
   }
 
   @Put(':unidadeId/config')
-  @ApiOperation({ summary: 'Grava a configuração "Usina" (admin e analistas)' })
-  async salvar(@Param('unidadeId') unidadeId: string, @Body() body: ConfigUsinaInput, @CurrentUser() user?: ScopedUser) {
+  @ApiOperation({ summary: 'Grava a configuração "Usina" (admin e analistas; fonte da geração só admin)' })
+  async salvar(
+    @Param('unidadeId') unidadeId: string,
+    @Body() body: ConfigUsinaInput,
+    @CurrentUser() user?: ScopedUser,
+    @Cliente() cliente?: ClienteInfo,
+  ) {
     this.exigirConfigUsina(user);
     if (user) await this.scope.assertEntityInScope('unidade', unidadeId.trim(), user);
-    const alteracoes = await this.configs.salvar(unidadeId, body, user);
-    if (Object.keys(alteracoes).length) {
+    const alteracoes = await this.configs.salvar(unidadeId, body, user, cliente);
+    // Fonte da geração mudou: o COA e os boletins param de usar a escolha antiga. O cache diário
+    // da análise só guarda a TON, então a fonte sozinha não o invalida.
+    if ('fonte_geracao' in alteracoes) this.fontes.limpar();
+    if (Object.keys(alteracoes).some((k) => k !== 'fonte_geracao')) {
       // Esperado depende de toda a config: o cache diário recomeça. Inclinação, azimute ou fonte
       // mudam a própria irradiância no plano dos módulos.
       await this.analise.limparCache(unidadeId);
