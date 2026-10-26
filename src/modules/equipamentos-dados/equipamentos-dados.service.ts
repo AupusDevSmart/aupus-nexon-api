@@ -1357,6 +1357,10 @@ export class EquipamentosDadosService {
     for (const row of dadosAgregados) {
       const id = row.equipamento_id.trim();
       if (!configMap.has(id)) continue;
+      // Bucket sem potência (ex.: A966 logo após reiniciar — "dump pós-boot" é gravado sem
+      // potencia_ativa_kw de propósito) é LACUNA, não zero: Number(null) virava 0 kW e o
+      // gráfico mergulhava a zero. Pulando, o forward-fill (até 30 min) liga os vizinhos.
+      if (row.potencia_media == null) continue;
       let serie = porDevice.get(id);
       if (!serie) { serie = new Map(); porDevice.set(id, serie); }
       serie.set(row.intervalo.getTime(), {
