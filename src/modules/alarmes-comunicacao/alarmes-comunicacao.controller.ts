@@ -71,6 +71,13 @@ export class AlarmesComunicacaoController {
     return { data: await this.svc.definirLimiar(id, body?.limiar_min ?? null, !!body?.ignorar) };
   }
 
+  @Get('painel')
+  @ApiOperation({ summary: 'Painel do COA: TONs fora × equipamentos sem dado com a TON viva (equipe)' })
+  async painel(@CurrentUser() user?: ScopedUser) {
+    this.svc.assertEquipe(user);
+    return { data: await this.svc.painel() };
+  }
+
   @Get('abertos')
   @ApiOperation({ summary: 'Alarmes de comunicação abertos + ignorados (admin)' })
   async abertos(@CurrentUser() user?: ScopedUser) {

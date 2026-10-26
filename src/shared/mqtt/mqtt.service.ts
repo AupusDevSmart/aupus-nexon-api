@@ -100,6 +100,15 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
   // Listeners temporarios para `<topic_base>/ota/status`, usados pelo OtaService
   // para limpar o retained do `<topic_base>/ota/cmd` assim que o TON confirma.
   private otaStatusListeners: Map<string, (data: any) => void> = new Map();
+  // Acompanhamento de OTA (OtaService): toda mensagem de ota/status e todo anúncio
+  // de /status AO VIVO da TON (é ele que traz a versão depois de reiniciar).
+  private otaHooks: {
+    otaStatus?: (topic: string, dados: any) => void;
+    tonStatus?: (equipamentoId: string, dados: any) => void;
+  } = {};
+  public setOtaHooks(h: { otaStatus?: (topic: string, dados: any) => void; tonStatus?: (equipamentoId: string, dados: any) => void }): void {
+    this.otaHooks = h;
+  }
 
   // Buffer para agregação de 1 minuto
   private buffers: Map<string, BufferData> = new Map();
@@ -918,6 +927,9 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       // OTA status: roteado por listener temporario (registrado por OtaService).
       // Nao deve cair em telemetria mesmo se topic estiver no `subscriptions` map.
       if (topic.endsWith('/ota/status')) {
+        try { this.otaHooks.otaStatus?.(topic, dados); } catch (e) {
+          console.error(`❌ Erro no acompanhamento de OTA (${topic}):`, e);
+        }
         const handler = this.otaStatusListeners.get(topic);
         if (handler) {
           try { handler(dados); } catch (e) {
@@ -986,6 +998,11 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
           await this.processStatusAnnounce(equipamentoId, dados);
           // Boot AO VIVO (nao retido) com motivo relevante -> evento no historico da TON.
           if (!retained) await this.registrarReinicioTon(equipamentoId, dados);
+          if (!retained) {
+            try { this.otaHooks.tonStatus?.(equipamentoId, dados); } catch (e) {
+              console.error(`❌ Erro no acompanhamento de OTA (status ${equipamentoId}):`, e);
+            }
+          }
         }
         return;
       }

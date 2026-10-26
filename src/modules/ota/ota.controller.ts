@@ -1,5 +1,6 @@
 import {
   Controller,
+  Get,
   Post,
   Body,
   Param,
@@ -52,6 +53,13 @@ export class OtaController {
     @Body() dto: TriggerOtaDto,
   ): Promise<OtaStatusResponseDto> {
     return this.otaService.triggerOta(id, dto);
+  }
+
+  @Get('ultima')
+  @ApiOperation({ summary: 'Acompanhamento do último OTA da TON (publicado → baixando → reiniciando → confirmado/falhou)' })
+  @ApiParam({ name: 'id', description: 'ID do equipamento (CUID)' })
+  async ultima(@Param('id') id: string) {
+    return this.otaService.ultimaExecucao(id);
   }
 
   @Post('compilar-e-publicar')

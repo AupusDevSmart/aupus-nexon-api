@@ -542,6 +542,54 @@ export class AlarmesComunicacaoService implements OnModuleInit {
     return { abertos, ignorados };
   }
 
+  /**
+   * Painel do COA: o que está fora AGORA, separando a causa.
+   *  - tons: TON sem comunicação (internet/energia/a própria TON) + equipamentos que ela derruba;
+   *  - equipamentos: sem dado com a TON VIVA (problema no equipamento/Modbus/cabo, não na internet).
+   * Mesma fonte dos alarmes (varredura a cada 2 min); a TON de cada equipamento sai do prefixo do tópico.
+   */
+  async painel() {
+    const abertos = await this.prisma.$queryRaw<any[]>`
+      SELECT TRIM(l.equipamento_id) AS equipamento_id, TRIM(e.nome) AS nome, TRIM(e.tag) AS tag, e.topico_mqtt AS topico,
+             l.dados_snapshot->>'familia' AS familia, l.dados_snapshot->'afetados' AS afetados,
+             COALESCE((l.dados_snapshot->>'desde')::timestamptz, l.created_at) AS desde,
+             TRIM(p.nome) AS planta, TRIM(u.nome) AS unidade, TRIM(u.id) AS unidade_id
+      FROM logs_mqtt l
+      JOIN equipamentos e ON e.id = l.equipamento_id
+      JOIN unidades u ON u.id = e.unidade_id
+      JOIN plantas p ON p.id = u.planta_id
+      WHERE l.tipo = 'alerta' AND l.resolvido_em IS NULL AND (l.dados_snapshot->>'origem') = 'comunicacao'
+      ORDER BY desde`;
+    // TONs (base do tópico) + último sinal de vida — p/ dizer de qual TON é o equipamento e que ela está viva.
+    const tons = await this.prisma.$queryRaw<Array<{ id: string; nome: string; topico: string; last_seen: Date | null; online: boolean | null }>>`
+      SELECT TRIM(e.id) AS id, TRIM(e.nome) AS nome, e.topico_mqtt AS topico, d.last_seen, d.online
+      FROM equipamentos e
+      LEFT JOIN iot_dispositivos_online d ON d.topico_mqtt = e.topico_mqtt
+      WHERE e.deleted_at IS NULL AND COALESCE(e.topico_mqtt, '') <> '' AND COALESCE(e.tipo_equipamento, '') ILIKE 'TON%'`;
+    const tonDe = (topico: string | null) => {
+      if (!topico) return null;
+      let melhor: (typeof tons)[number] | null = null;
+      for (const t of tons) {
+        if (topico.startsWith(`${t.topico}/`) && (!melhor || t.topico.length > melhor.topico.length)) melhor = t;
+      }
+      return melhor;
+    };
+    const base = (a: any) => ({
+      equipamento_id: a.equipamento_id, nome: a.tag || a.nome, nome_completo: a.nome, planta: a.planta,
+      unidade: a.unidade, unidade_id: a.unidade_id, desde: a.desde,
+    });
+    const tonsFora = abertos.filter((a) => a.familia === 'ton').map((a) => ({
+      ...base(a), afetados: Array.isArray(a.afetados) ? a.afetados : [],
+    }));
+    const equipamentos = abertos.filter((a) => a.familia !== 'ton').map((a) => {
+      const t = tonDe(a.topico);
+      return { ...base(a), familia: a.familia, ton: t ? { nome: t.nome, ultimo_sinal: t.last_seen, online: t.online } : null };
+    });
+    const ign = await this.prisma.$queryRaw<Array<{ n: number }>>`
+      SELECT COUNT(*)::int AS n FROM alarme_comunicacao_limiar WHERE ignorar = true`;
+    return { tons: tonsFora, equipamentos, ignorados: ign[0]?.n ?? 0, atualizado_em: new Date() };
+  }
+
   /** Marca/desmarca "ignorar"; ao ignorar, fecha o alarme aberto do equipamento. */
   async ignorar(equipamentoId: string, ignorar: boolean, user?: ScopedUser) {
     const id = String(equipamentoId).trim();
