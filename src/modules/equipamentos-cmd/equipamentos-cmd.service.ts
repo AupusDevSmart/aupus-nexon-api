@@ -994,13 +994,43 @@ export class EquipamentosCmdService {
     const eqId = equipamentoId.trim();
     if (user) await this.scopeService.assertEntityInScope('equipamento', eqId, user);
     const dev = await this.deviceDoEquipamento(eqId);
-    if (!dev) return { modelo: null, setpoints: [] };
+    if (!dev) return { modelo: null, setpoints: [], ultimos: {} };
+    const setpoints = dev.setpoints.filter((sp) => sp?.id && dev.boMap[sp.id]);
     return {
       modelo: dev.modelo,
       device: dev.nome,
       addr: dev.addr,
-      setpoints: dev.setpoints.filter((sp) => sp?.id && dev.boMap[sp.id]),
+      setpoints,
+      ultimos: await this.ultimosSetpoints(eqId, setpoints),
     };
+  }
+
+  /**
+   * Último valor APLICADO pelo NexON em cada ajuste (comando confirmado pela TON), lido da trilha
+   * de comandos (logs_mqtt: comando_tecnico "setpoint <dev>@<addr>/<sp>=<bruto>"). O inversor não
+   * informa esses parâmetros na telemetria; isto é o que o NexON gravou por último — um ajuste
+   * feito direto no inversor (display/app) não aparece aqui.
+   */
+  private async ultimosSetpoints(eqId: string, setpoints: Array<Record<string, any>>) {
+    const out: Record<string, { valor: number; em: Date; por: string | null }> = {};
+    if (!setpoints.length) return out;
+    const rows = await this.prisma.$queryRaw<Array<{ tec: string; em: Date; por: string | null }>>`
+      SELECT DISTINCT ON (substring(l.comando_tecnico from '/([a-z0-9_]+)='))
+             l.comando_tecnico AS tec, l.created_at AS em, u.nome AS por
+      FROM logs_mqtt l
+      LEFT JOIN usuarios u ON u.id = l.usuario_id
+      WHERE l.equipamento_id = ${eqId}::bpchar AND l.tipo = 'comando' AND l.status = 'ok'
+        AND l.comando_tecnico LIKE 'setpoint %'
+      ORDER BY substring(l.comando_tecnico from '/([a-z0-9_]+)='), l.created_at DESC`;
+    for (const r of rows) {
+      const m = /\/([a-z0-9_]+)=(-?\d+)$/.exec(r.tec ?? '');
+      if (!m) continue;
+      const sp = setpoints.find((x) => x.id === m[1]);
+      if (!sp) continue;
+      const escala = Number(sp.escala) || 1;
+      out[m[1]] = { valor: Math.round((Number(m[2]) / escala) * 1000) / 1000, em: r.em, por: r.por?.trim() || null };
+    }
+    return out;
   }
 
   /** Envia um setpoint (valor em unidade de engenharia, ex.: 0.95 ou 80 %). */
