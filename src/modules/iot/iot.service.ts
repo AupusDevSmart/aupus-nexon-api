@@ -646,8 +646,11 @@ export class IoTService {
       SELECT c.props->>'equipamento_id' AS equipamento_id,
              c.props->>'name'           AS nome
       FROM iot_componentes c
-      WHERE c.props->>'disjuntor_equipamento_id' = ${id}
+      WHERE (c.props->>'disjuntor_equipamento_id' = ${id}
+             -- um medidor pode servir mais de um elemento (ex.: bomba compartilhada dos pivôs 3 e 11)
+             OR (jsonb_typeof(c.props->'elementos_extra') = 'array' AND c.props->'elementos_extra' ? ${id}))
         AND COALESCE(c.props->>'equipamento_id', '') <> ''
+      ORDER BY (c.props->>'disjuntor_equipamento_id' = ${id}) DESC
       LIMIT 1
     `;
     return rows[0] ?? null;
