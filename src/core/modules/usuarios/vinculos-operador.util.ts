@@ -93,6 +93,7 @@ export function resumoVinculo(codigos: string[], usinas: number): string {
     ['PIVO', 'pivô', 'pivôs'],
     ['CARREGADOR_ELETRICO', 'carregador', 'carregadores'],
     ['DISJUNTOR', 'disjuntor', 'disjuntores'],
+    ['SOFTSTARTER', 'soft-starter', 'soft-starters'],
     ['MOTOR', 'motor', 'motores'],
   ];
   let conhecidos = 0;

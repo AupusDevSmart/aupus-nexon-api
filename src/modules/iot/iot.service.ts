@@ -187,10 +187,11 @@ export class IoTService {
     const id = (disjuntorId ?? '').trim();
     if (!id) return null;
     const eqRows = await this.prisma.$queryRaw<Array<{
-      id: string; nome: string | null; scs: boolean; scs_comando: boolean; scs_status: boolean; scs_medicao: string;
+      id: string; nome: string | null; tipo: string | null; scs: boolean; scs_comando: boolean; scs_status: boolean; scs_medicao: string;
     }>>`
-      SELECT TRIM(id) AS id, TRIM(nome) AS nome, scs, scs_comando, scs_status, scs_medicao
-      FROM equipamentos WHERE TRIM(id) = ${id} AND deleted_at IS NULL LIMIT 1`;
+      SELECT TRIM(e.id) AS id, TRIM(e.nome) AS nome, t.codigo AS tipo, e.scs, e.scs_comando, e.scs_status, e.scs_medicao
+      FROM equipamentos e LEFT JOIN tipos_equipamentos t ON t.id = e.tipo_equipamento_id
+      WHERE e.id = ${id}::bpchar AND e.deleted_at IS NULL LIMIT 1`;
     const eq = eqRows[0];
     if (!eq) return null;
     if (user) await this.scopeService.assertEntityInScope('equipamento', id, user);
@@ -210,7 +211,7 @@ export class IoTService {
       pm?.equipamento_id ? this.resumoHojeDoPm(pm.equipamento_id) : Promise.resolve(null),
     ]);
     return {
-      equipamento: { id: eq.id, nome: eq.nome },
+      equipamento: { id: eq.id, nome: eq.nome, tipo: eq.tipo },
       scs: { habilitado: eq.scs, comando: eq.scs_comando, status: eq.scs_status, medicao: eq.scs_medicao },
       pm, status_fonte: statusFonte, comandos,
       status_pontos: statusPontos,

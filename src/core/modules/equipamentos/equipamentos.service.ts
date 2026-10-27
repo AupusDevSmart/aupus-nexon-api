@@ -315,10 +315,10 @@ export class EquipamentosService {
     const rows = await this.prisma.$queryRaw<Array<{
       tag: string | null; localizacao_especifica: string | null;
       scs: boolean | null; scs_comando: boolean | null; scs_status: boolean | null; scs_medicao: string | null;
-      tipo_nome: string | null; sigla: string | null; propriedades_schema: any;
+      tipo_id: string | null; tipo_nome: string | null; sigla: string | null; propriedades_schema: any;
     }>>`
       SELECT e.tag, e.localizacao_especifica, e.scs, e.scs_comando, e.scs_status, e.scs_medicao,
-             t.nome AS tipo_nome, t.sigla, t.propriedades_schema
+             TRIM(t.id) AS tipo_id, t.nome AS tipo_nome, t.sigla, t.propriedades_schema
       FROM equipamentos e
       LEFT JOIN tipos_equipamentos t ON TRIM(t.id) = TRIM(e.tipo_equipamento_id)
       WHERE TRIM(e.id) = ${eid} AND e.deleted_at IS NULL LIMIT 1`;
@@ -345,6 +345,7 @@ export class EquipamentosService {
       scs_comando: !!r.scs_comando,
       scs_status: !!r.scs_status,
       scs_medicao: r.scs_medicao ?? 'nenhuma',
+      tipo_id: r.tipo_id ?? null,
       tipo_nome: r.tipo_nome ?? null,
       sigla: r.sigla ?? null,
       somente_visual: (r.propriedades_schema as any)?.somente_visual === true,
@@ -354,11 +355,15 @@ export class EquipamentosService {
     };
   }
 
-  /** Edição do cadastro simplificado do unifilar: tag, localização e os checks SCS. */
+  /**
+   * Edição do cadastro simplificado do unifilar: tag, localização, checks SCS e — opcional —
+   * o TIPO (ex.: DJ desenhado errado → Soft-Starter). Trocar o tipo mantém id, posição,
+   * conexões, vínculos do IoT e rótulos; só vale para tipos do unifilar.
+   */
   async editarCadastroUnifilar(
     id: string,
     dto: {
-      tag?: string; localizacao_especifica?: string;
+      tag?: string; localizacao_especifica?: string; tipo_equipamento_id?: string;
       possui_medicao?: boolean; possui_scs?: boolean; scs_comando?: boolean; scs_status?: boolean;
       pontos_comando?: string[]; pontos_status?: string[];
     },
@@ -374,6 +379,14 @@ export class EquipamentosService {
       if (t) data.nome = t; // nome unificado com a TAG (Fase 7)
     }
     if (dto.localizacao_especifica !== undefined) data.localizacao_especifica = dto.localizacao_especifica?.trim() || null;
+    if (dto.tipo_equipamento_id) {
+      const [tipo] = await this.prisma.$queryRaw<Array<{ id: string; codigo: string }>>`
+        SELECT id, codigo FROM tipos_equipamentos
+        WHERE id = ${dto.tipo_equipamento_id.trim()}::bpchar AND disp_unifilar = true`;
+      if (!tipo) throw new BadRequestException('Tipo inválido para o unifilar');
+      data.tipo_equipamento_id = tipo.id;
+      data.tipo_equipamento = tipo.codigo;
+    }
     if (Object.keys(data).length) {
       await this.prisma.equipamentos.update({ where: { id: eid }, data: data as any });
     }

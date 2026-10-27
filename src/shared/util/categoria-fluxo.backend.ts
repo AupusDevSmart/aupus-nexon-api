@@ -54,6 +54,7 @@ export const CATEGORIA_FLUXO: Record<string, FluxoEnergia> = {
   'Transformador de Potência': 'NEUTRO',
   'Disjuntor BT': 'NEUTRO',
   'Disjuntor MT': 'NEUTRO',
+  'Soft-Starter': 'NEUTRO',
   'Chave': 'NEUTRO',
   'TON': 'NEUTRO',
 };

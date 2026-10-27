@@ -318,11 +318,11 @@ export class EquipamentosController {
   @Patch(':id/cadastro-unifilar')
   @UsePlantaScope({ entity: 'equipamento' })
   @Permissions('equipamentos.manage')
-  @ApiOperation({ summary: 'Editar cadastro simplificado do unifilar (tag, localização, checks SCS)' })
+  @ApiOperation({ summary: 'Editar cadastro simplificado do unifilar (tag, localização, tipo, checks SCS)' })
   editarCadastroUnifilar(
     @Param('id') id: string,
     @Body() dto: {
-      tag?: string; localizacao_especifica?: string;
+      tag?: string; localizacao_especifica?: string; tipo_equipamento_id?: string;
       possui_medicao?: boolean; possui_scs?: boolean; scs_comando?: boolean; scs_status?: boolean;
       pontos_comando?: string[]; pontos_status?: string[];
     },
