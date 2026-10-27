@@ -41,10 +41,13 @@ export class MedidorResumoService {
     const id = equipamentoId.trim();
     const desde = this.inicioMesBRT();
     const hoje = this.inicioDiaBRT();
-    const blocos = await this.blocos(id, desde);
-    const r = resumoBlocos(blocos);
     // Geração soma os inversores da instalação: operador só com "Ver geração" nela (PER-40).
-    const geracao = (await this.podeVerGeracao(id, user)) ? await this.geracao(id, desde, hoje) : null;
+    // Medidor e geração em paralelo: são leituras independentes.
+    const [blocos, geracao] = await Promise.all([
+      this.blocos(id, desde),
+      this.podeVerGeracao(id, user).then((pode) => (pode ? this.geracao(id, desde, hoje) : null)),
+    ]);
+    const r = resumoBlocos(blocos);
     const iso = (t?: number | null) => (t ? new Date(t).toISOString() : null);
     return {
       ciclo_inicio: desde.toISOString(),
@@ -114,29 +117,33 @@ export class MedidorResumoService {
       WHERE m.id = ${id}::bpchar AND (i.tipo_equipamento ILIKE '%INVERSOR%')`;
     if (!invs.length) return null;
     const ids = invs.map((x) => x.id);
-    const agora = await this.prisma.$queryRaw<Array<{ kw: number | null }>>`
+    // equipamento_id = ANY(ids::bpchar[]) SEM TRIM: TRIM na coluna desligava o índice
+    // (equipamento_id, timestamp_dados) e varria a tabela de leituras inteira (~33 s por abertura).
+    const [agora, pico, dias] = await Promise.all([
+      this.prisma.$queryRaw<Array<{ kw: number | null }>>`
       SELECT SUM(kw) AS kw FROM (
         SELECT DISTINCT ON (equipamento_id) COALESCE((dados->'power'->>'active_total')::float / 1000, potencia_ativa_kw::float) AS kw
         FROM equipamentos_dados
-        WHERE TRIM(equipamento_id) = ANY(${ids}) AND timestamp_dados > now() - interval '1 hour'
-        ORDER BY equipamento_id, timestamp_dados DESC) x WHERE kw < ${CAP_INV_KW}`;
-    const pico = await this.prisma.$queryRaw<Array<{ t: Date; kw: number }>>`
+        WHERE equipamento_id = ANY(${ids}::bpchar[]) AND timestamp_dados > now() - interval '1 hour'
+        ORDER BY equipamento_id, timestamp_dados DESC) x WHERE kw < ${CAP_INV_KW}`,
+      this.prisma.$queryRaw<Array<{ t: Date; kw: number }>>`
       SELECT t, SUM(kw) AS kw FROM (
         SELECT equipamento_id, date_trunc('hour', timestamp_dados) + floor(extract(minute FROM timestamp_dados) / 15) * interval '15 minutes' AS t,
                AVG(COALESCE((dados->'power'->>'active_total')::float / 1000, potencia_ativa_kw::float)) AS kw
         FROM equipamentos_dados
-        WHERE TRIM(equipamento_id) = ANY(${ids}) AND timestamp_dados >= ${desde}
+        WHERE equipamento_id = ANY(${ids}::bpchar[]) AND timestamp_dados >= ${desde}
         GROUP BY 1, 2) x WHERE kw < ${CAP_INV_KW}
-      GROUP BY t ORDER BY 2 DESC NULLS LAST LIMIT 1`;
-    const dias = await this.prisma.$queryRaw<Array<{ dia: Date; kwh: number }>>`
+      GROUP BY t ORDER BY 2 DESC NULLS LAST LIMIT 1`,
+      this.prisma.$queryRaw<Array<{ dia: Date; kwh: number }>>`
       SELECT dia, SUM(dia_kwh) AS kwh FROM (
         SELECT equipamento_id, date_trunc('day', (timestamp_dados AT TIME ZONE 'UTC') AT TIME ZONE ${TZ}) AS dia,
                CASE WHEN COUNT(dados->'energy'->>'daily_yield') >= 1 THEN MAX((dados->'energy'->>'daily_yield')::numeric)
                     ELSE SUM(energia_kwh) END AS dia_kwh
         FROM equipamentos_dados
-        WHERE TRIM(equipamento_id) = ANY(${ids}) AND timestamp_dados >= ${desde}
+        WHERE equipamento_id = ANY(${ids}::bpchar[]) AND timestamp_dados >= ${desde}
           AND (potencia_ativa_kw IS NULL OR potencia_ativa_kw < ${CAP_INV_KW})
-        GROUP BY 1, 2) x GROUP BY dia`;
+        GROUP BY 1, 2) x GROUP BY dia`,
+    ]);
     const diaHoje = hoje.toISOString().slice(0, 10);
     const kwhHoje = dias.filter((d) => new Date(d.dia).toISOString().slice(0, 10) === diaHoje).reduce((a, d) => a + Number(d.kwh || 0), 0);
     const ciclo = dias.reduce((a, d) => a + Number(d.kwh || 0), 0);
