@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
-import { camposDoStatusPivo, ehPivo, papelStatusPivo, type StatusPivo } from './leitura-vinculada';
+import { camposDoStatusPivo, deviceVinculado, ehPivo, idDaLeitura, papelStatusPivo, type StatusPivo } from './leitura-vinculada';
 
 @Injectable()
 export class EquipamentosDataService {
@@ -59,19 +59,10 @@ export class EquipamentosDataService {
    */
   private async leituraVinculada(id: string, tipo?: string | null) {
     const eid = id.trim();
-    const fontes = await this.prisma.$queryRaw<Array<{ fonte: string }>>`
-      SELECT src.id AS fonte
-      FROM iot_componentes c
-      JOIN equipamentos alvo ON alvo.id = ${eid}::bpchar AND alvo.deleted_at IS NULL
-      JOIN equipamentos src ON src.id = TRIM(c.props->>'equipamento_id')::bpchar
-        AND src.deleted_at IS NULL AND src.unidade_id = alvo.unidade_id
-      WHERE c.props->>'disjuntor_equipamento_id' = ${eid}
-         OR (jsonb_typeof(c.props->'elementos_extra') = 'array' AND c.props->'elementos_extra' ? ${eid})
-      ORDER BY (c.props->>'disjuntor_equipamento_id' = ${eid}) DESC, c.id
-      LIMIT 1`;
-    const medidor = fontes[0]
+    const fonte = await deviceVinculado(this.prisma, eid);
+    const medidor = fonte
       ? await this.prisma.equipamentos_dados.findFirst({
-          where: { equipamento_id: fontes[0].fonte },
+          where: { equipamento_id: fonte },
           orderBy: { timestamp_dados: 'desc' },
         })
       : null;
@@ -139,7 +130,8 @@ export class EquipamentosDataService {
 
     // Construir filtro de datas
     const whereClause: any = {
-      equipamento_id: equipamentoId,
+      // Sem leitura própria, o histórico é o do device vinculado, como no web.
+      equipamento_id: await idDaLeitura(this.prisma, equipamentoId),
     };
 
     if (inicio || fim) {
