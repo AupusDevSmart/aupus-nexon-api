@@ -160,3 +160,11 @@ export function leituraMaisAntiga(datas: Array<Date | null>): Date | null {
   if (!datas.length || datas.some((d) => !d)) return null;
   return new Date(Math.min(...datas.map((d) => d!.getTime())));
 }
+
+/** "campo: antes → depois" do que mudou entre duas configurações, para a trilha. Sem valor = "—". */
+export function mudancasConfig(antes: Record<string, unknown>, depois: Record<string, unknown>): string[] {
+  const texto = (v: unknown) => (v === null || v === undefined ? '—' : String(v));
+  return [...new Set([...Object.keys(antes), ...Object.keys(depois)])]
+    .filter((k) => texto(antes[k]) !== texto(depois[k]))
+    .map((k) => `${k}: ${texto(antes[k])} → ${texto(depois[k])}`);
+}
