@@ -3,6 +3,7 @@ import { PrismaService, PermissionScopeService, ScopedUser, AcessoOperador } fro
 import { Prisma } from '@/core';
 import { CalculoCustosService } from '../equipamentos-dados/services/calculo-custos.service';
 import { detectarOverflowUint, ehPotenciaGlitch, CAP_POTENCIA_GLITCH_KW } from '../../shared/util/inverter-overflow';
+import { ehUnidadeGeracao, energiaDaUnidade, type ParcelaInversores } from './energia-unidade';
 import { CATEGORIA_SINAL_PAIRS } from '../../shared/util/categoria-fluxo.backend';
 import { condicaoStatus } from '../logs-mqtt/logs-mqtt-filtros';
 import { DiaFonteCalc, FonteGeracaoService, InversorFonte } from '../geracao-analise/fonte-geracao.service';
@@ -14,14 +15,6 @@ interface EnergiaOntem {
 }
 
 /** Parcela dos inversores na energia do dia de uma unidade (para trocar pela fonte escolhida). */
-interface ParcelaInversores {
-  /** kWh dos inversores já somado na energia (com perdas). */
-  kwh: number;
-  /** Fator de perdas da config de demanda (1 = sem perdas). */
-  fator: number;
-  /** Inversores somados (chave do tópico MQTT, ou id), já com o recorte do operador. */
-  chaves: string[];
-}
 
 export interface DashboardData {
   timestamp: Date;
@@ -326,7 +319,8 @@ export class CoaService {
           ed.qualidade,
           e.unidade_id,
           e.nome AS equipamento_nome,
-          e.tipo_equipamento
+          e.tipo_equipamento,
+          e.topico_mqtt
         FROM equipamentos_dados ed
         INNER JOIN equipamentos e ON e.id = ed.equipamento_id
         WHERE ed.timestamp_dados >= ${horaAtras}
@@ -477,7 +471,6 @@ export class CoaService {
     // `hora` é timestamp local de SP (sem fuso) → a idade é calculada no próprio SQL.
     // Geração que veio da NUVEM entra em "Potência de Geração", mas NÃO em "Potência de
     // Carga": sem medidor, a carga da unidade é desconhecida (não é igual à geração).
-    let totalGeracaoNuvem = 0;
     let unidadesMonitoradasNuvem = 0;
     const nuvemHojePorUnidade = new Map<string, { energiaKwh: number; potenciaKw: number; horaLocal: string; idadeMin: number }>();
     try {
@@ -565,25 +558,14 @@ export class CoaService {
       }),
       this.fontes.inversoresComChave(comFonte).catch(() => new Map<string, InversorFonte[]>()),
     ]);
-    // Geração do dia pela fonte escolhida: tira a parcela dos inversores já somada e põe o kWh
-    // escolhido (com as mesmas perdas) — só quando a parcela soma exatamente os mesmos inversores
-    // do serviço. Config de demanda com parte dos inversores, ou recorte do operador, mantém a base.
-    // Consumo e o resto da energia seguem iguais.
     const energiaComFonte = (
-      uid: string, base: number, parcela: ParcelaInversores | undefined, esc: DiaFonteCalc | undefined,
-      semTelemetria: boolean, fallback: number,
-    ): number => {
-      if (esc?.kwh != null) {
-        const servico = new Set((inversoresFonte.get(uid) ?? []).map((i) => i.chave));
-        if (parcela) {
-          const mesmos = servico.size > 0 && parcela.chaves.length === servico.size && parcela.chaves.every((c) => servico.has(c));
-          if (mesmos) return base - parcela.kwh + esc.kwh * parcela.fator;
-        } else if (semTelemetria) {
-          return esc.kwh;
-        }
-      }
-      return semTelemetria ? fallback : base;
-    };
+      unidade: { tipo?: string | null }, uid: string, base: number, parcela: ParcelaInversores | undefined,
+      esc: DiaFonteCalc | undefined, semTelemetria: boolean, fallback: number,
+    ): number => energiaDaUnidade({
+      tipo: unidade.tipo, base, parcela, kwhFonte: esc?.kwh, semTelemetria, fallback,
+      chavesServico: (inversoresFonte.get(uid) ?? []).map((i) => i.chave),
+      operador: !!eqScope,
+    });
 
     for (const planta of plantas) {
       const unidadesPlanta = unidadesPorPlanta.get(planta.id) || [];
@@ -599,6 +581,9 @@ export class CoaService {
 
         // Calcular métricas da unidade
         let potenciaTotal = 0;
+        let potenciaInversores = 0;
+        let temInversor = false;
+        const topicosContados = new Set<string>();
         let fatorPotencia = 0;
         let ultimaLeitura: Date | null = null;
         // Status "pior caso": ONLINE (verde) só se TODOS os equipamentos esperados
@@ -678,6 +663,27 @@ export class CoaService {
             potencia = 0;
           }
 
+          // Classificar geração vs consumo baseado no tipo do equipamento
+          // Reconhecer inversores por múltiplos critérios:
+          // 1. tipo_equipamento contém 'INVERSOR'
+          // 2. Presença de dados de inversor no JSON (power.active_total, energy.daily_yield)
+          const tipoEquip = (leitura.tipo_equipamento || '').toUpperCase();
+          const isInversor = tipoEquip.includes('INVERSOR') ||
+                            (leitura.dados?.power?.active_total !== undefined &&
+                             leitura.dados?.energy?.daily_yield !== undefined);
+
+          // Mesma conta da análise de geração: um inversor por tópico MQTT (cadastro duplicado
+          // não soma duas vezes) e só leitura dos últimos 15 min é potência de agora.
+          const chaveInversor = String(leitura.topico_mqtt || '').trim() || String(leitura.equipamento_id).trim();
+          const inversorDuplicado = isInversor && topicosContados.has(chaveInversor);
+          if (isInversor) {
+            temInversor = true;
+            topicosContados.add(chaveInversor);
+            const idadeMs = Date.now() - new Date(leitura.timestamp_dados).getTime();
+            if (inversorDuplicado || idadeMs >= 15 * 60 * 1000) potencia = 0;
+            potenciaInversores += Math.max(potencia, 0);
+          }
+
           potenciaTotal += potencia;
 
           // Frescor por equipamento (uma linha = último dado de um equipamento).
@@ -706,20 +712,11 @@ export class CoaService {
             // Ignorar erro de parsing
           }
 
-          // Classificar geração vs consumo baseado no tipo do equipamento
-          // Reconhecer inversores por múltiplos critérios:
-          // 1. tipo_equipamento contém 'INVERSOR'
-          // 2. Presença de dados de inversor no JSON (power.active_total, energy.daily_yield)
-          const tipoEquip = (leitura.tipo_equipamento || '').toUpperCase();
-          const isInversor = tipoEquip.includes('INVERSOR') ||
-                            (leitura.dados?.power?.active_total !== undefined &&
-                             leitura.dados?.energy?.daily_yield !== undefined);
-
           if (isInversor) {
             geracaoPlanta += potencia;
             totalGeracao += potencia;
             // Contar gerador apenas uma vez por equipamento
-            if (!equipamentosContados.has(leitura.equipamento_id)) {
+            if (!inversorDuplicado && !equipamentosContados.has(leitura.equipamento_id)) {
               totalGeradores++;
               equipamentosContados.add(leitura.equipamento_id);
             }
@@ -791,7 +788,6 @@ export class CoaService {
           potenciaNuvem = nuvemHoje.idadeMin <= 120 ? nuvemHoje.potenciaKw : 0;
           geracaoPlanta += potenciaNuvem;
           totalGeracao += potenciaNuvem;
-          totalGeracaoNuvem += potenciaNuvem;
         }
         // Monitorada pela nuvem (hoje ou nos últimos 2 dias): conta como instalação
         // monitorada no card do COA mesmo sem telemetria ao vivo — de dia e à noite.
@@ -834,17 +830,18 @@ export class CoaService {
           fonteGeracao: escHoje?.fonte ?? null,
           fontesDivergem: escHoje?.motivo === 'divergem',
           metricas: {
-            potenciaAtual: Math.round((fonteDados === 'nuvem' ? potenciaNuvem : potenciaTotal) * 100) / 100,
+            // Usina: potência dos inversores, sem o medidor (é o que a análise mostra). Carga: líquido.
+            potenciaAtual: Math.round((fonteDados === 'nuvem' ? potenciaNuvem : ehUnidadeGeracao(unidade.tipo) && temInversor ? potenciaInversores : potenciaTotal) * 100) / 100,
             // Geração pela fonte escolhida (NEXON-37); sem escolha, o método antigo.
             energiaHoje: Math.round(
-              energiaComFonte(uidT, energiaTotal, parcelaHoje.get(uidT), escHoje, fonteDados === 'nuvem', energiaNuvem) * 100,
+              energiaComFonte(unidade, uidT, energiaTotal, parcelaHoje.get(uidT), escHoje, fonteDados === 'nuvem', energiaNuvem) * 100,
             ) / 100,
             // D-1: telemetria pelo mesmo método; unidade que hoje vem da nuvem (ou
             // sem telemetria ontem) usa o fechamento diário da nuvem.
             energiaOntem:
               Math.round(
                 energiaComFonte(
-                  uidT, energiaOntemPorUnidade.get(uidT) ?? 0, parcelaOntem.get(uidT), escOntem,
+                  unidade, uidT, energiaOntemPorUnidade.get(uidT) ?? 0, parcelaOntem.get(uidT), escOntem,
                   fonteDados === 'nuvem' || !energiaOntemPorUnidade.has(uidT),
                   nuvemOntem.get(uidT) ?? energiaOntemPorUnidade.get(uidT) ?? 0,
                 ) * 100,
@@ -898,8 +895,14 @@ export class CoaService {
         totalGeradores,
         totalCargas,
         custoTotalHoje: custosPorUnidade.size > 0 ? Math.round(custoTotalHoje * 100) / 100 : undefined,
-        // Carga real (3 situações): Geração + líquido dos medidores (import +, export −).
-        cargaTotal: Math.round((totalGeracao - totalGeracaoNuvem + totalConsumo) * 100) / 100,
+        // Carga real: geração + líquido dos medidores (import +, export −), só nas plantas com
+        // carga instrumentada. Usina sem carga não é consumo. Mesma conta dos apps.
+        cargaTotal: Math.round(Math.max(
+          plantasProcessadas
+            .filter((p) => p.unidades.some((u) => !ehUnidadeGeracao(u.tipo) && u.equipamentosScs !== 0))
+            .reduce((soma, p) => soma + p.totais.geracao + p.totais.consumo, 0),
+          0,
+        ) * 100) / 100,
         totalReativo: Math.round(totalReativo * 100) / 100,
         // Aparente total dos PMs: S_T = √(P_T² + Q_T²), P_T = Σ PM ativo, Q_T = Σ PM reativo.
         totalAparente: Math.round(Math.sqrt(totalConsumo * totalConsumo + totalReativo * totalReativo) * 100) / 100,
@@ -964,7 +967,8 @@ export class CoaService {
       energia_dia AS (
         -- MESMO metodo do totaisDevice: por device, por dia-BRT
         SELECT equipamento_id,
-               DATE_TRUNC('day', timestamp_dados AT TIME ZONE 'America/Sao_Paulo') AS dia,
+               -- timestamp_dados é UTC: converter uma vez só cortava o dia às 18h e somava o daily_yield duas vezes
+               ((timestamp_dados AT TIME ZONE 'UTC') AT TIME ZONE 'America/Sao_Paulo')::date AS dia,
                CASE WHEN COUNT(dados->'energy'->>'daily_yield') >= 1
                     THEN MAX((dados->'energy'->>'daily_yield')::numeric)
                     ELSE SUM(energia_kwh) END AS dia_kwh
