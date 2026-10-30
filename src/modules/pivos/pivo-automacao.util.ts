@@ -154,3 +154,9 @@ export function irrigacaoDaProgramacao(p: ProgramacaoExec): Irrigacao {
 export function dentroDaPonta(j: JanelaComAtivo | null | undefined, agora: MomentoLocal): boolean {
   return !!j && j.ativo === true && dentroDaJanela(j, agora);
 }
+
+/** Data que vale para um conjunto de leituras: a mais antiga. Vazio ou alguma sem data = null (não dá para garantir frescor). */
+export function leituraMaisAntiga(datas: Array<Date | null>): Date | null {
+  if (!datas.length || datas.some((d) => !d)) return null;
+  return new Date(Math.min(...datas.map((d) => d!.getTime())));
+}

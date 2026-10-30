@@ -1,5 +1,5 @@
 import {
-  chegouNoAngulo, dentroDaPonta, duracaoParadaMs, irrigacaoDaProgramacao, normalizarIrrigacao, programacaoDisparaAgora, ProgramacaoExec, resumoIrrigacao,
+  chegouNoAngulo, dentroDaPonta, duracaoParadaMs, irrigacaoDaProgramacao, leituraMaisAntiga, normalizarIrrigacao, programacaoDisparaAgora, ProgramacaoExec, resumoIrrigacao,
 } from './pivo-automacao.util';
 
 const H = 3600000;
@@ -96,4 +96,15 @@ describe('dentroDaPonta', () => {
   it('ativo e na janela', () => expect(dentroDaPonta(j, { minutos: 19 * 60, diaSemana: 2 })).toBe(true));
   it('desligado não vale', () => expect(dentroDaPonta({ ...j, ativo: false }, { minutos: 19 * 60, diaSemana: 2 })).toBe(false));
   it('fim de semana fora', () => expect(dentroDaPonta(j, { minutos: 19 * 60, diaSemana: 6 })).toBe(false));
+});
+
+describe('leituraMaisAntiga', () => {
+  const a = new Date('2026-10-30T10:00:00Z');
+  const b = new Date('2026-10-30T10:05:00Z');
+
+  it('devolve a mais antiga', () => expect(leituraMaisAntiga([b, a])).toEqual(a));
+  it('sem leitura ou com ponto sem data, null', () => {
+    expect(leituraMaisAntiga([])).toBeNull();
+    expect(leituraMaisAntiga([a, null])).toBeNull();
+  });
 });

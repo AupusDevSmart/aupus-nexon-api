@@ -4,7 +4,7 @@ import { novoId26 } from '../../core/common/cliente-info';
 import { capacidades, MSG_SOMENTE_LEITURA, papelCanonico } from '../../core/modules/auth/papeis';
 import { EquipamentosCmdService } from '../equipamentos-cmd/equipamentos-cmd.service';
 import { FUSO_OPERACAO, JanelaComAtivo, janelaValida, momentoEmSaoPaulo } from '../../shared/util/janela-horario';
-import { dentroDaPonta, duracaoParadaMs, Irrigacao, normalizarIrrigacao, OrigemSequencia, resumoIrrigacao } from './pivo-automacao.util';
+import { dentroDaPonta, duracaoParadaMs, Irrigacao, leituraMaisAntiga, normalizarIrrigacao, OrigemSequencia, resumoIrrigacao } from './pivo-automacao.util';
 
 /**
  * Sequência do pivô com bombeamento (docs/IOT-PIVO-BOMBEAMENTO.md).
@@ -221,6 +221,7 @@ export class PivoSequenciaService implements OnModuleInit {
       pivo: {
         comandos: { direita: !!pts.cmd.direita, esquerda: !!pts.cmd.esquerda, desligar: !!pts.cmd.desligar },
         status: st,
+        lido_em: await this.lidoEmPivo(pts),
       },
       bombeamento: bomba,
       sequencia_cfg: cfg.sequencia,
@@ -607,6 +608,15 @@ export class PivoSequenciaService implements OnModuleInit {
       out[k] = v === null ? null : ((m.inv ? 1 - v : v) as 0 | 1);
     }
     return out;
+  }
+
+  /** Data da leitura das entradas de status do pivô: a mais antiga delas; null = alguma sem leitura ou nenhum ponto. */
+  private async lidoEmPivo(pts: { st: Partial<Record<string, { ton_id: string; bi: number; inv: boolean }>> }) {
+    const datas: Array<Date | null> = [];
+    for (const m of Object.values(pts.st)) {
+      if (m) datas.push((await this.cmd.lerEntradaTon(m.ton_id, m.bi)).updated_at);
+    }
+    return leituraMaisAntiga(datas);
   }
 
   /** Espera a condição virar true (poll 1 s). null da condição = "não dá para saber" → devolve null já. */
