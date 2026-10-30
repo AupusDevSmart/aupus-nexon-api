@@ -62,7 +62,7 @@ export class VinculosMirrorService {
 
       // 2) Zera o espelho deste tipo/fonte e reinsere só os canais COM ponto.
       await this.prisma.$executeRaw`
-        DELETE FROM iot_vinculos WHERE fonte_equipamento_id = ${ton} AND fonte_tipo = ${kind}`;
+        DELETE FROM iot_vinculos WHERE fonte_equipamento_id = ${ton}::bpchar AND fonte_tipo = ${kind}`;
       for (const f of fonte) {
         if (!f.ponto) continue;
         await this.prisma.$executeRaw`
@@ -191,7 +191,7 @@ export class VinculosMirrorService {
         // Zera SÓ o espelho modbus_bi desses equipamentos e reconstrói (modbus_bo é UI).
         await this.prisma.$executeRaw`
           DELETE FROM iot_vinculos
-          WHERE fonte_tipo = 'modbus_bi' AND fonte_equipamento_id = ANY(${equipIds})`;
+          WHERE fonte_tipo = 'modbus_bi' AND fonte_equipamento_id = ANY(${equipIds}::bpchar[])`;
       }
 
       for (const c of comps) {

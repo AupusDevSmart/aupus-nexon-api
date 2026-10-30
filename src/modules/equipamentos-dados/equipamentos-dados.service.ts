@@ -396,7 +396,7 @@ export class EquipamentosDadosService {
         ) AS potencia_max,
         COUNT(*)::int AS num_leituras
       FROM equipamentos_dados
-      WHERE equipamento_id = ${equipamentoId}
+      WHERE equipamento_id = ${equipamentoId}::bpchar
         AND timestamp_dados >= ${dataConsulta}
         AND timestamp_dados < ${dataFim}
         AND (potencia_ativa_kw IS NULL OR potencia_ativa_kw < ${CAP_POTENCIA_GLITCH_KW})
@@ -483,7 +483,7 @@ export class EquipamentosDadosService {
               0
             ) AS delta_phf
           FROM equipamentos_dados
-          WHERE equipamento_id = ${equipamentoId}
+          WHERE equipamento_id = ${equipamentoId}::bpchar
             AND timestamp_dados >= ${dataInicio}
             AND timestamp_dados < ${dataFim}
             AND (potencia_ativa_kw IS NULL OR potencia_ativa_kw < ${CAP_POTENCIA_GLITCH_KW})
@@ -1196,7 +1196,7 @@ export class EquipamentosDadosService {
           CAST(dados->>'phf' AS NUMERIC) - LAG(CAST(dados->>'phf' AS NUMERIC))
             OVER (ORDER BY timestamp_dados ASC) AS delta_phf
         FROM equipamentos_dados
-        WHERE equipamento_id = ${equipamentoId}
+        WHERE equipamento_id = ${equipamentoId}::bpchar
           AND timestamp_dados >= ${dataInicio}
           AND timestamp_dados < ${dataFim}
           AND (potencia_ativa_kw IS NULL OR potencia_ativa_kw < ${CAP_POTENCIA_GLITCH_KW})

@@ -52,7 +52,7 @@ export class GatewayGraficosService {
         AVG(COALESCE((dados->'data'->>'phr')::numeric, (dados->>'phr')::numeric)) AS phr_avg,
         COUNT(*)::int AS num_leituras
       FROM equipamentos_dados
-      WHERE equipamento_id = ${equipamentoIdLimpo}
+      WHERE equipamento_id = ${equipamentoIdLimpo}::bpchar
         AND timestamp_dados >= ${dataConsulta}
         AND timestamp_dados < ${dataFim}
         AND (
@@ -96,7 +96,7 @@ export class GatewayGraficosService {
         AVG(COALESCE((dados->'data'->>'phr')::numeric, (dados->>'phr')::numeric)) AS phr_avg,
         COUNT(*)::int AS num_registros
       FROM equipamentos_dados
-      WHERE equipamento_id = ${equipamentoIdLimpo}
+      WHERE equipamento_id = ${equipamentoIdLimpo}::bpchar
         AND timestamp_dados >= ${dataInicio}
         AND timestamp_dados < ${dataFim}
         AND (

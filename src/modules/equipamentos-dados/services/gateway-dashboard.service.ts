@@ -190,7 +190,7 @@ export class GatewayDashboardService {
         COALESCE(SUM(COALESCE((dados->'data'->>'qhrc')::numeric, (dados->>'qhrc')::numeric)), 0) AS qhrc_sum,
         COUNT(*)::int AS num_leituras
       FROM equipamentos_dados
-      WHERE equipamento_id = ${id}
+      WHERE equipamento_id = ${id}::bpchar
         AND timestamp_dados >= ${dataInicioDia}
         AND timestamp_dados <  ${agora}
     `;
@@ -214,7 +214,7 @@ export class GatewayDashboardService {
                         TIMESTAMP '2000-01-01') AS janela,
                COALESCE((dados->'data'->>'phf')::numeric, (dados->>'phf')::numeric) AS pulsos
           FROM equipamentos_dados
-         WHERE equipamento_id = ${id}
+         WHERE equipamento_id = ${id}::bpchar
            AND timestamp_dados >= ${dataInicioDia}
            AND timestamp_dados <  ${agora}
            AND COALESCE((dados->'data'->>'phf')::numeric, (dados->>'phf')::numeric) IS NOT NULL
@@ -234,7 +234,7 @@ export class GatewayDashboardService {
                         TIMESTAMP '2000-01-01') AS janela,
                COALESCE((dados->'data'->>'phr')::numeric, (dados->>'phr')::numeric) AS pulsos
           FROM equipamentos_dados
-         WHERE equipamento_id = ${id}
+         WHERE equipamento_id = ${id}::bpchar
            AND timestamp_dados >= ${dataInicioDia}
            AND timestamp_dados <  ${agora}
            AND COALESCE((dados->'data'->>'phr')::numeric, (dados->>'phr')::numeric) IS NOT NULL
@@ -266,7 +266,7 @@ export class GatewayDashboardService {
                         TIMESTAMP '2000-01-01') AS janela,
                COALESCE((dados->'data'->>'phf')::numeric, (dados->>'phf')::numeric) AS pulsos
           FROM equipamentos_dados
-         WHERE equipamento_id = ${id}
+         WHERE equipamento_id = ${id}::bpchar
            AND timestamp_dados >= ${dataInicioMes}
            AND timestamp_dados <  ${agora}
            AND COALESCE((dados->'data'->>'phf')::numeric, (dados->>'phf')::numeric) IS NOT NULL
@@ -286,7 +286,7 @@ export class GatewayDashboardService {
                         TIMESTAMP '2000-01-01') AS janela,
                COALESCE((dados->'data'->>'phr')::numeric, (dados->>'phr')::numeric) AS pulsos
           FROM equipamentos_dados
-         WHERE equipamento_id = ${id}
+         WHERE equipamento_id = ${id}::bpchar
            AND timestamp_dados >= ${dataInicioMes}
            AND timestamp_dados <  ${agora}
            AND COALESCE((dados->'data'->>'phr')::numeric, (dados->>'phr')::numeric) IS NOT NULL
@@ -319,7 +319,7 @@ export class GatewayDashboardService {
     const minutosRaw = await this.prisma.$queryRaw<any[]>`
       SELECT ts, ke, nsu, seg, q, posto, phf, phr, qhfi, qhfc, qhri, qhrc
         FROM ssu_minutos
-       WHERE equipamento_id = ${id} AND ts >= ${new Date(Date.now() - 60 * 60_000)}
+       WHERE equipamento_id = ${id}::bpchar AND ts >= ${new Date(Date.now() - 60 * 60_000)}
        ORDER BY ts`.catch(() => [] as any[]);
     const serieMinutos = minutosRaw.map((m) => {
       const k = Number(m.ke) || kd;
@@ -446,7 +446,7 @@ export class GatewayDashboardService {
         AVG(COALESCE((dados->'data'->>'phr')::numeric, (dados->>'phr')::numeric)) AS phr_avg,
         COUNT(*)::int AS num_leituras
       FROM equipamentos_dados
-      WHERE equipamento_id = ${id}
+      WHERE equipamento_id = ${id}::bpchar
         AND timestamp_dados >= ${dataInicio}
         AND timestamp_dados <  ${dataFim}
         AND (
