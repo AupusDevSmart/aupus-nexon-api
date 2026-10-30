@@ -1,5 +1,5 @@
 import {
-  chegouNoAngulo, dentroDaPonta, duracaoParadaMs, irrigacaoDaProgramacao, leituraMaisAntiga, normalizarIrrigacao, programacaoDisparaAgora, ProgramacaoExec, resumoIrrigacao,
+  chegouNoAngulo, dentroDaPonta, duracaoParadaMs, irrigacaoDaProgramacao, leituraMaisAntiga, mudancasConfig, normalizarIrrigacao, programacaoDisparaAgora, ProgramacaoExec, resumoIrrigacao,
 } from './pivo-automacao.util';
 
 const H = 3600000;
@@ -107,4 +107,15 @@ describe('leituraMaisAntiga', () => {
     expect(leituraMaisAntiga([])).toBeNull();
     expect(leituraMaisAntiga([a, null])).toBeNull();
   });
+});
+
+describe('mudancasConfig', () => {
+  it('lista só o que mudou, com antes e depois', () => {
+    expect(mudancasConfig({ ton_id: 'a', bo_liga: 1 }, { ton_id: 'b', bo_liga: 1 })).toEqual(['ton_id: a → b']);
+  });
+  it('bombeamento removido ou criado aparece com traço', () => {
+    expect(mudancasConfig({ ativo: true }, {})).toEqual(['ativo: true → —']);
+    expect(mudancasConfig({}, { ativo: true })).toEqual(['ativo: — → true']);
+  });
+  it('sem mudança, vazio', () => expect(mudancasConfig({ a: null }, {})).toEqual([]));
 });

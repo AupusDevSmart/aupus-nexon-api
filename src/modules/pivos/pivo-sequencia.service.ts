@@ -4,7 +4,7 @@ import { novoId26 } from '../../core/common/cliente-info';
 import { capacidades, MSG_SOMENTE_LEITURA, papelCanonico } from '../../core/modules/auth/papeis';
 import { EquipamentosCmdService } from '../equipamentos-cmd/equipamentos-cmd.service';
 import { FUSO_OPERACAO, JanelaComAtivo, janelaValida, momentoEmSaoPaulo } from '../../shared/util/janela-horario';
-import { dentroDaPonta, duracaoParadaMs, Irrigacao, leituraMaisAntiga, normalizarIrrigacao, OrigemSequencia, resumoIrrigacao } from './pivo-automacao.util';
+import { dentroDaPonta, duracaoParadaMs, Irrigacao, leituraMaisAntiga, mudancasConfig, normalizarIrrigacao, OrigemSequencia, resumoIrrigacao } from './pivo-automacao.util';
 
 /**
  * Sequência do pivô com bombeamento (docs/IOT-PIVO-BOMBEAMENTO.md).
@@ -148,6 +148,9 @@ export class PivoSequenciaService implements OnModuleInit {
       VALUES (${id}::bpchar, ${bombJson}::jsonb, ${JSON.stringify(seq)}::jsonb, now(), ${user?.id?.trim() || null})
       ON CONFLICT (equipamento_id) DO UPDATE SET bombeamento = EXCLUDED.bombeamento, sequencia = EXCLUDED.sequencia,
         updated_at = now(), updated_by = EXCLUDED.updated_by`;
+    const novaBomba = body.bombeamento === undefined ? atual.bombeamento : bomb;
+    const mudou = mudancasConfig({ ...atual.bombeamento, ...atual.sequencia }, { ...novaBomba, ...seq });
+    if (mudou.length) await this.trilha(id, `Bombeamento alterado: ${mudou.join('; ')}`, user?.id?.trim() || null, 'manual');
     return this.estado(id, user);
   }
 
