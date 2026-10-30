@@ -395,13 +395,14 @@ export class IoTService {
     const ton = tonRows[0];
     if (!ton) return { devices: [], elementos_scs: [] };
     if (user && ton.unidade_id) await this.scopeService.assertEntityInScope('unidade', ton.unidade_id, user);
-    const devices = await this.prisma.$queryRaw<Array<{ comp_id: string; tipo: string; nome: string; equipamento_id: string | null; assoc_dj_id: string | null; pontos_override: any }>>`
+    const devices = await this.prisma.$queryRaw<Array<{ comp_id: string; tipo: string; nome: string; equipamento_id: string | null; assoc_dj_id: string | null; pontos_override: any; diagram_id: string | null }>>`
       SELECT TRIM(d.id) AS comp_id,
              CASE WHEN d.tipo = 'medidor_comum' AND x.estilo = 'ssu' THEN 'medidor_ssu' ELSE d.tipo END AS tipo,
              COALESCE(d.props->>'name', '') AS nome,
              COALESCE(NULLIF(TRIM(d.equipamento_id), ''), d.props->>'equipamento_id') AS equipamento_id,
              NULLIF(TRIM(d.props->>'disjuntor_equipamento_id'), '') AS assoc_dj_id,
-             d.props->'pontos_override' AS pontos_override
+             d.props->'pontos_override' AS pontos_override,
+             d.props->>'_cid' AS diagram_id
       FROM iot_conexoes x
       JOIN iot_componentes d ON TRIM(d.id) = CASE WHEN TRIM(x.from_comp_id) = ${ton.comp_id} THEN TRIM(x.to_comp_id) ELSE TRIM(x.from_comp_id) END
       WHERE TRIM(x.projeto_id) = ${ton.projeto_id}
@@ -442,7 +443,7 @@ export class IoTService {
         const ov = (d.pontos_override && typeof d.pontos_override === 'object') ? d.pontos_override : {};
         const applyOv = (arr: any[]) => arr.map((p) => ({ ...p, json: (ov[p.id] != null && String(ov[p.id]).trim()) ? String(ov[p.id]).trim() : p.json_default }));
         return {
-          comp_id: d.comp_id, tipo: d.tipo, nome: d.nome, equipamento_id: d.equipamento_id,
+          comp_id: d.comp_id, diagram_id: d.diagram_id, tipo: d.tipo, nome: d.nome, equipamento_id: d.equipamento_id,
           associado: d.assoc_dj_id ? { equipamento_id: d.assoc_dj_id, nome: elMap.get(d.assoc_dj_id) ?? null } : null,
           pontos: { ai: applyOv(base.ai), bi: applyOv(base.bi), bo: applyOv(base.bo) },
         };
@@ -609,6 +610,7 @@ export class IoTService {
     if (Object.keys(clean).length) props.pontos_override = clean;
     else delete props.pontos_override;
     await this.prisma.$executeRaw`UPDATE iot_componentes SET props = ${JSON.stringify(props)}::jsonb WHERE TRIM(id) = ${cid}`;
+    await this.espelharNoDiagrama(cid, { pontos_override: Object.keys(clean).length ? clean : null });
     return { ok: true, count: Object.keys(clean).length };
   }
 
@@ -627,7 +629,48 @@ export class IoTService {
     if (elementoEquipId && elementoEquipId.trim()) props.disjuntor_equipamento_id = elementoEquipId.trim();
     else delete props.disjuntor_equipamento_id;
     await this.prisma.$executeRaw`UPDATE iot_componentes SET props = ${JSON.stringify(props)}::jsonb WHERE TRIM(id) = ${cid}`;
+    await this.espelharNoDiagrama(cid, { disjuntor_equipamento_id: elementoEquipId?.trim() || null });
     return { ok: true };
+  }
+
+  /**
+   * O espelho (iot_componentes) é REESCRITO a partir do JSON do diagrama a cada save
+   * (syncRelational). O que se grava só no espelho some no próximo save — era o vínculo
+   * SCS "voltando sozinho". Aplica o mesmo patch nas props do componente no JSON.
+   * Acha o componente pelo `_cid` (id no diagrama); espelho anterior ao `_cid` cai em
+   * tipo + posição. `null` remove a chave. Best-effort: sem achar, só registra.
+   */
+  private async espelharNoDiagrama(compDbId: string, patch: Record<string, unknown>): Promise<void> {
+    const rows = await this.prisma.$queryRaw<Array<{ projeto_id: string; tipo: string; x: number; y: number; cid: string | null }>>`
+      SELECT TRIM(projeto_id) AS projeto_id, tipo, x, y, props->>'_cid' AS cid
+      FROM iot_componentes WHERE TRIM(id) = ${compDbId} LIMIT 1`;
+    const m = rows[0];
+    if (!m) return;
+    // Lê-modifica-grava o JSON inteiro: trava a linha do projeto (duas associações
+    // seguidas — desassocia o antigo + associa o novo — não se atropelam).
+    await this.prisma.$transaction(async (tx) => {
+      const proj = await tx.$queryRaw<Array<{ diagrama: any }>>`
+        SELECT diagrama FROM iot_projetos WHERE id = ${m.projeto_id}::bpchar FOR UPDATE`;
+      const diagrama = proj[0]?.diagrama as IotDiagrama | null;
+      const comps = Array.isArray(diagrama?.components) ? (diagrama!.components as Array<Record<string, any>>) : [];
+      const alvo = m.cid
+        ? comps.find((c) => String(c.id) === m.cid)
+        : comps.find((c) => c.type === m.tipo && Math.abs(Number(c.x) - m.x) < 0.5 && Math.abs(Number(c.y) - m.y) < 0.5);
+      if (!alvo) {
+        new Logger(IoTService.name).warn(`[scs] componente ${compDbId} sem par no diagrama ${m.projeto_id} — vínculo fica só no espelho`);
+        return;
+      }
+      const props: Record<string, unknown> = { ...(alvo.props ?? {}) };
+      for (const [k, v] of Object.entries(patch)) {
+        if (v == null) delete props[k];
+        else props[k] = v;
+      }
+      alvo.props = props;
+      await tx.iot_projetos.update({
+        where: { id: m.projeto_id },
+        data: { diagrama: diagrama as unknown as Prisma.InputJsonValue },
+      });
+    });
   }
 
   /**
@@ -1646,7 +1689,9 @@ export class IoTService {
           x: typeof comp.x === 'number' ? comp.x : 0,
           y: typeof comp.y === 'number' ? comp.y : 0,
           equipamento_id: equipamentoId,
-          props: this.extractComponentProps(comp) as unknown as Prisma.InputJsonValue,
+          // _cid = id do componente NO DIAGRAMA: o que se grava direto no espelho (vínculo
+          // SCS, pontos) é refletido de volta no JSON por ele (espelharNoDiagrama).
+          props: { ...this.extractComponentProps(comp), _cid: localId } as unknown as Prisma.InputJsonValue,
         },
       });
     }
