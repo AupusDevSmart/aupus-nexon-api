@@ -64,11 +64,14 @@ export function normalizarIrrigacao(raw: unknown): Irrigacao | null {
   };
 }
 
-/** "Reverso · 60% · Molhado · canhão" (texto da trilha e dos registros). */
+/** Valor gravado (Avanço/Reverso = girar_direita/girar_esquerda) → texto mostrado. */
+export const DIRECAO_LABEL: Record<Direcao, string> = { 'Avanço': 'Direita', 'Reverso': 'Esquerda' };
+
+/** "Esquerda · 60% · Molhado · canhão" (texto da trilha e dos registros). */
 export function resumoIrrigacao(i: Irrigacao | null | undefined): string {
   if (!i) return 'última configuração';
   const c = i.config;
-  const partes = [c.direcao, c.semAgua ? 'Seco' : `${c.percentual}% · Molhado`];
+  const partes = [DIRECAO_LABEL[c.direcao] ?? c.direcao, c.semAgua ? 'Seco' : `${c.percentual}% · Molhado`];
   if (c.canhao) partes.push('canhão');
   const p = i.parada;
   partes.push(

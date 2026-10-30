@@ -82,7 +82,7 @@ describe('irrigacaoDaProgramacao', () => {
     const i = irrigacaoDaProgramacao(prog());
     expect(i.config).toMatchObject({ direcao: 'Avanço', percentual: 80, semAgua: false });
     expect(i.parada).toEqual({ tipo: 'porTempo', minutos: 480 });
-    expect(resumoIrrigacao(i)).toBe('Avanço · 80% · Molhado · 480 min');
+    expect(resumoIrrigacao(i)).toBe('Direita · 80% · Molhado · 480 min');
   });
   it('percurso → para no ângulo final, seco', () => {
     const i = irrigacaoDaProgramacao(prog({ modo: 'percurso', angulo_final: 180, sentido: 'anti_horario', com_agua: false }));

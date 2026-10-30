@@ -841,6 +841,32 @@ export class IoTService {
    * Idempotente (roda a cada save): (1) se o comp ja tem equipamento_id valido, pula;
    * (2) senao, se existe um equipamento com o mesmo topico_mqtt, REUSA; (3) senao cria.
    */
+  /**
+   * Papel LoRa pelo LAYOUT, igual ao gerador (_resolveLoraRole): TON com link
+   * lora_radio a outro nó LoRa e SEM conexão wifi/ethernet = satélite. Override
+   * manual por props.lora_role; lora_mode 'tx' (legado) também conta.
+   */
+  private tonEhSatelite(comp: unknown, diagrama: IotDiagrama): boolean {
+    const c = comp as { id?: string; props?: Record<string, unknown> };
+    const props = c.props ?? {};
+    const role = String(props.lora_role ?? '').toLowerCase();
+    if (role) return role === 'satellite';
+    if (String(props.lora_mode ?? '').toLowerCase() === 'tx') return true;
+    const conns = (Array.isArray((diagrama as { connections?: unknown }).connections)
+      ? (diagrama as { connections: Array<{ from?: { componentId?: string }; to?: { componentId?: string }; style?: string }> }).connections
+      : []
+    ).filter((k) => k.from?.componentId === c.id || k.to?.componentId === c.id);
+    const tipoDe = (id?: string) =>
+      String((diagrama.components.find((x) => (x as { id?: string }).id === id) as { type?: string } | undefined)?.type ?? '');
+    const internet = conns.some((k) => k.style === 'wifi' || k.style === 'ethernet');
+    const peerLora = conns.some((k) => {
+      if (k.style !== 'lora_radio') return false;
+      const outro = k.from?.componentId === c.id ? k.to?.componentId : k.from?.componentId;
+      return !!tonCapsForTipo(tipoDe(outro))?.lora;
+    });
+    return !internet && peerLora;
+  }
+
   private async ensureTonEquipamentos(
     tx: Prisma.TransactionClient,
     projetoId: string,
@@ -869,27 +895,29 @@ export class IoTService {
           string,
           unknown
         >;
-      // Satélite LoRa (lora_mode 'tx') NÃO tem tópico próprio no diagrama: o
-      // mqtt_topic_base dele é o da GATEWAY, e o tópico real é <base>/satellite/<MAC>.
-      // Usar a base crua sobrescrevia o ativo da satélite com o tópico da gateway
-      // (e na recriação as N satélites colapsavam no mesmo ativo). Sem MAC no
-      // diagrama → não mexe no tópico (fica o que o ativo já tem).
+      // Satélite LoRa NÃO tem tópico próprio no diagrama: o mqtt_topic_base dele é o
+      // da GATEWAY, e o tópico real é <base>/satellite/<MAC>. Usar a base crua
+      // sobrescrevia o ativo da satélite com o tópico da gateway (comando ia pra
+      // gateway e nunca chegava na satélite; na recriação as N satélites colapsavam
+      // no mesmo ativo). Sem MAC → não mexe no tópico (fica o que o ativo já tem).
       const base = String(props.mqtt_topic_base ?? '').trim().replace(/\/+$/, '');
-      const ehSatelite =
-        String(props.lora_mode ?? '').toLowerCase() === 'tx' ||
-        String(props.lora_role ?? '').toLowerCase() === 'satellite';
-      const macSat = String(props.mac_address ?? '').trim().toUpperCase();
+      const ehSatelite = this.tonEhSatelite(comp, diagrama);
+      const rawEquip = this.rawEquipamentoId(comp);
+      const ativo = rawEquip
+        ? await tx.equipamentos.findFirst({
+            where: { id: rawEquip, deleted_at: null },
+            select: { id: true, topico_mqtt: true, mac_address: true },
+          })
+        : null;
+      // MAC: do diagrama (override) ou o já cadastrado na TON (a satélite não leva MAC no layout).
+      const macSat = String(props.mac_address ?? '').trim().toUpperCase() || (ativo?.mac_address ?? '').trim().toUpperCase();
       const topico = !ehSatelite ? base : base && macSat ? `${base}/satellite/${macSat}` : '';
 
       // (1) ja vinculado e valido? MANTEM o vinculo; so PROPAGA o topico se ele
       // mudou (usuario preencheu o Topico Base DEPOIS de ja ter o equipamento) —
       // e aí liga o MQTT. Sem isso, preencher o topico depois nunca chegava no ativo.
-      const rawEquip = this.rawEquipamentoId(comp);
       if (rawEquip) {
-        const ok = await tx.equipamentos.findFirst({
-          where: { id: rawEquip, deleted_at: null },
-          select: { id: true, topico_mqtt: true },
-        });
+        const ok = ativo;
         if (ok) {
           if (topico && (ok.topico_mqtt ?? '').trim() !== topico) {
             await tx.equipamentos.update({
@@ -1445,6 +1473,21 @@ export class IoTService {
       adj.get(b)!.push(a);
     }
     const byId = new Map<string, Record<string, any>>(comps.map((c) => [String(c?.id), c]));
+    // Satélite LoRa: o device dela publica em <base>/satellite/<MAC>/<nome>_<addr>/data
+    // (a gateway republica). O tópico da satélite já foi resolvido no ativo da TON
+    // (ensureTonEquipamentos roda antes); sem ele (MAC desconhecido) não deriva nada,
+    // pra não criar device no tópico da gateway.
+    const topicoSatelite = new Map<string, string | null>();
+    for (const c of comps) {
+      if (!isTon(c.type) || !this.tonEhSatelite(c, diagrama)) continue;
+      const eqId = this.rawEquipamentoId(c as unknown as IotDiagramaComponent);
+      const eq = eqId
+        ? await tx.equipamentos.findFirst({ where: { id: eqId, deleted_at: null }, select: { topico_mqtt: true } })
+        : null;
+      const t = (eq?.topico_mqtt ?? '').trim();
+      topicoSatelite.set(String(c.id), t.includes('/satellite/') ? t : null);
+    }
+
     const tonTopicDe = (startId: string): string | null => {
       const visto = new Set<string>([startId]);
       const fila: string[] = [startId];
@@ -1452,6 +1495,7 @@ export class IoTService {
         const id = fila.shift() as string;
         const c = byId.get(id);
         if (c && id !== startId && isTon(c.type)) {
+          if (topicoSatelite.has(id)) return topicoSatelite.get(id) ?? null;
           const t = String(c.props?.mqtt_topic_base ?? '').trim();
           if (t) return t;
         }
