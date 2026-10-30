@@ -52,9 +52,13 @@ export async function deviceVinculado(prisma: PrismaService, id: string): Promis
   return fontes[0]?.fonte ?? null;
 }
 
-/** O próprio id se ele tem leitura; senão o device vinculado, se houver. */
-export async function idDaLeitura(prisma: PrismaService, id: string): Promise<string> {
+/** Quem pede pode ler este device? Sem resposta positiva, o vínculo não é seguido. */
+export type PodeLer = (id: string) => Promise<boolean>;
+
+/** O próprio id se ele tem leitura; senão o device vinculado, se houver e o usuário puder lê-lo. */
+export async function idDaLeitura(prisma: PrismaService, id: string, podeLer: PodeLer): Promise<string> {
   const proprio = await prisma.equipamentos_dados.findFirst({ where: { equipamento_id: id.trim().padEnd(26) }, select: { id: true } });
   if (proprio) return id;
-  return (await deviceVinculado(prisma, id)) ?? id;
+  const fonte = await deviceVinculado(prisma, id);
+  return fonte && (await podeLer(fonte)) ? fonte : id;
 }

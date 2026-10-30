@@ -446,6 +446,11 @@ export class EquipamentosController {
     return this.equipamentosService.configurarMqtt(id, dto);
   }
 
+  /** Device vinculado só é seguido se o usuário tiver escopo nele (operador: equipamentos liberados). */
+  private podeLer(user: any) {
+    return (fonte: string) => this.scope.assertEntityInScope('equipamento', fonte, user).then(() => true, () => false);
+  }
+
   @Get(':id/dados/atual')
   @Permissions('equipamentos.view')
   @ApiOperation({ summary: 'Obter último dado recebido do equipamento' })
@@ -457,7 +462,7 @@ export class EquipamentosController {
       { user, cliente, tipo: 'telemetria_atual', equipamentoIds: [id] },
       async () => {
         await this.scope.assertEntityInScope('equipamento', id, user);
-        return this.equipamentosDataService.obterDadoAtual(id);
+        return this.equipamentosDataService.obterDadoAtual(id, this.podeLer(user));
       },
       { registrarSucesso: false },
     );
@@ -498,7 +503,7 @@ export class EquipamentosController {
           fim: fim ? new Date(fim) : undefined,
           limite: limite ? parseInt(limite, 10) : undefined,
           intervalo: intervalo || 'raw',
-        });
+        }, this.podeLer(user));
       },
       { resumo: (r) => ({ linhas: r?.data?.length ?? 0 }) },
     );

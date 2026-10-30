@@ -423,7 +423,8 @@ export class EquipamentosDadosController {
 
     // Chamar serviço de cálculo (✅ passar tipo de período)
     // Sem leitura própria, o custo é o do device vinculado, como no web.
-    const idCusto = await this.service.idDaLeitura(id);
+    // O device vinculado passa pela mesma permissão de valores (R$) que o equipamento pedido.
+    const idCusto = await this.service.idDaLeitura(id, (f) => this.assertVerValores(f, user).then(() => true, () => false));
     const resultado = await this.custosService.calcularCustos(idCusto, dataInicio, dataFim, query.periodo);
 
     // Montar response DTO

@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
-import { camposDoStatusPivo, deviceVinculado, ehPivo, idDaLeitura, papelStatusPivo, type StatusPivo } from './leitura-vinculada';
+import { camposDoStatusPivo, deviceVinculado, ehPivo, idDaLeitura, papelStatusPivo, type PodeLer, type StatusPivo } from './leitura-vinculada';
 
 @Injectable()
 export class EquipamentosDataService {
@@ -9,7 +9,7 @@ export class EquipamentosDataService {
   /**
    * Obtém o dado mais recente de um equipamento
    */
-  async obterDadoAtual(equipamentoId: string) {
+  async obterDadoAtual(equipamentoId: string, podeLer: PodeLer) {
     // Verificar se o equipamento existe e buscar informações dele
     const equipamento = await this.prisma.equipamentos.findFirst({
       where: { id: equipamentoId, deleted_at: null },
@@ -31,7 +31,7 @@ export class EquipamentosDataService {
     });
 
     if (!ultimoDado) {
-      const vinculada = await this.leituraVinculada(equipamento.id, equipamento.tipo_equipamento_rel?.nome);
+      const vinculada = await this.leituraVinculada(equipamento.id, equipamento.tipo_equipamento_rel?.nome, podeLer);
       if (vinculada) return this.formatDadoResponse(equipamento, vinculada);
       // Retornar estrutura com equipamento mas sem dado
       return {
@@ -57,10 +57,10 @@ export class EquipamentosDataService {
    * Só com status (sem medidor) vai sem timestamp, e só com a TON online: TON fora devolve null
    * e o app segue em "Sem comunicação".
    */
-  private async leituraVinculada(id: string, tipo?: string | null) {
+  private async leituraVinculada(id: string, tipo: string | null | undefined, podeLer: PodeLer) {
     const eid = id.trim();
     const fonte = await deviceVinculado(this.prisma, eid);
-    const medidor = fonte
+    const medidor = fonte && (await podeLer(fonte))
       ? await this.prisma.equipamentos_dados.findFirst({
           where: { equipamento_id: fonte },
           orderBy: { timestamp_dados: 'desc' },
@@ -116,6 +116,7 @@ export class EquipamentosDataService {
       limite?: number;
       intervalo?: 'raw' | '1min' | '5min' | '1hour' | '1day';
     },
+    podeLer: PodeLer,
   ) {
     const { inicio, fim, limite = 100, intervalo = 'raw' } = options;
 
@@ -131,7 +132,7 @@ export class EquipamentosDataService {
     // Construir filtro de datas
     const whereClause: any = {
       // Sem leitura própria, o histórico é o do device vinculado, como no web.
-      equipamento_id: await idDaLeitura(this.prisma, equipamentoId),
+      equipamento_id: await idDaLeitura(this.prisma, equipamentoId, podeLer),
     };
 
     if (inicio || fim) {
