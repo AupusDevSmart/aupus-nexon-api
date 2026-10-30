@@ -1201,7 +1201,7 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
         if (ultimo === undefined) {
           const r: any[] = await this.prisma.$queryRaw`
             SELECT (dados_snapshot->>'boot')::int AS boot FROM logs_mqtt
-            WHERE equipamento_id = ${equipamentoId} AND dados_snapshot->>'ton_reinicio' = 'true' AND dados_snapshot ? 'boot'
+            WHERE equipamento_id = ${equipamentoId}::bpchar AND dados_snapshot->>'ton_reinicio' = 'true' AND dados_snapshot ? 'boot'
             ORDER BY created_at DESC LIMIT 1`;
           ultimo = r?.[0]?.boot ?? -1;
         }
@@ -1781,6 +1781,13 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       // do A-966 -> mesmo processamento do gateway. NAO generalizar por conteúdo: o M160
       // também tem 'phf' (lá é kWh acumulado, não pulsos).
       const dPulsos: any = dados && typeof dados === 'object' ? dados : {};
+      // Satélite LoRa (frame LORA_TYPE_SSU v2): o "min":{} chega achatado em m* — remonta.
+      if (dPulsos.min == null && dPulsos.mphf !== undefined) {
+        dPulsos.min = {
+          phf: dPulsos.mphf, phr: dPulsos.mphr,
+          qhfi: dPulsos.mqhfi, qhfc: dPulsos.mqhfc, qhri: dPulsos.mqhri, qhrc: dPulsos.mqhrc,
+        };
+      }
       const temPulsosA966 =
         dPulsos.phf !== undefined || dPulsos.phr !== undefined ||
         (dPulsos.data && (dPulsos.data.phf !== undefined || dPulsos.data.phr !== undefined));
