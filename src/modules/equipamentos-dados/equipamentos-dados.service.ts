@@ -1472,7 +1472,8 @@ export class EquipamentosDadosService {
       FROM (
         SELECT
           equipamento_id,
-          DATE_TRUNC('day', timestamp_dados AT TIME ZONE 'America/Sao_Paulo') AS dia,
+          -- timestamp_dados é UTC: converter uma vez só cortava o dia às 18h e somava o daily_yield duas vezes
+          ((timestamp_dados AT TIME ZONE 'UTC') AT TIME ZONE 'America/Sao_Paulo')::date AS dia,
           CASE
             WHEN COUNT(dados->'energy'->>'daily_yield') >= 1
             THEN MAX((dados->'energy'->>'daily_yield')::numeric)
