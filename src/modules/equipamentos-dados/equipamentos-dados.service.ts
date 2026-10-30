@@ -1,3 +1,4 @@
+import { idDaLeitura } from '@/core/modules/equipamentos/services/leitura-vinculada';
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
 import { EquipamentoDadosQueryDto } from './dto/equipamento-dados-query.dto';
@@ -48,6 +49,11 @@ export class EquipamentosDadosService {
   /**
    * Buscar o dado mais recente de um equipamento
    */
+  /** O próprio id se ele tem leitura; senão o device vinculado, se houver. */
+  idDaLeitura(id: string): Promise<string> {
+    return idDaLeitura(this.prisma, id);
+  }
+
   async findLatest(equipamentoId: string, user?: ScopedUser) {
     this.logger.log(`Buscando dado mais recente para equipamento ${equipamentoId}`);
     await this.assertEqInScope(equipamentoId, user);

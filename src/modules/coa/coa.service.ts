@@ -826,7 +826,8 @@ export class CoaService {
           cidade: unidade.cidade || undefined,
           estado: unidade.estado || undefined,
           potenciaInstalada: Number(unidade.potencia) || 0, // ✅ Potência instalada em kW
-          ...(scsPorUnidade ? { equipamentosScs: scsPorUnidade.get(unidade.id.trim()) ?? 0 } : {}),
+          // 0 escondia a instalação nos apps publicados (semInstrumentacao); o web mostra todas.
+          ...(scsPorUnidade?.get(unidade.id.trim()) ? { equipamentosScs: scsPorUnidade.get(unidade.id.trim()) } : {}),
           fonteGeracao: escHoje?.fonte ?? null,
           fontesDivergem: escHoje?.motivo === 'divergem',
           metricas: {
