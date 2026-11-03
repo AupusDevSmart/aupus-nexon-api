@@ -87,6 +87,7 @@ export class PivosService {
         pressao_minima: num(parametros.pressao_minima),
         lamina_100: num(parametros.lamina_100),
         tempo_volta_100: num(parametros.tempo_volta_100),
+        percentimetro_ciclo_s: num(parametros.percentimetro_ciclo_s),
         correcao_angulo_zero: num(parametros.correcao_angulo_zero),
         direcionamento: parametros.direcionamento === 'fisico' ? 'fisico' : 'valvula',
         valvula_ton_id: typeof parametros.valvula_ton_id === 'string' ? parametros.valvula_ton_id : null,

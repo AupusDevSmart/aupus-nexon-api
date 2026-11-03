@@ -10,7 +10,12 @@ import { dentroDaJanela, JanelaComAtivo, MomentoLocal, parseHHMM } from '../../s
 
 export type Direcao = 'Avanço' | 'Reverso';
 export interface FaixaCanhao { id?: string; liga: number; desliga: number }
-export interface ConfigIrrigacao { direcao: Direcao; percentual: number; semAgua: boolean; canhao: boolean; faixasCanhao?: FaixaCanhao[] }
+/**
+ * percentual = percentímetro (0–100 %, 1 casa): fração de cada ciclo em que o motor de
+ * movimento fica ligado (0 = parado irrigando). lamina (mm) = o que o operador pediu;
+ * quando vem, o servidor recalcula o percentual (percentualDaLamina) — docs/IOT-PIVO-PERCENTIMETRO-LAMINA.md.
+ */
+export interface ConfigIrrigacao { direcao: Direcao; percentual: number; lamina?: number | null; semAgua: boolean; canhao: boolean; faixasCanhao?: FaixaCanhao[] }
 export type Parada = { tipo: 'semParar' } | { tipo: 'porAngulo'; angulo: number } | { tipo: 'porVoltas'; voltas: number } | { tipo: 'porTempo'; minutos: number };
 export interface Irrigacao {
   modo: 'simples' | 'angulo' | 'segmentos' | 'programacao';
@@ -27,6 +32,26 @@ export interface Irrigacao {
 export type OrigemSequencia = 'manual' | 'agendada' | 'programacao' | 'ponta' | 'ponta_retomada' | 'parada';
 
 const clamp = (n: number, a: number, b: number) => Math.min(b, Math.max(a, n));
+const umaCasa = (n: number) => Math.round(n * 10) / 10;
+
+/** Percentual 0–100 com 1 casa; ausente/inválido = 100 (0 é válido: parado irrigando). */
+export function normalizarPercentual(v: unknown): number {
+  const n = v === null || v === undefined || v === '' ? NaN : Number(v);
+  return Number.isFinite(n) ? clamp(umaCasa(n), 0, 100) : 100;
+}
+
+/**
+ * Lâmina (mm) → percentímetro: % = lâmina_100 ÷ lâmina (validado com a tabela iCrop do
+ * Pivô 11: erro ≤ 0,09 p.p.). Lâmina menor que a de 100 % é impossível → null.
+ */
+export function percentualDaLamina(lamina: number, lamina100: number): number | null {
+  if (!(lamina > 0) || !(lamina100 > 0)) return null;
+  if (lamina < lamina100 - 1e-9) return null;
+  return clamp(umaCasa((lamina100 / lamina) * 100), 0, 100);
+}
+
+/** "59,7" (vírgula, sem casa quando inteiro) — texto da trilha. */
+export const fmtPercentual = (p: number) => (Number.isInteger(p) ? String(p) : p.toFixed(1).replace('.', ','));
 const norm360 = (g: number) => ((g % 360) + 360) % 360;
 
 /** Valida e normaliza o que veio do front. Inválido → null (vale "Ligar" simples). */
@@ -36,7 +61,8 @@ export function normalizarIrrigacao(raw: unknown): Irrigacao | null {
   const c = (r.config ?? {}) as Record<string, any>;
   const config: ConfigIrrigacao = {
     direcao: c.direcao === 'Avanço' ? 'Avanço' : 'Reverso',
-    percentual: clamp(Math.round(Number(c.percentual) || 100), 1, 100),
+    percentual: normalizarPercentual(c.percentual),
+    lamina: Number(c.lamina) > 0 ? Math.round(Number(c.lamina) * 100) / 100 : null,
     semAgua: c.semAgua === true,
     canhao: c.canhao === true && c.semAgua !== true,
     faixasCanhao: Array.isArray(c.faixasCanhao)
@@ -71,7 +97,7 @@ export const DIRECAO_LABEL: Record<Direcao, string> = { 'Avanço': 'Direita', 'R
 export function resumoIrrigacao(i: Irrigacao | null | undefined): string {
   if (!i) return 'última configuração';
   const c = i.config;
-  const partes = [DIRECAO_LABEL[c.direcao] ?? c.direcao, c.semAgua ? 'Seco' : `${c.percentual}% · Molhado`];
+  const partes = [DIRECAO_LABEL[c.direcao] ?? c.direcao, c.semAgua ? 'Seco' : `${fmtPercentual(c.percentual)}%${c.lamina ? ` (${c.lamina.toFixed(2).replace('.', ',')} mm)` : ''} · Molhado`];
   if (c.canhao) partes.push('canhão');
   const p = i.parada;
   partes.push(
@@ -92,7 +118,9 @@ export function resumoIrrigacao(i: Irrigacao | null | undefined): string {
 export function duracaoParadaMs(i: Irrigacao, tempoVolta100h: number, anguloAtual: number | null): number | null {
   const p = i.parada;
   if (p.tipo === 'porTempo') return p.minutos * 60000;
-  const fator = i.config.semAgua ? 1 : 100 / Math.max(1, i.config.percentual);
+  // 0 % = parado irrigando: voltas/ângulo nunca chegam (a parada fica por tempo ou manual).
+  if (!i.config.semAgua && !(i.config.percentual > 0)) return null;
+  const fator = i.config.semAgua ? 1 : 100 / i.config.percentual;
   const horasPorVolta = Math.max(0.1, tempoVolta100h) * fator;
   if (p.tipo === 'porVoltas') return Math.round(p.voltas * horasPorVolta * 3600000);
   if (p.tipo === 'porAngulo' && anguloAtual != null) {
@@ -140,7 +168,7 @@ export function programacaoDisparaAgora(p: ProgramacaoExec, agora: MomentoLocal,
 export function irrigacaoDaProgramacao(p: ProgramacaoExec): Irrigacao {
   const config: ConfigIrrigacao = {
     direcao: p.sentido === 'horario' ? 'Avanço' : 'Reverso',
-    percentual: clamp(Math.round(Number(p.velocidade) || 100), 1, 100),
+    percentual: Number(p.velocidade) > 0 ? normalizarPercentual(p.velocidade) : 100,   // vazio/0 sempre foi 100 %
     semAgua: p.com_agua === false,
     canhao: false,
     faixasCanhao: [],

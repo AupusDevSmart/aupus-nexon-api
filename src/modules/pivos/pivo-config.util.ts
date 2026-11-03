@@ -70,6 +70,7 @@ export function agruparConjugados(linhas: LinhaConjugado[]): GrupoConjugado[] {
 export const PARAMETROS_TECNICOS_PIVO = [
   'pressao_minima',
   'tempo_volta_100',
+  'percentimetro_ciclo_s',
   'correcao_angulo_zero',
   'direcionamento',
   'valvula_ton_id',

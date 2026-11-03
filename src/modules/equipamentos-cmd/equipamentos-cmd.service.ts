@@ -662,6 +662,57 @@ export class EquipamentosCmdService {
     return { status: ack.status, latency_ms };
   }
 
+  /**
+   * Comando de texto para uma TON (ex.: percentímetro "perc 4 597 60 3"), com ack e trilha no
+   * equipamento. `ackOk` confere a mensagem do ack: firmware antigo responde "unknown_cmd"
+   * (erro) ou algo diferente — sem casar, é falha (não segue achando que a TON aplicou).
+   */
+  async comandoTon(
+    p: { equipamentoId: string; tonId: string; cmd: string; rotulo: string; ackOk?: RegExp },
+    user?: Autor,
+    cliente?: ClienteInfo,
+  ): Promise<{ status: string; msg: string; latency_ms: number }> {
+    const eqId = p.equipamentoId.trim();
+    const eq = await this.prisma.equipamentos.findFirst({ where: { id: eqId, deleted_at: null }, select: { nome: true } });
+    if (!eq) throw new NotFoundException(`Equipamento ${eqId} nao encontrado`);
+    const semantico = `${eq.nome} · ${p.rotulo}`;
+    const ton = await this.prisma.equipamentos.findFirst({
+      where: { id: p.tonId.trim(), deleted_at: null },
+      select: { id: true, nome: true, topico_mqtt: true },
+    });
+    if (!ton) throw new BadRequestException(`TON (${p.tonId}) não encontrada ou removida.`);
+    const topico = ton.topico_mqtt?.trim();
+    if (!topico) throw new BadRequestException(`A TON "${ton.nome}" não tem Tópico Base.`);
+    if (!this.mqtt.isConnected()) throw new ServiceUnavailableException('Broker MQTT nao conectado no momento.');
+
+    const t0 = Date.now();
+    let ack: CmdAckResult;
+    try {
+      ack = await this.mqtt.publishCommand(topico, p.cmd);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Erro desconhecido';
+      await this.registrarComando(
+        { equipamentoId: eqId, mensagem: `${semantico}: sem resposta da TON ${ton.nome} (${msg})`, status: 'timeout', severidade: 'ERROR', latencyMs: Date.now() - t0, tonId: ton.id, comandoTecnico: p.cmd, comandoSemantico: semantico },
+        user, cliente,
+      );
+      throw new GatewayTimeoutException(`TON "${ton.nome}" nao respondeu ao comando ${p.cmd} dentro do timeout.`);
+    }
+    const latency_ms = Date.now() - t0;
+    const casou = ack.status === 'duplicate' || (ack.status !== 'error' && (!p.ackOk || p.ackOk.test(String(ack.msg ?? ''))));
+    if (!casou) {
+      await this.registrarComando(
+        { equipamentoId: eqId, mensagem: `${semantico}: TON não aplicou (${ack.msg || ack.status})`, status: 'error', severidade: 'ERROR', cmdId: ack.cmd_id, latencyMs: latency_ms, tonId: ton.id, comandoTecnico: p.cmd, comandoSemantico: semantico },
+        user, cliente,
+      );
+      throw new BadGatewayException({ message: `TON não aplicou "${p.cmd}": ${ack.msg || ack.status} (firmware sem suporte? regrave a TON)`, cmd_id: ack.cmd_id, latency_ms });
+    }
+    await this.registrarComando(
+      { equipamentoId: eqId, mensagem: `${semantico} (${p.cmd} @ ${ton.nome})`, status: ack.status, severidade: 'INFO', cmdId: ack.cmd_id, latencyMs: latency_ms, tonId: ton.id, comandoTecnico: p.cmd, comandoSemantico: semantico },
+      user, cliente,
+    );
+    return { status: ack.status, msg: String(ack.msg ?? ''), latency_ms };
+  }
+
   /** Estado de uma entrada (BI, 1-based) de uma TON, como chegou em <base>/inputs. null = sem leitura. */
   async lerEntradaTon(tonId: string, bi: number): Promise<{ valor: 0 | 1 | null; updated_at: Date | null }> {
     const rows = await this.prisma.$queryRaw<Array<{ inputs: any; updated_at: Date }>>`

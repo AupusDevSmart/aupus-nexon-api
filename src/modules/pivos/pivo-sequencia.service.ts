@@ -4,7 +4,7 @@ import { novoId26 } from '../../core/common/cliente-info';
 import { capacidades, MSG_SOMENTE_LEITURA, papelCanonico } from '../../core/modules/auth/papeis';
 import { EquipamentosCmdService } from '../equipamentos-cmd/equipamentos-cmd.service';
 import { FUSO_OPERACAO, JanelaComAtivo, janelaValida, momentoEmSaoPaulo } from '../../shared/util/janela-horario';
-import { dentroDaPonta, duracaoParadaMs, Irrigacao, leituraMaisAntiga, mudancasConfig, normalizarIrrigacao, OrigemSequencia, resumoIrrigacao } from './pivo-automacao.util';
+import { dentroDaPonta, duracaoParadaMs, fmtPercentual, Irrigacao, leituraMaisAntiga, mudancasConfig, normalizarIrrigacao, OrigemSequencia, percentualDaLamina, resumoIrrigacao } from './pivo-automacao.util';
 
 /**
  * Sequência do pivô com bombeamento (docs/IOT-PIVO-BOMBEAMENTO.md).
@@ -54,12 +54,16 @@ const SEQ_PADRAO: SequenciaCfg = { pressurizacao_s: 120, confirma_giro_s: 30 };
 const norm = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 
 /** Pontos do pivô por papel, achados pelo nome (Girar_direita, Girando_esquerda, Desligado, Erro…). */
-const PAPEIS_COMANDO: Record<'direita' | 'esquerda' | 'desligar', RegExp> = {
+const PAPEIS_COMANDO: Record<'percentimetro' | 'direita' | 'esquerda' | 'desligar', RegExp> = {
+  // Percentímetro = BO do motor de movimento (ciclo local na TON — docs/IOT-PIVO-PERCENTIMETRO-LAMINA.md)
+  percentimetro: /percent/,
   direita: /direit|horario(?!.*anti)/,
   esquerda: /esquerd|anti.?horario/,
   desligar: /deslig|parar|stop/,
 };
-const PAPEIS_STATUS: Record<'direita' | 'esquerda' | 'desligado' | 'erro', RegExp> = {
+const PAPEIS_STATUS: Record<'pressao' | 'direita' | 'esquerda' | 'desligado' | 'erro', RegExp> = {
+  // Pressostato: água chegou ao pivô (partida espera ele antes de girar)
+  pressao: /press/,
   direita: /direit/,
   esquerda: /esquerd/,
   desligado: /deslig|parad/,
@@ -265,6 +269,14 @@ export class PivoSequenciaService implements OnModuleInit {
     const autorId = user?.id?.trim() || opts.responsavelId?.trim() || null;
     let irrigacao = acao === 'desligar' ? null : normalizarIrrigacao(opts.irrigacao);
     if (irrigacao) irrigacao.config.direcao = acao === 'girar_direita' ? 'Avanço' : 'Reverso';
+    // Lâmina pedida → percentímetro (o servidor é quem calcula, com a lâmina a 100 % do cadastro).
+    if (irrigacao?.config.lamina && !irrigacao.config.semAgua) {
+      const { lamina100 } = await this.parametrosPercentimetro(id);
+      if (!lamina100) throw new BadRequestException('Cadastre a "Lâmina a 100%" na Configuração do pivô para irrigar por lâmina (ou informe o percentual).');
+      const pct = percentualDaLamina(irrigacao.config.lamina, lamina100);
+      if (pct === null) throw new BadRequestException(`Lâmina mínima deste pivô: ${String(lamina100).replace('.', ',')} mm (100 %).`);
+      irrigacao.config.percentual = pct;
+    }
 
     if (acao === 'desligar') {
       // TRAVA: não desliga o que já está desligado.
@@ -420,6 +432,52 @@ export class PivoSequenciaService implements OnModuleInit {
     return d && Number.isFinite(v) ? v : null;
   }
 
+  /** Lâmina a 100 % (mm) e ciclo do percentímetro (s, padrão 60) da Configuração. */
+  async parametrosPercentimetro(id: string): Promise<{ lamina100: number | null; cicloS: number }> {
+    const rows = await this.prisma.$queryRaw<Array<{ parametros: any }>>`
+      SELECT parametros FROM pivo_config WHERE equipamento_id = ${id}::bpchar LIMIT 1`.catch(() => []);
+    const l = Number(rows[0]?.parametros?.lamina_100);
+    const c = Number(rows[0]?.parametros?.percentimetro_ciclo_s);
+    return { lamina100: l > 0 ? l : null, cicloS: c >= 5 && c <= 600 ? Math.round(c) : 60 };
+  }
+
+  /**
+   * Percentímetro na TON: um comando ("perc <bo> <permil> <ciclo_s> <mascara>" ou "perc off").
+   * A máscara são as DINs de "Girando" (mesma TON, não invertidas): a TON só roda o ciclo com
+   * o pivô ligado no painel. Ack tem que confirmar o valor — firmware antigo = erro (regravar).
+   * Sem ponto Percentímetro → false (nada a fazer).
+   */
+  private async percentimetro(
+    id: string,
+    pts: { cmd: Partial<Record<string, string>>; st: Partial<Record<string, { ton_id: string; bi: number; inv: boolean }>> },
+    permil: number | 'off',
+    user?: Autor, cliente?: ClienteInfo,
+  ): Promise<{ bo: number; cicloS: number } | false> {
+    const pid = pts.cmd.percentimetro;
+    if (!pid) return false;
+    const rows = await this.prisma.$queryRaw<Array<{ bo: number; ton_id: string }>>`
+      SELECT b.bo_numero AS bo, TRIM(b.ton_id) AS ton_id FROM ton_bo b
+      WHERE b.equipamento_ponto_id = ${pid}::bpchar AND b.deleted_at IS NULL AND b.ativo LIMIT 1`;
+    const m = rows[0];
+    if (!m) throw new FalhaPartida('Ponto "Percentímetro" sem BO vinculada na TON (Topologia → Configurar I/O).', false);
+    if (permil === 'off') {
+      await this.cmd.comandoTon({ equipamentoId: id, tonId: m.ton_id, cmd: 'perc off', rotulo: 'Percentímetro desligado', ackOk: /^perc_off$/ }, user, cliente);
+      return { bo: m.bo, cicloS: 0 };
+    }
+    const { cicloS } = await this.parametrosPercentimetro(id);
+    let mask = 0;
+    for (const k of ['direita', 'esquerda'] as const) {
+      const g = pts.st[k];
+      if (g && g.ton_id === m.ton_id && !g.inv && g.bi >= 1 && g.bi <= 8) mask |= 1 << (g.bi - 1);
+    }
+    const pm = Math.max(0, Math.min(1000, Math.round(permil)));
+    await this.cmd.comandoTon({
+      equipamentoId: id, tonId: m.ton_id, cmd: `perc ${m.bo} ${pm} ${cicloS} ${mask}`,
+      rotulo: `Percentímetro ${fmtPercentual(pm / 10)}%`, ackOk: new RegExp(`^perc_${m.bo}_${pm}$`),
+    }, user, cliente);
+    return { bo: m.bo, cicloS };
+  }
+
   /** Tempo de volta a 100% (h) da Configuração; padrão 21 h. */
   async tempoVolta100(id: string): Promise<number> {
     const rows = await this.prisma.$queryRaw<Array<{ parametros: any }>>`
@@ -462,6 +520,7 @@ export class PivoSequenciaService implements OnModuleInit {
           passos = ${JSON.stringify(passos)}::jsonb WHERE id = ${ctl.seqId}`;
     };
     const msgErro = (e: any) => e?.response?.message || e?.message || String(e);
+    let percEnviado = false;   // percentímetro já configurado na TON nesta partida
 
     try {
       const cfg = await this.lerConfig(id);
@@ -480,6 +539,11 @@ export class PivoSequenciaService implements OnModuleInit {
           }, cfg.sequencia.confirma_giro_s, ctl);
           await passo('pivo', parou === null ? 'Pivô sem status cadastrado — sem confirmação' : parou ? 'Pivô parado' : 'Pivô não confirmou parada no tempo', parou !== false);
         }
+        if (pts.cmd.percentimetro) {
+          await this.percentimetro(id, pts, 'off', user, cliente)
+            .then(() => passo('percentimetro', 'Percentímetro desligado na TON', true))
+            .catch((x) => passo('percentimetro', `Percentímetro não desligou: ${msgErro(x)}`, false));
+        }
         if (b) await this.desligarBomba(id, b, passo, user, cliente);
         await this.valvula(id, false, passo, user, cliente);
         await fim('concluida');
@@ -496,9 +560,6 @@ export class PivoSequenciaService implements OnModuleInit {
         await passo('bomba', 'Girar sem água: a bomba não liga', true);
       } else {
         await this.valvula(id, true, passo, user, cliente);
-      }
-      if (irr && !irr.config.semAgua) {
-        await passo('pivo', `Percentímetro ${irr.config.percentual}%${irr.config.canhao ? ' · canhão final ligado' : ''} (ajuste do painel do pivô)`, null);
       }
       if (b && !irr?.config.semAgua) {
         const ligada = b.bi_confirma ? (await this.cmd.lerEntradaTon(b.ton_id, b.bi_confirma)).valor : null;
@@ -520,13 +581,42 @@ export class PivoSequenciaService implements OnModuleInit {
             await passo('bomba', 'Sem BI de confirmação da bomba — seguindo', null);
           }
           const pressS = cfg.sequencia.pressurizacao_s;
-          if (pressS > 0) {
+          if (pressS > 0 && !pts.st.pressao) {
             await passo('pressao', `Aguardando pressurização (${pressS}s)`, null);
             await this.esperar(async () => false, pressS, ctl);
             if (ctl.cancelar) return await this.interrompida(passo, fim);
             await passo('pressao', 'Pressurização concluída', true);
           }
         }
+      }
+      // Com água e pressostato cadastrado: só gira depois que a água chegou (com ou sem
+      // bombeamento configurado — a pressão pode vir de outra fonte).
+      if (!irr?.config.semAgua && pts.st.pressao) {
+        const ps = pts.st.pressao;
+        const limite = cfg.sequencia.pressurizacao_s > 0 ? cfg.sequencia.pressurizacao_s : 60;
+        await passo('pressao', `Aguardando pressostato (até ${limite}s)`, null);
+        const ok = await this.esperar(async () => {
+          const v = (await this.cmd.lerEntradaTon(ps.ton_id, ps.bi)).valor;
+          return v === null ? false : (ps.inv ? 1 - v : v) === 1;
+        }, limite, ctl);
+        if (ctl.cancelar) return await this.interrompida(passo, fim);
+        if (!ok) throw new FalhaPartida(`Sem pressão: o pressostato não confirmou em ${limite}s.`, liguei);
+        await passo('pressao', 'Pressão confirmada (pressostato)', true);
+      }
+
+      // Percentímetro na TON ANTES de girar (a TON começa o ciclo quando o pivô ligar).
+      // Sem água: 100 % (anda direto). Sem ponto Percentímetro: o ajuste fica no painel.
+      const pctAlvo = irr?.config.semAgua ? 100 : irr?.config.percentual ?? 100;
+      if (pts.cmd.percentimetro) {
+        try {
+          const pc = await this.percentimetro(id, pts, pctAlvo * 10, user, cliente);
+          percEnviado = true;
+          if (pc) await passo('percentimetro', `Percentímetro ${fmtPercentual(pctAlvo)}%${irr?.config.lamina && !irr.config.semAgua ? ` (lâmina ${irr.config.lamina.toFixed(2).replace('.', ',')} mm)` : ''} aplicado na TON · ciclo ${pc.cicloS}s${irr?.config.canhao ? ' · canhão final ligado' : ''}`, true);
+        } catch (x) {
+          throw x instanceof FalhaPartida ? new FalhaPartida(x.message, liguei) : new FalhaPartida(`Percentímetro: ${msgErro(x)}`, liguei);
+        }
+      } else if (irr && !irr.config.semAgua) {
+        await passo('pivo', `Percentímetro ${fmtPercentual(pctAlvo)}%${irr.config.canhao ? ' · canhão final ligado' : ''} (ajuste do painel do pivô)`, null);
       }
 
       if (ctl.cancelar) return await this.interrompida(passo, fim);
@@ -567,8 +657,13 @@ export class PivoSequenciaService implements OnModuleInit {
             .catch(() => undefined);
         }
       }
+      // Percentímetro já mandado nesta partida: desliga (a TON não fica ciclando o motor à toa).
+      if (percEnviado && acao !== 'desligar') {
+        const ptsP = await this.pontos(id).catch(() => null);
+        if (ptsP) await this.percentimetro(id, ptsP, 'off', user, cliente).catch(() => undefined);
+      }
       // falhou depois de ligar a bomba: não deixa bomba ligada à toa
-      if ((e instanceof FalhaBomba || (e instanceof FalhaGiro && e.liguei)) && acao !== 'desligar') {
+      if ((e instanceof FalhaBomba || ((e instanceof FalhaGiro || e instanceof FalhaPartida) && e.liguei)) && acao !== 'desligar') {
         const cfg = await this.lerConfig(id).catch(() => null);
         if (cfg?.bombeamento) await this.desligarBomba(id, cfg.bombeamento, passo, user, cliente).catch(() => undefined);
       }
@@ -653,15 +748,15 @@ export class PivoSequenciaService implements OnModuleInit {
       LEFT JOIN ton_bi b ON b.equipamento_ponto_id = p.id AND b.deleted_at IS NULL AND b.ativo
       WHERE p.equipamento_id = ${id}::bpchar AND p.deleted_at IS NULL AND p.ativo
       ORDER BY p.ordem, p.nome`;
-    const cmd: Partial<Record<'direita' | 'esquerda' | 'desligar', string>> = {};
-    const st: Partial<Record<'direita' | 'esquerda' | 'desligado' | 'erro', { ton_id: string; bi: number; inv: boolean }>> = {};
+    const cmd: Partial<Record<'percentimetro' | 'direita' | 'esquerda' | 'desligar', string>> = {};
+    const st: Partial<Record<'pressao' | 'direita' | 'esquerda' | 'desligado' | 'erro', { ton_id: string; bi: number; inv: boolean }>> = {};
     for (const r of rows) {
       const n = norm(r.nome);
       if (r.tipo === 'comando') {
         // ordem importa: "anti-horário" antes de "horário"
-        for (const k of ['esquerda', 'direita', 'desligar'] as const) if (!cmd[k] && PAPEIS_COMANDO[k].test(n)) { cmd[k] = r.id; break; }
+        for (const k of ['percentimetro', 'esquerda', 'direita', 'desligar'] as const) if (!cmd[k] && PAPEIS_COMANDO[k].test(n)) { cmd[k] = r.id; break; }
       } else if (r.tipo === 'status' && r.ton_id && r.bi) {
-        for (const k of ['erro', 'desligado', 'esquerda', 'direita'] as const) if (!st[k] && PAPEIS_STATUS[k].test(n)) { st[k] = { ton_id: r.ton_id, bi: r.bi, inv: !!r.inv }; break; }
+        for (const k of ['pressao', 'erro', 'desligado', 'esquerda', 'direita'] as const) if (!st[k] && PAPEIS_STATUS[k].test(n)) { st[k] = { ton_id: r.ton_id, bi: r.bi, inv: !!r.inv }; break; }
       }
     }
     return { cmd, st };
@@ -718,6 +813,10 @@ export class PivoSequenciaService implements OnModuleInit {
 }
 
 class FalhaBomba extends Error {}
+/** Partida interrompida antes de girar (sem pressão, percentímetro não aplicado). */
+class FalhaPartida extends Error {
+  constructor(msg: string, readonly liguei: boolean) { super(msg); }
+}
 class FalhaGiro extends Error {
   constructor(msg: string, readonly liguei: boolean) { super(msg); }
 }

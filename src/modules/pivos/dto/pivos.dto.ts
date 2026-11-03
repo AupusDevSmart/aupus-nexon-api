@@ -61,6 +61,10 @@ export class ParametrosPivoDto {
   @IsOptional() @ValidateIf((_, v) => v !== null) @IsNumber() @Min(6) @Max(72)
   tempo_volta_100?: number | null;
 
+  @ApiPropertyOptional({ description: 'Ciclo do percentímetro (s): a TON liga o motor de movimento % deste tempo e desliga o resto. Padrão 60.' })
+  @IsOptional() @ValidateIf((_, v) => v !== null) @IsInt() @Min(5) @Max(600)
+  percentimetro_ciclo_s?: number | null;
+
   @ApiPropertyOptional({ description: 'Correção do ângulo zero (°)' })
   @IsOptional() @ValidateIf((_, v) => v !== null) @IsNumber() @Min(-180) @Max(180)
   correcao_angulo_zero?: number | null;
