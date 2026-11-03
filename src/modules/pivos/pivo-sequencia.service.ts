@@ -445,7 +445,8 @@ export class PivoSequenciaService implements OnModuleInit {
    * Percentímetro na TON: um comando ("perc <bo> <permil> <ciclo_s> <mascara>" ou "perc off").
    * A máscara são as DINs de "Girando" (mesma TON, não invertidas): a TON só roda o ciclo com
    * o pivô ligado no painel. Ack tem que confirmar o valor — firmware antigo = erro (regravar).
-   * Sem ponto Percentímetro → false (nada a fazer).
+   * Sem ponto Percentímetro, ou ponto sem BO vinculada (o tipo Pivô traz o ponto marcado por
+   * padrão; pivô sem percentímetro na TON não pode deixar de partir) → false (ajuste no painel).
    */
   private async percentimetro(
     id: string,
@@ -459,7 +460,7 @@ export class PivoSequenciaService implements OnModuleInit {
       SELECT b.bo_numero AS bo, TRIM(b.ton_id) AS ton_id FROM ton_bo b
       WHERE b.equipamento_ponto_id = ${pid}::bpchar AND b.deleted_at IS NULL AND b.ativo LIMIT 1`;
     const m = rows[0];
-    if (!m) throw new FalhaPartida('Ponto "Percentímetro" sem BO vinculada na TON (Topologia → Configurar I/O).', false);
+    if (!m) return false;
     if (permil === 'off') {
       await this.cmd.comandoTon({ equipamentoId: id, tonId: m.ton_id, cmd: 'perc off', rotulo: 'Percentímetro desligado', ackOk: /^perc_off$/ }, user, cliente);
       return { bo: m.bo, cicloS: 0 };
@@ -541,7 +542,7 @@ export class PivoSequenciaService implements OnModuleInit {
         }
         if (pts.cmd.percentimetro) {
           await this.percentimetro(id, pts, 'off', user, cliente)
-            .then(() => passo('percentimetro', 'Percentímetro desligado na TON', true))
+            .then((ok) => (ok ? passo('percentimetro', 'Percentímetro desligado na TON', true) : undefined))
             .catch((x) => passo('percentimetro', `Percentímetro não desligou: ${msgErro(x)}`, false));
         }
         if (b) await this.desligarBomba(id, b, passo, user, cliente);
@@ -607,14 +608,17 @@ export class PivoSequenciaService implements OnModuleInit {
       // Percentímetro na TON ANTES de girar (a TON começa o ciclo quando o pivô ligar).
       // Sem água: 100 % (anda direto). Sem ponto Percentímetro: o ajuste fica no painel.
       const pctAlvo = irr?.config.semAgua ? 100 : irr?.config.percentual ?? 100;
+      let pc: { bo: number; cicloS: number } | false = false;
       if (pts.cmd.percentimetro) {
         try {
-          const pc = await this.percentimetro(id, pts, pctAlvo * 10, user, cliente);
-          percEnviado = true;
-          if (pc) await passo('percentimetro', `Percentímetro ${fmtPercentual(pctAlvo)}%${irr?.config.lamina && !irr.config.semAgua ? ` (lâmina ${irr.config.lamina.toFixed(2).replace('.', ',')} mm)` : ''} aplicado na TON · ciclo ${pc.cicloS}s${irr?.config.canhao ? ' · canhão final ligado' : ''}`, true);
+          pc = await this.percentimetro(id, pts, pctAlvo * 10, user, cliente);
+          percEnviado = !!pc;
         } catch (x) {
-          throw x instanceof FalhaPartida ? new FalhaPartida(x.message, liguei) : new FalhaPartida(`Percentímetro: ${msgErro(x)}`, liguei);
+          throw new FalhaPartida(`Percentímetro: ${msgErro(x)}`, liguei);
         }
+      }
+      if (pc) {
+        await passo('percentimetro', `Percentímetro ${fmtPercentual(pctAlvo)}%${irr?.config.lamina && !irr.config.semAgua ? ` (lâmina ${irr.config.lamina.toFixed(2).replace('.', ',')} mm)` : ''} aplicado na TON · ciclo ${pc.cicloS}s${irr?.config.canhao ? ' · canhão final ligado' : ''}`, true);
       } else if (irr && !irr.config.semAgua) {
         await passo('pivo', `Percentímetro ${fmtPercentual(pctAlvo)}%${irr.config.canhao ? ' · canhão final ligado' : ''} (ajuste do painel do pivô)`, null);
       }
