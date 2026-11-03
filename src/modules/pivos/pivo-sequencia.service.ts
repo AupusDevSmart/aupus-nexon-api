@@ -555,6 +555,18 @@ export class PivoSequenciaService implements OnModuleInit {
       await fim('concluida');
     } catch (e: any) {
       await passo('erro', msgErro(e), false).catch(() => undefined);
+      // Giro não confirmado: o comando pode ter ido (retorno atrasado/perdido) e o pivô
+      // estar girando sem a sequência saber — sem parada programada e, com a bomba
+      // desligada abaixo, a seco. Volta ao estado conhecido: manda Desligar ao pivô.
+      if (e instanceof FalhaGiro && acao !== 'desligar') {
+        const ptsF = await this.pontos(id).catch(() => null);
+        if (ptsF?.cmd.desligar) {
+          await this.cmd.acionarPonto(id, ptsF.cmd.desligar, user, false, undefined, cliente)
+            .then(() => passo('pivo', 'Giro não confirmado — comando Desligar enviado ao pivô (estado seguro)', true))
+            .catch((x) => passo('pivo', `Giro não confirmado e o Desligar falhou: ${msgErro(x)}`, false))
+            .catch(() => undefined);
+        }
+      }
       // falhou depois de ligar a bomba: não deixa bomba ligada à toa
       if ((e instanceof FalhaBomba || (e instanceof FalhaGiro && e.liguei)) && acao !== 'desligar') {
         const cfg = await this.lerConfig(id).catch(() => null);
