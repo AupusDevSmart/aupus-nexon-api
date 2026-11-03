@@ -267,6 +267,9 @@ export class PivoSequenciaService implements OnModuleInit {
     if (irrigacao) irrigacao.config.direcao = acao === 'girar_direita' ? 'Avanço' : 'Reverso';
 
     if (acao === 'desligar') {
+      // TRAVA: não desliga o que já está desligado.
+      const motivoNao = await this.travaDesligar(id, pts, cfg);
+      if (motivoNao) throw new ConflictException(motivoNao);
       // Desligar cancela também o que estava agendado.
       const n = await this.prisma.$executeRaw`
         UPDATE pivo_sequencias SET status = 'cancelada', finished_at = now(), erro = 'Cancelada pelo Desligar'
@@ -296,6 +299,12 @@ export class PivoSequenciaService implements OnModuleInit {
         return { sequencia_id: seqId, status: 'agendada', inicio_em: ini.toISOString() };
       }
       if (irrigacao) irrigacao = { ...irrigacao, inicio: null };
+      // TRAVA: só liga (ou inverte o sentido) com o pivô PARADO. Vale na hora de ligar —
+      // o agendamento acima é conferido de novo quando disparar.
+      if (!this.rodando.has(id)) {
+        const motivoNao = await this.travaLigar(id, pts);
+        if (motivoNao) throw new ConflictException(motivoNao);
+      }
     }
 
     const atual = this.rodando.get(id);
@@ -319,6 +328,50 @@ export class PivoSequenciaService implements OnModuleInit {
       if (this.rodando.get(id) === ctl) this.rodando.delete(id);
     });
     return { sequencia_id: seqId, status: 'executando' };
+  }
+
+  // ------------------------------------------------------------------ travas
+  /**
+   * Estado do pivô para as travas de comando, pelas entradas de status da TON:
+   * 'girando' (algum Girando = 1), 'parado' (Desligado = 1 ou todos os Girando = 0),
+   * 'desconhecido' (status cadastrado sem leitura) ou 'sem_status' (nada cadastrado).
+   * Girando e Desligado ao mesmo tempo conta como girando (o lado seguro das travas).
+   */
+  private async estadoTrava(pts: { st: Partial<Record<string, { ton_id: string; bi: number; inv: boolean }>> }) {
+    const giro = (['direita', 'esquerda'] as const).filter((k) => pts.st[k]);
+    if (!giro.length && !pts.st.desligado) return { estado: 'sem_status' as const, sentido: null, erro: null as 0 | 1 | null };
+    const st = await this.statusPivo(pts);
+    const sentido = st.direita === 1 ? 'direita' : st.esquerda === 1 ? 'esquerda' : null;
+    if (sentido) return { estado: 'girando' as const, sentido, erro: st.erro };
+    if (st.desligado === 1 || (giro.length > 0 && giro.every((k) => st[k] === 0))) return { estado: 'parado' as const, sentido: null, erro: st.erro };
+    return { estado: 'desconhecido' as const, sentido: null, erro: st.erro };
+  }
+
+  /** null = pode ligar; senão o motivo da recusa. */
+  private async travaLigar(id: string, pts: { st: Partial<Record<string, { ton_id: string; bi: number; inv: boolean }>> }): Promise<string | null> {
+    const t = await this.estadoTrava(pts);
+    if (t.erro === 1) return 'Pivô sinalizando ERRO — verifique no painel antes de ligar.';
+    if (t.estado === 'girando') return `O pivô já está girando para a ${t.sentido}. Desligue antes de ligar de novo ou inverter o sentido.`;
+    if (t.estado === 'desconhecido') return 'Sem leitura do status do pivô (entradas da TON): não dá para confirmar que está parado.';
+    // Sem entradas de status: vale o que o NexON comandou.
+    if (t.estado === 'sem_status' && (await this.irrigacaoAtiva(id))) return 'O pivô já está ligado. Desligue antes de ligar de novo ou inverter o sentido.';
+    return null;
+  }
+
+  /**
+   * null = pode desligar; senão o motivo. Parar com estado DESCONHECIDO (sem status ou
+   * sem leitura) é sempre permitido — bloquear impediria parar um pivô ligado no painel.
+   * Também pode quando há partida em curso, início agendado ou a bomba ligada.
+   */
+  private async travaDesligar(id: string, pts: { st: Partial<Record<string, { ton_id: string; bi: number; inv: boolean }>> }, cfg: { bombeamento: Bombeamento | null }): Promise<string | null> {
+    if (this.rodando.has(id)) return null;
+    const ag = await this.prisma.$queryRaw<Array<{ n: number }>>`
+      SELECT count(*)::int AS n FROM pivo_sequencias WHERE equipamento_id = ${id}::bpchar AND status = 'agendada'`;
+    if ((ag[0]?.n ?? 0) > 0) return null;
+    const b = cfg.bombeamento;
+    if (b?.bi_confirma && (await this.cmd.lerEntradaTon(b.ton_id, b.bi_confirma)).valor === 1) return null;
+    const t = await this.estadoTrava(pts);
+    return t.estado === 'parado' ? 'O pivô já está desligado.' : null;
   }
 
   // ------------------------------------------------------------- automação (apoio)
