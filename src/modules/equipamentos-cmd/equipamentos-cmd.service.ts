@@ -10,7 +10,7 @@ import {
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
-import { MqttService } from '../../shared/mqtt/mqtt.service';
+import { MqttService, type CmdAckResult } from '../../shared/mqtt/mqtt.service';
 import { VinculosMirrorService } from '../iot-vinculos/vinculos-mirror.service';
 import { SendCommandDto } from './dto/send-command.dto';
 import { CommandResultDto } from './dto/command-result.dto';
@@ -506,15 +506,17 @@ export class EquipamentosCmdService {
       throw new ServiceUnavailableException('Broker MQTT nao conectado no momento.');
     }
 
-    const cmdOn = `r${bo.bo_numero} on`;
-    const cmdOff = `r${bo.bo_numero} off`;
+    const cmdOn = `r${bo.bo_numero} pulse ${bo.pulso_ms}`;
     const comandoSemantico = `${equipamento.nome} · ${ponto.nome}`;
     const startedAt = Date.now();
 
-    // 5. Pulso ON com ack — garante que TON esta online e processou
+    // 5. Pulso com ack — na TON (rN pulse) ou, firmware antigo, on/off pelo backend
     let ack;
+    let tecnico = cmdOn;
     try {
-      ack = await this.mqtt.publishCommand(topico, cmdOn);
+      const pr = await this.pulsoRele(topico, bo.bo_numero, bo.pulso_ms);
+      ack = pr.ack;
+      tecnico = pr.tecnico;
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Erro desconhecido';
       this.logger.warn(
@@ -537,7 +539,7 @@ export class EquipamentosCmdService {
         `[acionar-ponto] TON ${ton.nome} recusou cmd=${cmdOn}: ${ack.msg} (latency=${latency_ms}ms)`,
       );
       await this.registrarComando(
-        { equipamentoId: eqId, mensagem: `${comandoSemantico}: TON recusou (${ack.msg})`, status: 'error', severidade: 'ERROR', cmdId: ack.cmd_id, latencyMs: latency_ms, tonId: ton.id, tonBoId: bo.id, comandoTecnico: cmdOn, comandoSemantico },
+        { equipamentoId: eqId, mensagem: `${comandoSemantico}: TON recusou (${ack.msg})`, status: 'error', severidade: 'ERROR', cmdId: ack.cmd_id, latencyMs: latency_ms, tonId: ton.id, tonBoId: bo.id, comandoTecnico: tecnico, comandoSemantico },
         user,
         cliente,
       );
@@ -548,29 +550,8 @@ export class EquipamentosCmdService {
       });
     }
 
-    // 6. Wait pulso_ms — backend mantem o estado fisico do pulso
-    await this.sleep(bo.pulso_ms);
-
-    // 7. Pulso OFF — envelope completo {cmd_id, cmd} com novo UUID, sem aguardar ack.
-    //    Firmware do TON exige cmd_id no envelope (so payload string puro tambem
-    //    funciona, mas envelope mantem o padrao). Pulso fica preciso porque nao
-    //    espera ack do OFF (mqtt QoS 1 garante delivery em condicoes normais).
-    try {
-      const offEnvelope = JSON.stringify({ cmd_id: randomUUID(), cmd: cmdOff });
-      await this.mqtt.publish(`${topico}/cmd`, offEnvelope, {
-        qos: 1,
-        retain: false,
-      });
-    } catch (err) {
-      // Se OFF falhar, log warning mas nao quebra. ON ja foi feito; um relay
-      // que ficar ligado eh problema operacional, mas a action funcionou.
-      this.logger.error(
-        `[acionar-ponto] CRITICO: falha ao publicar ${cmdOff} apos ON OK em TON ${ton.nome}: ${(err as Error).message}`,
-      );
-    }
-
     this.logger.log(
-      `[acionar-ponto] ${comandoSemantico} -> TON ${ton.nome} ${cmdOn} (${bo.pulso_ms}ms) ${cmdOff} status=${ack.status} latency_on=${latency_ms}ms`,
+      `[acionar-ponto] ${comandoSemantico} -> TON ${ton.nome} ${tecnico} status=${ack.status} latency=${latency_ms}ms`,
     );
 
     // Audit log polivalente em logs_mqtt (tipo='comando').
@@ -578,14 +559,14 @@ export class EquipamentosCmdService {
     await this.registrarComando(
       {
         equipamentoId: eqId,
-        mensagem: `${comandoSemantico} (${cmdOn} -> ${bo.pulso_ms}ms -> ${cmdOff})`,
+        mensagem: `${comandoSemantico} (${tecnico})`,
         severidade: ack.status === 'ok' ? 'INFO' : 'WARN',
         cmdId: ack.cmd_id,
         status: ack.status,
         latencyMs: latency_ms,
         tonId: ton.id,
         tonBoId: bo.id,
-        comandoTecnico: `${cmdOn} -> ${cmdOff}`,
+        comandoTecnico: tecnico,
         comandoSemantico,
       },
       user,
@@ -598,7 +579,7 @@ export class EquipamentosCmdService {
       msg: ack.msg,
       latency_ms,
       pulso_ms: bo.pulso_ms,
-      comando_tecnico: `${cmdOn} -> ${cmdOff}`,
+      comando_tecnico: tecnico,
       comando_semantico: comandoSemantico,
       bo_numero: bo.bo_numero,
     };
@@ -645,11 +626,19 @@ export class EquipamentosCmdService {
     if (!topico) throw new BadRequestException(`A TON "${ton.nome}" não tem Tópico Base.`);
     if (!this.mqtt.isConnected()) throw new ServiceUnavailableException('Broker MQTT nao conectado no momento.');
 
-    const cmd = p.modo === 'desliga' ? `r${bo} off` : `r${bo} on`;
+    const pulsoMs = Math.max(100, Math.min(10000, Number(p.pulsoMs) || 1000));
+    const cmd = p.modo === 'desliga' ? `r${bo} off` : p.modo === 'pulso' ? `r${bo} pulse ${pulsoMs}` : `r${bo} on`;
     const t0 = Date.now();
     let ack;
+    let tecnico = cmd;
     try {
-      ack = await this.mqtt.publishCommand(topico, cmd);
+      if (p.modo === 'pulso') {
+        const pr = await this.pulsoRele(topico, bo, pulsoMs);
+        ack = pr.ack;
+        tecnico = pr.tecnico;
+      } else {
+        ack = await this.mqtt.publishCommand(topico, cmd);
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Erro desconhecido';
       await this.registrarComando(
@@ -661,21 +650,10 @@ export class EquipamentosCmdService {
     const latency_ms = Date.now() - t0;
     if (ack.status === 'error') {
       await this.registrarComando(
-        { equipamentoId: eqId, mensagem: `${semantico}: TON recusou (${ack.msg})`, status: 'error', severidade: 'ERROR', cmdId: ack.cmd_id, latencyMs: latency_ms, tonId: ton.id, comandoTecnico: cmd, comandoSemantico: semantico },
+        { equipamentoId: eqId, mensagem: `${semantico}: TON recusou (${ack.msg})`, status: 'error', severidade: 'ERROR', cmdId: ack.cmd_id, latencyMs: latency_ms, tonId: ton.id, comandoTecnico: tecnico, comandoSemantico: semantico },
         user, cliente,
       );
       throw new BadGatewayException({ message: `TON recusou o comando: ${ack.msg}`, cmd_id: ack.cmd_id, latency_ms });
-    }
-    let tecnico = cmd;
-    if (p.modo === 'pulso') {
-      const ms = Math.max(100, Math.min(10000, Number(p.pulsoMs) || 1000));
-      await this.sleep(ms);
-      try {
-        await this.mqtt.publish(`${topico}/cmd`, JSON.stringify({ cmd_id: randomUUID(), cmd: `r${bo} off` }), { qos: 1, retain: false });
-      } catch (err) {
-        this.logger.error(`[bo-direto] CRITICO: falha ao publicar r${bo} off apos ON em TON ${ton.nome}: ${(err as Error).message}`);
-      }
-      tecnico = `r${bo} on -> ${ms}ms -> r${bo} off`;
     }
     await this.registrarComando(
       { equipamentoId: eqId, mensagem: `${semantico} (${tecnico} @ ${ton.nome})`, status: ack.status, severidade: ack.status === 'ok' ? 'INFO' : 'WARN', cmdId: ack.cmd_id, latencyMs: latency_ms, tonId: ton.id, comandoTecnico: tecnico, comandoSemantico: semantico },
@@ -793,6 +771,40 @@ export class EquipamentosCmdService {
   }
 
   /** Promisified sleep — usado pelo pulso. */
+  /** Tópicos de TON cujo firmware não conhece "rN pulse" (respondeu como "off"). Vale até o restart. */
+  private readonly semPulsoLocal = new Set<string>();
+
+  /**
+   * Pulso de relé. Preferência: UM comando "rN pulse <ms>" — a própria TON desliga o relé
+   * no tempo exato. O "on" + espera + "off" pelo backend mandava o "off" pelo rádio (LoRa):
+   * o relé ficava 3-7 s ligado e o "off" colidia com o retorno das entradas.
+   * Firmware antigo NÃO devolve erro: casa "on" por substring, entende "off" e responde
+   * "rele_N_off" — por isso só vale como pulso local o ack "rele_N_pulse_*" (ou "duplicate",
+   * reenvio do mesmo cmd_id). Senão marca a TON e faz o on/off antigo. Timeout propaga.
+   */
+  private async pulsoRele(topico: string, n: number, ms: number): Promise<{ ack: CmdAckResult; tecnico: string }> {
+    const dur = Math.max(50, Math.min(10000, Math.round(Number(ms) || 500)));
+    if (!this.semPulsoLocal.has(topico)) {
+      const cmd = `r${n} pulse ${dur}`;
+      const ack = await this.mqtt.publishCommand(topico, cmd);
+      if (ack.status === 'error' || ack.status === 'duplicate' || new RegExp(`^rele_${n}_pulse_`).test(String(ack.msg ?? ''))) {
+        return { ack, tecnico: cmd };
+      }
+      this.semPulsoLocal.add(topico);
+      this.logger.warn(`[pulso] ${topico}: firmware sem "rN pulse" (respondeu "${ack.msg}") — usando on/off pelo backend até regravar`);
+    }
+    const on = `r${n} on`, off = `r${n} off`;
+    const ack = await this.mqtt.publishCommand(topico, on);
+    if (ack.status === 'error') return { ack, tecnico: on };
+    await this.sleep(dur);
+    try {
+      await this.mqtt.publish(`${topico}/cmd`, JSON.stringify({ cmd_id: randomUUID(), cmd: off }), { qos: 1, retain: false });
+    } catch (err) {
+      this.logger.error(`[pulso] CRITICO: falha ao publicar ${off} apos ON em ${topico}: ${(err as Error).message}`);
+    }
+    return { ack, tecnico: `${on} -> ${dur}ms -> ${off}` };
+  }
+
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
