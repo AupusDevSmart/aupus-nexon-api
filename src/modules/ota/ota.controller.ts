@@ -20,6 +20,7 @@ import {
   TriggerOtaDto,
   CompilePublishOtaDto,
   OtaStatusResponseDto,
+  GravacaoUsbDto,
 } from './dto/trigger-ota.dto';
 import { JwtAuthGuard, Permissions } from '@/core';
 
@@ -53,6 +54,14 @@ export class OtaController {
     @Body() dto: TriggerOtaDto,
   ): Promise<OtaStatusResponseDto> {
     return this.otaService.triggerOta(id, dto);
+  }
+
+  @Post('gravacao-usb')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: 'Registra uma gravação local pela USB para confirmar quando a TON anunciar a versão gravada' })
+  @ApiParam({ name: 'id', description: 'ID do equipamento da TON (CUID)' })
+  async gravacaoUsb(@Param('id') id: string, @Body() dto: GravacaoUsbDto) {
+    return this.otaService.registrarGravacaoUsb(id, dto.versao_firmware);
   }
 
   @Get('ultima')

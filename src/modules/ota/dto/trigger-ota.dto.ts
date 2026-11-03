@@ -105,3 +105,12 @@ export class OtaStatusResponseDto {
   @ApiProperty({ example: 'a3b1c2...' }) md5!: string;
   @ApiProperty({ example: 189234 }) size!: number;
 }
+
+/** Gravação local pela USB: a tela informa a versão gravada para o NexON confirmar no anúncio da TON. */
+export class GravacaoUsbDto {
+  @ApiProperty({ description: 'FIRMWARE_VERSION do binário gravado (o que a TON anuncia)', example: '2.0.0-build202611031034' })
+  @IsString()
+  @Matches(/^[\w.\-]{3,64}$/, { message: 'versao_firmware inválida' })
+  versao_firmware!: string;
+}
+

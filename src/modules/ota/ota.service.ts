@@ -69,6 +69,7 @@ export class OtaService implements OnModuleInit {
   /** Registra o OTA disparado (estado 'publicado'). Falha aqui não impede o OTA. */
   private async registrarExecucao(eqId: string, topicoBase: string, dados: {
     versaoFirmware: string | null; versaoComando: string; url: string; md5?: string; tamanho?: number;
+    estado?: EstadoOta;
   }): Promise<string | null> {
     try {
       const id = this.novoId();
@@ -76,12 +77,12 @@ export class OtaService implements OnModuleInit {
         SELECT firmware_versao AS v FROM iot_dispositivos_online WHERE topico_mqtt = ${topicoBase} LIMIT 1`;
       // Um OTA por TON: o anterior que ainda estiver aberto é encerrado como substituído.
       await this.prisma.$executeRaw`
-        UPDATE ota_execucoes SET estado = 'falhou', detalhe = 'substituído por novo OTA', concluido_em = now(), atualizado_em = now()
+        UPDATE ota_execucoes SET estado = 'falhou', detalhe = 'substituído por nova gravação', concluido_em = now(), atualizado_em = now()
         WHERE equipamento_id = ${eqId}::bpchar AND estado IN ('publicado', 'baixando', 'reiniciando')`;
       await this.prisma.$executeRaw`
-        INSERT INTO ota_execucoes (id, equipamento_id, topico, versao_firmware, versao_comando, versao_anterior, url, md5, tamanho)
+        INSERT INTO ota_execucoes (id, equipamento_id, topico, versao_firmware, versao_comando, versao_anterior, url, md5, tamanho, estado)
         VALUES (${id}, ${eqId}::bpchar, ${topicoBase}, ${dados.versaoFirmware}, ${dados.versaoComando}, ${ant[0]?.v ?? null},
-                ${dados.url}, ${dados.md5 ?? null}, ${dados.tamanho ?? null})`;
+                ${dados.url}, ${dados.md5 ?? null}, ${dados.tamanho ?? null}, ${dados.estado ?? 'publicado'})`;
       return id;
     } catch (e) {
       this.logger.warn(`Não registrou acompanhamento do OTA: ${(e as Error).message}`);
@@ -144,6 +145,29 @@ export class OtaService implements OnModuleInit {
     }
   }
 
+  /**
+   * Gravação LOCAL pela USB (Web Serial): mesmo acompanhamento do OTA. A gravação já
+   * terminou e a placa reinicia → entra direto em 'reiniciando'; o anúncio da TON com a
+   * versão gravada confirma (aoAnuncioTon), outra versão = falhou, nada em 15 min =
+   * sem_resposta. Marcada com url 'usb' (canal na consulta). Satélite LoRa também
+   * confirma: o gateway repassa o status dele com a versão.
+   */
+  async registrarGravacaoUsb(equipamentoId: string, versaoFirmware: string) {
+    const eqId = equipamentoId.trim();
+    const eq = await this.prisma.equipamentos.findFirst({
+      where: { id: eqId, deleted_at: null },
+      select: { id: true, topico_mqtt: true },
+    });
+    if (!eq) throw new NotFoundException(`Equipamento ${eqId} não encontrado`);
+    const topico = eq.topico_mqtt?.trim().replace(/\/+$/, '');
+    if (!topico) throw new BadRequestException('A TON não tem Tópico Base: o NexON não tem como ouvir o anúncio dela.');
+    const id = await this.registrarExecucao(eqId, topico, {
+      versaoFirmware, versaoComando: 'usb', url: 'usb', estado: 'reiniciando',
+    });
+    if (!id) throw new InternalServerErrorException('Não foi possível registrar a gravação.');
+    return { execucao_id: id, versao_firmware: versaoFirmware };
+  }
+
   /** Último OTA da TON (para a tela acompanhar). Aberto há mais de 15 min → sem_resposta. */
   async ultimaExecucao(equipamentoId: string) {
     const eqId = equipamentoId.trim();
@@ -154,6 +178,7 @@ export class OtaService implements OnModuleInit {
         AND criado_em < now() - make_interval(secs => ${TIMEOUT_OTA_MS / 1000}::int)`;
     const rows = await this.prisma.$queryRaw<Array<Record<string, unknown>>>`
       SELECT id, estado, progresso, detalhe, versao_firmware, versao_anterior, md5, tamanho,
+             CASE WHEN url = 'usb' THEN 'usb' ELSE 'ota' END AS canal,
              criado_em, atualizado_em, concluido_em
       FROM ota_execucoes WHERE equipamento_id = ${eqId}::bpchar ORDER BY criado_em DESC LIMIT 1`;
     return { execucao: rows[0] ?? null, abertos: ESTADOS_ABERTOS };
