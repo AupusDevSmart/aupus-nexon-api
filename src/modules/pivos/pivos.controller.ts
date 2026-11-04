@@ -57,6 +57,19 @@ export class PivosController {
     return this.sequencia.comandarCanhao(id, body?.ligar === true, user, cliente);
   }
 
+  @Post(':id/percentimetro')
+  @HttpCode(HttpStatus.OK)
+  @Permissions('equipamentos.acionar_ponto')
+  @ApiOperation({ summary: 'Muda o percentímetro com o pivô irrigando, sem desligar (vale no próximo ciclo da TON). Body: { percentual } ou { lamina }' })
+  percentimetro(
+    @Param('id') id: string,
+    @Body() body: { percentual?: number; lamina?: number },
+    @CurrentUser() user?: any,
+    @Cliente() cliente?: ClienteInfo,
+  ) {
+    return this.sequencia.ajustarPercentimetro(id, body ?? {}, user, cliente);
+  }
+
   @Get(':id/bombeamento/opcoes')
   @ApiOperation({ summary: 'Pivôs da planta com a bomba ligada na Topologia (sistema conjugado)' })
   opcoesBombeamento(@Param('id') id: string, @CurrentUser() user?: any) {

@@ -4,7 +4,7 @@ import { novoId26 } from '../../core/common/cliente-info';
 import { capacidades, MSG_SOMENTE_LEITURA, papelCanonico } from '../../core/modules/auth/papeis';
 import { EquipamentosCmdService } from '../equipamentos-cmd/equipamentos-cmd.service';
 import { FUSO_OPERACAO, JanelaComAtivo, janelaValida, momentoEmSaoPaulo } from '../../shared/util/janela-horario';
-import { dentroDaPonta, duracaoParadaMs, fmtPercentual, Irrigacao, leituraMaisAntiga, mudancasConfig, normalizarIrrigacao, OrigemSequencia, percentualDaLamina, resumoIrrigacao } from './pivo-automacao.util';
+import { dentroDaPonta, duracaoParadaMs, fmtPercentual, Irrigacao, leituraMaisAntiga, mudancasConfig, normalizarIrrigacao, normalizarPercentual, OrigemSequencia, percentualDaLamina, resumoIrrigacao } from './pivo-automacao.util';
 
 /**
  * Sequência do pivô com bombeamento (docs/IOT-PIVO-BOMBEAMENTO.md).
@@ -347,7 +347,7 @@ export class PivoSequenciaService implements OnModuleInit {
     const ativa = await this.irrigacaoAtiva(id);
     return {
       pivo: {
-        comandos: { direita: !!pts.cmd.direita, esquerda: !!pts.cmd.esquerda, desligar: !!pts.cmd.desligar },
+        comandos: { direita: !!pts.cmd.direita, esquerda: !!pts.cmd.esquerda, desligar: !!pts.cmd.desligar, percentimetro: !!pts.cmd.percentimetro },
         // Canhão: comandável só com o ponto Canhao (BO) e o status Canhao_ligado (BI)
         canhao: { comando: !!pts.cmd.canhao, tem_status: !!pts.st.canhao, ligado: await this.lerStatus(pts.st.canhao) },
         permissivo: await this.lerStatus(pts.st.permissivo),
@@ -654,6 +654,54 @@ export class PivoSequenciaService implements OnModuleInit {
     await this.trilha(id, MSG_CANHAO[r](ligar, s), user?.id?.trim() || null, 'manual', r === 'ok' ? 'INFO' : 'WARN');
     if (r === 'nao_confirmou') throw new ConflictException(`Comando enviado, mas o canhão não confirmou ${ligar ? 'ligado' : 'desligado'} em ${s}s.`);
     return { ok: true, ligado: ligar ? 1 : 0 };
+  }
+
+  /**
+   * Muda o percentímetro com o pivô irrigando, sem desligar: um `perc` novo e a TON
+   * aplica no próximo ciclo. Atualiza a irrigação em curso e reescala a parada por
+   * voltas/ângulo (o que falta percorrer anda na velocidade nova); por tempo não muda.
+   */
+  async ajustarPercentimetro(pivoId: string, body: { percentual?: unknown; lamina?: unknown }, user?: Autor, cliente?: ClienteInfo) {
+    const id = await this.assertPivo(pivoId, user);
+    const eq = await this.prisma.equipamentos.findFirst({ where: { id }, select: { nome: true, automacao: true } });
+    if (!eq?.automacao) throw new BadRequestException(`"${eq?.nome?.trim()}" não tem automação habilitada.`);
+    if (this.rodando.has(id)) throw new ConflictException('Sequência do pivô em andamento — aguarde terminar.');
+    const pts = await this.pontos(id);
+    if (!pts.cmd.percentimetro) throw new BadRequestException('O pivô não tem o ponto Percentimetro ligado a uma BO (Topologia IoT → Configurar I/O): o ajuste fica no painel.');
+    const ativa = await this.irrigacaoAtiva(id);
+    const irr = ativa?.irrigacao;
+    if (!ativa || !irr) throw new ConflictException('O pivô não está irrigando. Ligue com o percentual desejado.');
+    if (irr.config.semAgua) throw new ConflictException('Girando sem água: o percentímetro fica em 100 %.');
+
+    const lamina = Number(body?.lamina) > 0 ? Math.round(Number(body.lamina) * 100) / 100 : null;
+    let pct: number;
+    if (lamina) {
+      const { lamina100 } = await this.parametrosPercentimetro(id);
+      if (!lamina100) throw new BadRequestException('Cadastre a "Lâmina a 100%" na Configuração do pivô para ajustar por lâmina (ou informe o percentual).');
+      const p = percentualDaLamina(lamina, lamina100);
+      if (p === null) throw new BadRequestException(`Lâmina mínima deste pivô: ${String(lamina100).replace('.', ',')} mm (100 %).`);
+      pct = p;
+    } else {
+      if (body?.percentual === undefined || body?.percentual === null || body?.percentual === '') throw new BadRequestException('Informe o percentual ou a lâmina.');
+      pct = normalizarPercentual(body.percentual);
+    }
+    const antes = irr.config.percentual;
+    if (pct === antes) throw new ConflictException(`O percentímetro já está em ${fmtPercentual(pct)}%.`);
+
+    await this.percentimetro(id, pts, pct * 10, user, cliente);
+
+    // Parada por voltas/ângulo: o que falta percorrer, na velocidade nova (0 % = não chega).
+    let pararEm = ativa.parar_em;
+    if (pararEm && irr.parada.tipo !== 'porTempo') {
+      const resta = new Date(pararEm).getTime() - Date.now();
+      pararEm = pct > 0 && antes > 0 && resta > 0 ? new Date(Date.now() + Math.round(resta * (antes / pct))) : pct > 0 ? pararEm : null;
+    }
+    irr.config.percentual = pct;
+    irr.config.lamina = lamina;
+    await this.prisma.$executeRaw`
+      UPDATE pivo_sequencias SET irrigacao = ${JSON.stringify(irr)}::jsonb, parar_em = ${pararEm} WHERE id = ${ativa.id}`;
+    await this.trilha(id, `Percentímetro ajustado com o pivô girando: ${fmtPercentual(antes)}% → ${fmtPercentual(pct)}%${lamina ? ` (lâmina ${lamina.toFixed(2).replace('.', ',')} mm)` : ''} · vale no próximo ciclo`, user?.id?.trim() || null, 'manual');
+    return { ok: true, percentual: pct, lamina, parar_em: pararEm };
   }
 
   /** Tempo de volta a 100% (h) da Configuração; padrão 21 h. */

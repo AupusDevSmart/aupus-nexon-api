@@ -114,3 +114,47 @@ describe('pivô: Ligar (bomba), canhão e permissivo como pontos', () => {
     });
   });
 });
+
+describe('percentímetro com o pivô girando', () => {
+  function girando(irr: any, pararEm: Date | null) {
+    const { svc } = montar(PONTOS, {}, {});
+    const sqls: unknown[][] = [];
+    svc.assertPivo = async (id: string) => id;
+    svc.prisma.equipamentos = { findFirst: async () => ({ nome: 'PIV', automacao: true }) };
+    svc.prisma.$executeRaw = jest.fn(async (_s: TemplateStringsArray, ...v: unknown[]) => { sqls.push(v); return 1; });
+    svc.irrigacaoAtiva = async () => (irr ? { id: 'SEQ', acao: 'girar_direita', irrigacao: irr, parar_em: pararEm, usuario_id: null, created_at: new Date() } : null);
+    svc.percentimetro = jest.fn(async () => ({ bo: 5, cicloS: 60 }));
+    svc.parametrosPercentimetro = async () => ({ lamina100: 3.58, cicloS: 60 });
+    svc.trilha = jest.fn(async () => undefined);
+    return { svc, sqls };
+  }
+  const irr = (pct: number, parada: any = { tipo: 'porVoltas', voltas: 1 }, semAgua = false) =>
+    ({ config: { direcao: 'Avanço', percentual: pct, semAgua, canhao: false }, parada });
+
+  it('manda o perc novo e reescala a parada por voltas (50 % → 100 % = metade do que falta)', async () => {
+    const em = new Date(Date.now() + 2 * 3600000);
+    const { svc, sqls } = girando(irr(50), em);
+    const r = await svc.ajustarPercentimetro('PIV', { percentual: 100 });
+    expect(svc.percentimetro).toHaveBeenCalledWith('PIV', expect.anything(), 1000, undefined, undefined);
+    expect(r.percentual).toBe(100);
+    const resta = (r.parar_em as Date).getTime() - Date.now();
+    expect(Math.abs(resta - 3600000)).toBeLessThan(5000);
+    expect(JSON.parse(String(sqls[0][0])).config.percentual).toBe(100);
+  });
+
+  it('por tempo a parada não muda; por lâmina calcula o %', async () => {
+    const em = new Date(Date.now() + 3600000);
+    const { svc } = girando(irr(80, { tipo: 'porTempo', minutos: 60 }), em);
+    const r = await svc.ajustarPercentimetro('PIV', { lamina: 7.16 });
+    expect(r.percentual).toBe(50);
+    expect(r.parar_em).toBe(em);
+  });
+
+  it('recusa: parado, sem água ou mesmo valor — sem comando', async () => {
+    for (const [i, msg] of [[null, /não está irrigando/], [irr(100, undefined, true), /sem água/], [irr(36), /já está em 36/]] as const) {
+      const { svc } = girando(i, null);
+      await expect(svc.ajustarPercentimetro('PIV', { percentual: 36 })).rejects.toThrow(msg);
+      expect(svc.percentimetro).not.toHaveBeenCalled();
+    }
+  });
+});
