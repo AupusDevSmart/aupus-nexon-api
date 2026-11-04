@@ -685,10 +685,20 @@ export class EquipamentosCmdService {
     if (!topico) throw new BadRequestException(`A TON "${ton.nome}" não tem Tópico Base.`);
     if (!this.mqtt.isConnected()) throw new ServiceUnavailableException('Broker MQTT nao conectado no momento.');
 
-    const t0 = Date.now();
+    let t0 = Date.now();
     let ack: CmdAckResult;
     try {
       ack = await this.mqtt.publishCommand(topico, p.cmd);
+      // Satélite LoRa: o ack não voltou (rádio ocupado com o relatório das entradas).
+      // Comandos de texto (perc) são idempotentes — repetir uma vez é seguro.
+      if (ack.status === 'error' && String(ack.msg ?? '') === 'lora_no_ack') {
+        await this.registrarComando(
+          { equipamentoId: eqId, mensagem: `${semantico}: sem ack pelo LoRa, repetindo`, status: 'error', severidade: 'WARN', cmdId: ack.cmd_id, latencyMs: Date.now() - t0, tonId: ton.id, comandoTecnico: p.cmd, comandoSemantico: semantico },
+          user, cliente,
+        );
+        t0 = Date.now();
+        ack = await this.mqtt.publishCommand(topico, p.cmd);
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Erro desconhecido';
       await this.registrarComando(
@@ -704,7 +714,11 @@ export class EquipamentosCmdService {
         { equipamentoId: eqId, mensagem: `${semantico}: TON não aplicou (${ack.msg || ack.status})`, status: 'error', severidade: 'ERROR', cmdId: ack.cmd_id, latencyMs: latency_ms, tonId: ton.id, comandoTecnico: p.cmd, comandoSemantico: semantico },
         user, cliente,
       );
-      throw new BadGatewayException({ message: `TON não aplicou "${p.cmd}": ${ack.msg || ack.status} (firmware sem suporte? regrave a TON)`, cmd_id: ack.cmd_id, latency_ms });
+      // lora_no_ack = rádio, não firmware: não manda regravar a TON à toa.
+      const motivo = String(ack.msg ?? '') === 'lora_no_ack'
+        ? 'lora_no_ack (a TON satélite não respondeu pelo rádio LoRa, nem na 2ª tentativa)'
+        : `${ack.msg || ack.status} (firmware sem suporte? regrave a TON)`;
+      throw new BadGatewayException({ message: `TON não aplicou "${p.cmd}": ${motivo}`, cmd_id: ack.cmd_id, latency_ms });
     }
     await this.registrarComando(
       { equipamentoId: eqId, mensagem: `${semantico} (${p.cmd} @ ${ton.nome})`, status: ack.status, severidade: 'INFO', cmdId: ack.cmd_id, latencyMs: latency_ms, tonId: ton.id, comandoTecnico: p.cmd, comandoSemantico: semantico },
