@@ -279,7 +279,7 @@ export class EquipamentosService {
    */
   async tiposUnifilar(): Promise<Array<{
     id: string; codigo: string; nome: string; sigla: string | null;
-    pontos_nativos: { comando: string[]; status: string[] };
+    pontos_nativos: { comando: string[]; status: string[]; opcionais: string[] };
     somente_visual: boolean;
   }>> {
     const rows = await this.prisma.$queryRaw<Array<{
@@ -289,13 +289,11 @@ export class EquipamentosService {
       FROM tipos_equipamentos
       WHERE disp_unifilar = true
       ORDER BY nome`;
-    const rotulos = (arr: any): string[] =>
-      (Array.isArray(arr) ? arr : []).map((p: any) => String(p?.label ?? p?.id ?? '').trim()).filter(Boolean);
     return rows.map((r) => {
       const n = (r.propriedades_schema as any)?.pontos_nativos ?? {};
       return {
         id: r.id, codigo: r.codigo, nome: r.nome, sigla: r.sigla,
-        pontos_nativos: { comando: rotulos(n.comando), status: rotulos(n.status) },
+        pontos_nativos: pontosNativos(n),
         // tipo só de desenho (ex.: Carga): sem SCS/medição/comando no cadastro
         somente_visual: (r.propriedades_schema as any)?.somente_visual === true,
       };
@@ -328,8 +326,6 @@ export class EquipamentosService {
     // Pontos nativos declarados no TIPO (ex.: Disjuntor → Abrir/Fechar; Aberto/
     // Fechado/Mola/Local/Remoto) — o cadastro escolhe QUAIS valem pra este ativo.
     const nativos = (r.propriedades_schema as any)?.pontos_nativos ?? {};
-    const rotulos = (arr: any): string[] =>
-      (Array.isArray(arr) ? arr : []).map((p: any) => String(p?.label ?? p?.id ?? '').trim()).filter(Boolean);
 
     const pontos = await this.prisma.equipamento_pontos.findMany({
       where: { equipamento_id: eid, deleted_at: null },
@@ -349,7 +345,7 @@ export class EquipamentosService {
       tipo_nome: r.tipo_nome ?? null,
       sigla: r.sigla ?? null,
       somente_visual: (r.propriedades_schema as any)?.somente_visual === true,
-      pontos_nativos: { comando: rotulos(nativos.comando), status: rotulos(nativos.status) },
+      pontos_nativos: pontosNativos(nativos),
       pontos_comando: pontos.filter((p) => p.tipo === 'comando').map((p) => p.nome.trim()),
       pontos_status: pontos.filter((p) => p.tipo === 'status').map((p) => p.nome.trim()),
     };
@@ -2179,4 +2175,16 @@ export class EquipamentosService {
 
     return { fotoUrl: null };
   }
+}
+
+/**
+ * Rótulos dos pontos nativos do tipo. `opcionais` = os marcados com "padrao": false
+ * (ex.: Pivô → Ligar_bomba, Canhao): aparecem no cadastro, mas vêm desmarcados.
+ */
+function pontosNativos(n: any): { comando: string[]; status: string[]; opcionais: string[] } {
+  const lista = (arr: any): any[] => (Array.isArray(arr) ? arr : []);
+  const rotulo = (p: any) => String(p?.label ?? p?.id ?? '').trim();
+  const rotulos = (arr: any): string[] => lista(arr).map(rotulo).filter(Boolean);
+  const opcionais = [...lista(n?.comando), ...lista(n?.status)].filter((p) => p?.padrao === false).map(rotulo).filter(Boolean);
+  return { comando: rotulos(n?.comando), status: rotulos(n?.status), opcionais };
 }

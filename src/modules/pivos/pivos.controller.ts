@@ -44,8 +44,21 @@ export class PivosController {
     return this.sequencia.acionar(id, body?.acao, user, cliente, { irrigacao: body?.irrigacao });
   }
 
+  @Post(':id/canhao')
+  @HttpCode(HttpStatus.OK)
+  @Permissions('equipamentos.acionar_ponto')
+  @ApiOperation({ summary: 'Ativa/desativa o canhão final (botão que alterna + status Canhao_ligado). Body: { ligar: boolean }' })
+  canhao(
+    @Param('id') id: string,
+    @Body() body: { ligar?: boolean },
+    @CurrentUser() user?: any,
+    @Cliente() cliente?: ClienteInfo,
+  ) {
+    return this.sequencia.comandarCanhao(id, body?.ligar === true, user, cliente);
+  }
+
   @Get(':id/bombeamento/opcoes')
-  @ApiOperation({ summary: 'TONs da planta e bombeamentos de outros pivôs (para configurar o bombeamento)' })
+  @ApiOperation({ summary: 'Pivôs da planta com a bomba ligada na Topologia (sistema conjugado)' })
   opcoesBombeamento(@Param('id') id: string, @CurrentUser() user?: any) {
     return this.sequencia.opcoes(id, user);
   }
@@ -54,7 +67,7 @@ export class PivosController {
   // equipamentos.comandar deixa entrar o analista de operação; o service exige
   // configuração técnica (proprietário/operador → 403 "Somente leitura").
   @Permissions('equipamentos.manage', 'equipamentos.comandar')
-  @ApiOperation({ summary: 'Grava o bombeamento do pivô (TON, modo, BOs, BI) e os tempos da sequência' })
+  @ApiOperation({ summary: 'Grava o sistema conjugado (bomba_de) e os tempos da sequência; a bomba são os pontos do pivô na Topologia' })
   salvarBombeamento(@Param('id') id: string, @Body() body: any, @CurrentUser() user?: any) {
     return this.sequencia.salvarConfig(id, body ?? {}, user);
   }
