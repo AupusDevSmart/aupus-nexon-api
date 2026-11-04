@@ -17,10 +17,11 @@ import { dentroDaPonta, duracaoParadaMs, fmtPercentual, Irrigacao, leituraMaisAn
  *   Desligar: pulso Desligar no pivô → confirma parado → desliga a bomba SÓ se nenhum
  *             outro pivô da mesma bomba (mesma TON + BO de ligar) estiver girando
  *
- * Bombeamento = pontos do pivô (Ligar_bomba, Desligar_bomba, Bomba_ligada) ligados a
- * BO/BI de qualquer TON na Topologia IoT → Configurar I/O. Sistema conjugado = usar a
- * bomba (os pontos) de outro pivô (pivo_config.bombeamento.bomba_de). Sem pontos, vale
- * a configuração antiga (pivo_config.bombeamento com ton_id/BOs).
+ * Bombeamento = ponto Ligar do pivô (o painel liga a bomba e fecha a solenoide) + status
+ * Ligado, em BO/BI de qualquer TON (Topologia IoT → Configurar I/O). O Desligar do pivô
+ * para tudo, bomba junto. Sistema conjugado = usar o Ligar de outro pivô
+ * (pivo_config.bombeamento.bomba_de). Sem pontos, vale a configuração antiga
+ * (pivo_config.bombeamento com ton_id/BOs).
  * Comandos do pivô vão pelo acionarPonto (permissão, janela, ponta, trilha); os da bomba
  * pelo acionarBoDireto (mesmas restrições, trilha no pivô). Estado persistido em
  * pivo_sequencias; a ficha acompanha por GET /pivos/:id/estado.
@@ -37,9 +38,7 @@ export interface Bombeamento {
   bi_confirma?: number | null;
   confirma_s?: number;
   pulso_ms?: number;
-  /** pontos: TON de cada saída/entrada (podem ser TONs diferentes); legado: tudo em ton_id */
-  ton_desliga_id?: string | null;
-  pulso_desliga_ms?: number;
+  /** pontos: TON do retorno Ligado (pode ser outra TON); legado: tudo em ton_id */
   bi_ton_id?: string | null;
   bi_inv?: boolean;
   origem?: 'pontos' | 'legado';
@@ -64,21 +63,19 @@ type Autor = ScopedUser & { nome?: string };
 const SEQ_PADRAO: SequenciaCfg = { pressurizacao_s: 120, confirma_giro_s: 30, confirma_bomba_s: 30 };
 const norm = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 
-type PapelComando = 'bomba_desliga' | 'bomba_liga' | 'valvula' | 'canhao' | 'percentimetro' | 'direita' | 'esquerda' | 'desligar';
-type PapelStatus = 'bomba' | 'canhao' | 'permissivo' | 'pressao' | 'direita' | 'esquerda' | 'desligado' | 'erro';
+type PapelComando = 'ligar' | 'canhao' | 'percentimetro' | 'direita' | 'esquerda' | 'desligar';
+type PapelStatus = 'ligado' | 'canhao' | 'permissivo' | 'pressao' | 'direita' | 'esquerda' | 'desligado' | 'erro';
 type MapaBi = { ton_id: string; bi: number; inv: boolean };
 /** Resultado de comandar o canhão (aplicarCanhao). */
 type ResCanhao = 'ok' | 'ja' | 'sem_ponto' | 'sem_status' | 'sem_leitura' | 'nao_confirmou';
 
 /**
  * Pontos do pivô por papel, achados pelo nome (Girar_direita, Girando_esquerda, Desligado, Erro…).
- * A ordem dos testes está em pontos(): os da bomba antes ("Desligar_bomba" não é o Desligar do pivô).
+ * A ordem dos testes está em pontos(); "Desligar"/"Desligado" nunca casam com Ligar/Ligado.
  */
 const PAPEIS_COMANDO: Record<PapelComando, RegExp> = {
-  bomba_desliga: /(deslig|parar).*bomba|bomba.*(deslig|parar)/,
-  bomba_liga: /bomba/,
-  // Solenoide da adutora (só sistema conjugado com "Válvula pelo NexON"): ON = fecha
-  valvula: /valvul/,
+  // Ligar: o painel liga a bomba e fecha a solenoide (só na partida com água)
+  ligar: /^(?!.*deslig).*(ligar|bomba)/,
   // Canhão final: botão do painel que ALTERNA (pulso); o estado vem do Canhao_ligado
   canhao: /canha/,
   // Percentímetro = BO do motor de movimento (ciclo local na TON — docs/IOT-PIVO-PERCENTIMETRO-LAMINA.md)
@@ -88,8 +85,8 @@ const PAPEIS_COMANDO: Record<PapelComando, RegExp> = {
   desligar: /deslig|parar|stop/,
 };
 const PAPEIS_STATUS: Record<PapelStatus, RegExp> = {
-  // Bomba ligada: confirmação da bomba (contator)
-  bomba: /bomba/,
+  // Ligado: retorno do Ligar (bomba ligada)
+  ligado: /^(?!.*(deslig|canha)).*(ligad|bomba)/,
   // Canhao_ligado: estado do canhão final
   canhao: /canha/,
   // Permissivo para ligar: o painel junta as condições (bomba, tensão, pressão) numa BI
@@ -157,19 +154,18 @@ export class PivoSequenciaService implements OnModuleInit {
     };
   }
 
-  /** Bomba montada pelos pontos do pivô (Ligar_bomba obrigatório), ou null. */
+  /**
+   * Bomba pelos pontos do pivô: Ligar (pulso no botão do painel) + Ligado (retorno).
+   * Desligar = o Desligar do pivô dono (desligarBomba). null sem Ligar ligado a uma BO.
+   */
   private async bombaDosPontos(pivoId: string): Promise<Bombeamento | null> {
     const pts = await this.pontos(pivoId);
-    const liga = await this.boDoPonto(pts.cmd.bomba_liga);
+    const liga = await this.boDoPonto(pts.cmd.ligar);
     if (!liga) return null;
-    const desl = await this.boDoPonto(pts.cmd.bomba_desliga);
-    const bi = pts.st.bomba;
+    const bi = pts.st.ligado;
     return {
-      ativo: true, origem: 'pontos', dono_id: pivoId,
-      ton_id: liga.ton_id, bo_liga: liga.bo, pulso_ms: liga.pulso_ms,
-      // Com Desligar_bomba: botoeira (pulso em cada uma). Sem: a BO de ligar fica mantida.
-      modo: desl ? 'pulso' : 'mantido',
-      bo_desliga: desl?.bo ?? null, ton_desliga_id: desl?.ton_id ?? null, pulso_desliga_ms: desl?.pulso_ms,
+      ativo: true, origem: 'pontos', dono_id: pivoId, modo: 'pulso',
+      ton_id: liga.ton_id, bo_liga: liga.bo, pulso_ms: liga.pulso_ms, bo_desliga: null,
       bi_confirma: bi?.bi ?? null, bi_ton_id: bi?.ton_id ?? null, bi_inv: !!bi?.inv,
     };
   }
@@ -211,7 +207,7 @@ export class PivoSequenciaService implements OnModuleInit {
           SELECT (SELECT u.planta_id FROM equipamentos e JOIN unidades u ON u.id = e.unidade_id WHERE e.id = ${id}::bpchar)
                = (SELECT u.planta_id FROM equipamentos e JOIN unidades u ON u.id = e.unidade_id WHERE e.id = ${de}::bpchar) AS ok`;
         if (!mesmaPlanta[0]?.ok) throw new BadRequestException('Sistema conjugado: o outro pivô tem de ser da mesma planta.');
-        if (!(await this.bombaDosPontos(de))) throw new BadRequestException('O pivô escolhido não tem a bomba (Ligar_bomba) ligada a uma BO na Topologia IoT.');
+        if (!(await this.bombaDosPontos(de))) throw new BadRequestException('O pivô escolhido não tem o Ligar ligado a uma BO na Topologia IoT.');
         bomb = { bomba_de: de };
       }
     } else if (nb && nb.ativo !== false) {
@@ -325,7 +321,8 @@ export class PivoSequenciaService implements OnModuleInit {
         // Onde está cada sinal (TON · fim do MAC · saída), para a Configuração mostrar
         saidas: {
           ligar: { ton: tonLiga, saida: `BO${b.bo_liga}` },
-          desligar: b.modo === 'pulso' && b.bo_desliga ? { ton: await this.rotuloTon(b.ton_desliga_id ?? b.ton_id), saida: `BO${b.bo_desliga}` } : null,
+          // pontos: desliga pelo Desligar do pivô (null); legado: BO de desligar própria
+          desligar: b.modo === 'pulso' && b.bo_desliga ? { ton: tonLiga, saida: `BO${b.bo_desliga}` } : null,
           confirma: b.bi_confirma ? { ton: await this.rotuloTon(b.bi_ton_id ?? b.ton_id), saida: `BI${b.bi_confirma}` } : null,
         },
       };
@@ -333,8 +330,6 @@ export class PivoSequenciaService implements OnModuleInit {
     const bombaDeNome = cfg.bomba_de
       ? (await this.prisma.equipamentos.findFirst({ where: { id: cfg.bomba_de }, select: { nome: true } }))?.nome?.trim() ?? null
       : null;
-    const conjugado = !!cfg.bomba_de || !!bomba?.compartilhada_com.length;
-    const valvula = await this.saidaValvula(id, pts, conjugado);
     const seq = await this.prisma.$queryRaw<any[]>`
       SELECT TRIM(id) AS id, acao, status, passos, erro, created_at, finished_at, origem, irrigacao, parar_em
       FROM pivo_sequencias WHERE equipamento_id = ${id}::bpchar AND status NOT IN ('agendada', 'cancelada')
@@ -361,7 +356,6 @@ export class PivoSequenciaService implements OnModuleInit {
       },
       bombeamento: bomba,
       bomba_de: cfg.bomba_de ? { id: cfg.bomba_de, nome: bombaDeNome } : null,
-      valvula: valvula ? { ton: await this.rotuloTon(valvula.ton_id), saida: `BO${valvula.bo}`, origem: valvula.origem } : null,
       sequencia_cfg: cfg.sequencia,
       sequencia: seq[0] ?? null,
       irrigacao: {
@@ -705,6 +699,7 @@ export class PivoSequenciaService implements OnModuleInit {
     };
     const msgErro = (e: any) => e?.response?.message || e?.message || String(e);
     let percEnviado = false;   // percentímetro já configurado na TON nesta partida
+    let desligarEnviado = false;   // Desligar do pivô já mandado (a bomba de pontos para junto)
 
     try {
       const cfg = await this.lerConfig(id);
@@ -733,8 +728,7 @@ export class PivoSequenciaService implements OnModuleInit {
             .catch((x) => { this.logger.warn(`[pivo-seq] ${id} canhão: ${msgErro(x)}`); return 'nao_confirmou' as const; });
           await passo('canhao', MSG_CANHAO[r](false, cfg.sequencia.confirma_giro_s), r === 'ok' || r === 'ja');
         }
-        if (b) await this.desligarBomba(id, b, passo, user, cliente);
-        await this.valvula(id, false, passo, user, cliente);
+        if (b) await this.desligarBomba(id, b, passo, user, cliente, !!pts.cmd.desligar);
         await fim('concluida');
         return;
       }
@@ -745,18 +739,14 @@ export class PivoSequenciaService implements OnModuleInit {
       if (st0.erro === 1) throw new Error('Pivô sinalizando ERRO — verifique no painel antes de partir.');
 
       let liguei = false;
-      if (irr?.config.semAgua) {
-        await passo('bomba', 'Girar sem água: a bomba não liga', true);
-      } else {
-        await this.valvula(id, true, passo, user, cliente);
-      }
+      if (irr?.config.semAgua) await passo('bomba', 'Girar sem água: a bomba não liga', true);
       if (b && !irr?.config.semAgua) {
         const ligada = await this.bombaLigada(b);
         if (ligada === 1) {
           await passo('bomba', 'Bomba já ligada (sistema compartilhado) — sem esperar pressurização', true);
         } else {
           await this.cmd.acionarBoDireto(
-            { equipamentoId: id, tonId: b.ton_id, bo: b.bo_liga, modo: b.modo === 'mantido' ? 'liga' : 'pulso', pulsoMs: b.pulso_ms, rotulo: 'Ligar bomba' },
+            { equipamentoId: id, tonId: b.ton_id, bo: b.bo_liga, modo: b.modo === 'mantido' ? 'liga' : 'pulso', pulsoMs: b.pulso_ms, rotulo: b.origem === 'pontos' ? 'Ligar (bomba)' : 'Ligar bomba' },
             user, cliente,
           );
           liguei = true;
@@ -863,7 +853,7 @@ export class PivoSequenciaService implements OnModuleInit {
         const ptsF = await this.pontos(id).catch(() => null);
         if (ptsF?.cmd.desligar) {
           await this.cmd.acionarPonto(id, ptsF.cmd.desligar, user, false, undefined, cliente)
-            .then(() => passo('pivo', 'Giro não confirmado — comando Desligar enviado ao pivô (estado seguro)', true))
+            .then(() => { desligarEnviado = true; return passo('pivo', 'Giro não confirmado — comando Desligar enviado ao pivô (estado seguro)', true); })
             .catch((x) => passo('pivo', `Giro não confirmado e o Desligar falhou: ${msgErro(x)}`, false))
             .catch(() => undefined);
         }
@@ -876,9 +866,8 @@ export class PivoSequenciaService implements OnModuleInit {
       // falhou depois de ligar a bomba: não deixa bomba ligada à toa
       if ((e instanceof FalhaBomba || ((e instanceof FalhaGiro || e instanceof FalhaPartida) && e.liguei)) && acao !== 'desligar') {
         const cfg = await this.lerConfig(id).catch(() => null);
-        if (cfg?.bombeamento) await this.desligarBomba(id, cfg.bombeamento, passo, user, cliente).catch(() => undefined);
+        if (cfg?.bombeamento) await this.desligarBomba(id, cfg.bombeamento, passo, user, cliente, desligarEnviado).catch(() => undefined);
       }
-      if (acao !== 'desligar' && !irr?.config.semAgua) await this.valvula(id, false, passo, user, cliente).catch(() => undefined);
       await fim('falhou', msgErro(e)).catch(() => undefined);
       this.logger.warn(`[pivo-seq] ${id} ${acao} falhou: ${msgErro(e)}`);
     }
@@ -889,11 +878,15 @@ export class PivoSequenciaService implements OnModuleInit {
     await fim('interrompida');
   }
 
-  /** Desliga a bomba se nenhum outro pivô da mesma bomba estiver girando. */
+  /**
+   * Desliga a bomba se nenhum outro pivô da mesma bomba estiver girando.
+   * Pontos: o Desligar do painel para o pivô e a bomba — se o deste pivô já foi
+   * (`desligarEnviado`), só confirma; no conjugado, manda o Desligar do pivô dono.
+   */
   private async desligarBomba(
     id: string, b: Bombeamento,
     passo: (e: string, m: string, ok: boolean | null) => Promise<void>,
-    user?: Autor, cliente?: ClienteInfo,
+    user?: Autor, cliente?: ClienteInfo, desligarEnviado = false,
   ) {
     const comp = await this.companheiros(id, b);
     const girando: string[] = [];
@@ -905,10 +898,27 @@ export class PivoSequenciaService implements OnModuleInit {
       await passo('bomba', `Bomba mantida ligada: ${girando.join(', ')} ainda usando`, true);
       return;
     }
+    if (b.origem === 'pontos') {
+      const dono = b.dono_id ?? id;
+      if (!(desligarEnviado && dono === id)) {
+        const pd = (await this.pontos(dono)).cmd.desligar;
+        if (!pd) {
+          await passo('bomba', 'Sem o ponto Desligar ligado a uma BO — a bomba não foi desligada', false);
+          return;
+        }
+        await this.cmd.acionarPonto(dono, pd, user, false, undefined, cliente);
+        await passo('bomba', dono === id ? 'Comando Desligar enviado (desliga a bomba)' : 'Comando Desligar enviado ao pivô dono da bomba', true);
+      }
+      if (b.bi_confirma) {
+        const ok = await this.esperar(async () => (await this.bombaLigada(b)) === 0, b.confirma_s ?? 30, { cancelar: false });
+        await passo('bomba', ok ? 'Bomba desligada (Ligado = 0)' : `Bomba não confirmou desligada em ${b.confirma_s ?? 30}s`, !!ok);
+      }
+      return;
+    }
     await this.cmd.acionarBoDireto(
       b.modo === 'mantido'
         ? { equipamentoId: id, tonId: b.ton_id, bo: b.bo_liga, modo: 'desliga', rotulo: 'Desligar bomba' }
-        : { equipamentoId: id, tonId: b.ton_desliga_id ?? b.ton_id, bo: b.bo_desliga!, modo: 'pulso', pulsoMs: b.pulso_desliga_ms ?? b.pulso_ms, rotulo: 'Desligar bomba' },
+        : { equipamentoId: id, tonId: b.ton_id, bo: b.bo_desliga!, modo: 'pulso', pulsoMs: b.pulso_ms, rotulo: 'Desligar bomba' },
       user, cliente,
     );
     await passo('bomba', 'Comando Desligar bomba enviado', true);
@@ -916,44 +926,6 @@ export class PivoSequenciaService implements OnModuleInit {
       const ok = await this.esperar(async () => (await this.bombaLigada(b)) === 0, b.confirma_s ?? 30, { cancelar: false });
       await passo('bomba', ok ? 'Bomba desligada (confirmado pela BI)' : `Bomba não confirmou desligada em ${b.confirma_s ?? 30}s`, !!ok);
     }
-  }
-
-  /**
-   * Sistema conjugado com "Válvula pelo NexON": a solenoide FECHA (BO ON) ao ligar com
-   * água e volta (BO OFF) ao desligar ou numa falha. Pivô fora de conjugado,
-   * intertravamento físico ou sem saída → nada a fazer. (`abrir` = ligar com água → ON.)
-   */
-  private async valvula(
-    id: string, abrir: boolean,
-    passo: (e: string, m: string, ok: boolean | null) => Promise<void>,
-    user?: Autor, cliente?: ClienteInfo,
-  ) {
-    const cfg = await this.lerConfig(id);
-    const conjugado = !!cfg.bomba_de || (!!cfg.bombeamento && (await this.companheiros(id, cfg.bombeamento)).length > 0);
-    const v = await this.saidaValvula(id, undefined, conjugado);
-    if (!v) return;
-    await this.cmd.acionarBoDireto(
-      { equipamentoId: id, tonId: v.ton_id, bo: v.bo, modo: abrir ? 'liga' : 'desliga', rotulo: abrir ? 'Abrir válvula' : 'Fechar válvula' },
-      user, cliente,
-    );
-    await passo('valvula', `${abrir ? 'Solenoide fechada' : 'Solenoide liberada'} (BO${v.bo} ${abrir ? 'ON' : 'OFF'})`, true);
-  }
-
-  /**
-   * Saída da solenoide: ponto "Valvula" do pivô ligado a uma BO na Topologia IoT; sem ele,
-   * a TON + BO antigas da Configuração (parametros.valvula_*). null fora do sistema
-   * conjugado ou com intertravamento físico.
-   */
-  private async saidaValvula(id: string, pts: { cmd: Partial<Record<PapelComando, string>> } | undefined, conjugado: boolean): Promise<{ ton_id: string; bo: number; origem: 'pontos' | 'legado' } | null> {
-    if (!conjugado) return null;
-    const rows = await this.prisma.$queryRaw<Array<{ parametros: any }>>`
-      SELECT parametros FROM pivo_config WHERE equipamento_id = ${id}::bpchar LIMIT 1`.catch(() => []);
-    const p = rows[0]?.parametros;
-    if (p?.direcionamento === 'fisico') return null;
-    const m = await this.boDoPonto((pts ?? (await this.pontos(id))).cmd.valvula);
-    if (m) return { ton_id: m.ton_id, bo: m.bo, origem: 'pontos' };
-    if (p?.valvula_ton_id && Number(p.valvula_bo) >= 1) return { ton_id: String(p.valvula_ton_id).trim(), bo: Number(p.valvula_bo), origem: 'legado' };
-    return null;
   }
 
   // ------------------------------------------------------------------ apoio
@@ -980,9 +952,9 @@ export class PivoSequenciaService implements OnModuleInit {
       const n = norm(r.nome);
       if (r.tipo === 'comando') {
         // ordem importa: "anti-horário" antes de "horário"
-        for (const k of ['bomba_desliga', 'bomba_liga', 'valvula', 'canhao', 'percentimetro', 'esquerda', 'direita', 'desligar'] as const) if (PAPEIS_COMANDO[k].test(n)) { if (!cmd[k]) cmd[k] = r.id; break; }
+        for (const k of ['canhao', 'ligar', 'percentimetro', 'esquerda', 'direita', 'desligar'] as const) if (PAPEIS_COMANDO[k].test(n)) { if (!cmd[k]) cmd[k] = r.id; break; }
       } else if (r.tipo === 'status' && r.ton_id && r.bi) {
-        for (const k of ['bomba', 'canhao', 'permissivo', 'pressao', 'erro', 'desligado', 'esquerda', 'direita'] as const) if (PAPEIS_STATUS[k].test(n)) { if (!st[k]) st[k] = { ton_id: r.ton_id, bi: r.bi, inv: !!r.inv }; break; }
+        for (const k of ['canhao', 'ligado', 'permissivo', 'pressao', 'erro', 'desligado', 'esquerda', 'direita'] as const) if (PAPEIS_STATUS[k].test(n)) { if (!st[k]) st[k] = { ton_id: r.ton_id, bi: r.bi, inv: !!r.inv }; break; }
       }
     }
     return { cmd, st };

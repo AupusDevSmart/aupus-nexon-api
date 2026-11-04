@@ -1,8 +1,8 @@
 import { PivoSequenciaService } from './pivo-sequencia.service';
 
 /**
- * Bomba, solenoide e canhão como pontos do pivô (docs/IOT-PIVO-LIGAR-BOMBA-CANHAO.md):
- * papéis pelo nome, bomba montada pelas BO/BI da Topologia e o canhão que alterna.
+ * Ligar (bomba), canhão e permissivo como pontos do pivô (docs/IOT-PIVO-LIGAR-BOMBA-CANHAO.md):
+ * papéis pelo nome, bomba pelo Ligar/Ligado da Topologia e o canhão que alterna.
  */
 type Ponto = { id: string; tipo: 'comando' | 'status'; nome: string; ton_id?: string; bi?: number; inv?: boolean };
 
@@ -36,57 +36,50 @@ function montar(pontos: Ponto[], bos: Record<string, { ton_id: string; bo: numbe
 
 const PONTOS: Ponto[] = [
   { id: 'p-desl', tipo: 'comando', nome: 'Desligar' },
-  { id: 'p-desl-bomba', tipo: 'comando', nome: 'Desligar_bomba' },
-  { id: 'p-liga-bomba', tipo: 'comando', nome: 'Ligar_bomba' },
-  { id: 'p-valv', tipo: 'comando', nome: 'Valvula' },
+  { id: 'p-ligar', tipo: 'comando', nome: 'Ligar' },
   { id: 'p-canhao', tipo: 'comando', nome: 'Canhao' },
+  { id: 'p-perc', tipo: 'comando', nome: 'Percentimetro' },
   { id: 'p-dir', tipo: 'comando', nome: 'Girar_direita' },
-  { id: 's-bomba', tipo: 'status', nome: 'Bomba_ligada', ton_id: 'TON-A', bi: 4, inv: true },
+  { id: 's-ligado', tipo: 'status', nome: 'Ligado', ton_id: 'TON-A', bi: 1, inv: true },
   { id: 's-canhao', tipo: 'status', nome: 'Canhao_ligado', ton_id: 'TON-B', bi: 5 },
   { id: 's-desligado', tipo: 'status', nome: 'Desligado', ton_id: 'TON-B', bi: 3 },
   { id: 's-perm', tipo: 'status', nome: 'Permissivo', ton_id: 'TON-B', bi: 4 },
 ];
 
-describe('pivô: pontos de bomba, solenoide e canhão', () => {
-  it('acha o papel pelo nome — Desligar_bomba não vira o Desligar do pivô', async () => {
+describe('pivô: Ligar (bomba), canhão e permissivo como pontos', () => {
+  it('acha o papel pelo nome — Desligar/Desligado e Canhao_ligado não viram Ligar/Ligado', async () => {
     const { svc } = montar(PONTOS, {}, {});
     const pts = await svc.pontos('PIV');
-    expect(pts.cmd).toEqual({
-      desligar: 'p-desl', bomba_desliga: 'p-desl-bomba', bomba_liga: 'p-liga-bomba',
-      valvula: 'p-valv', canhao: 'p-canhao', direita: 'p-dir',
-    });
-    expect(pts.st.bomba).toEqual({ ton_id: 'TON-A', bi: 4, inv: true });
+    expect(pts.cmd).toEqual({ desligar: 'p-desl', ligar: 'p-ligar', canhao: 'p-canhao', percentimetro: 'p-perc', direita: 'p-dir' });
+    expect(pts.st.ligado).toEqual({ ton_id: 'TON-A', bi: 1, inv: true });
     expect(pts.st.canhao).toEqual({ ton_id: 'TON-B', bi: 5, inv: false });
     expect(pts.st.desligado).toEqual({ ton_id: 'TON-B', bi: 3, inv: false });
     expect(pts.st.permissivo).toEqual({ ton_id: 'TON-B', bi: 4, inv: false });
   });
 
-  it('bomba dos pontos: cada sinal na sua TON; com Desligar_bomba é botoeira (pulso)', async () => {
-    const { svc } = montar(PONTOS, {
-      'p-liga-bomba': { ton_id: 'TON-A', bo: 5, pulso_ms: 800 },
-      'p-desl-bomba': { ton_id: 'TON-C', bo: 6, pulso_ms: 600 },
-    }, {});
-    const b = await svc.bombaDosPontos('PIV');
-    expect(b).toMatchObject({
-      origem: 'pontos', dono_id: 'PIV', modo: 'pulso',
-      ton_id: 'TON-A', bo_liga: 5, pulso_ms: 800,
-      ton_desliga_id: 'TON-C', bo_desliga: 6, pulso_desliga_ms: 600,
-      bi_ton_id: 'TON-A', bi_confirma: 4, bi_inv: true,
-    });
+  it('nomes antigos ainda valem: Ligar_bomba = Ligar, Bomba_ligada = Ligado', async () => {
+    const { svc } = montar([
+      { id: 'a', tipo: 'comando', nome: 'Ligar_bomba' },
+      { id: 'b', tipo: 'status', nome: 'Bomba_ligada', ton_id: 'T', bi: 1 },
+    ], {}, {});
+    const pts = await svc.pontos('PIV');
+    expect(pts.cmd.ligar).toBe('a');
+    expect(pts.st.ligado).toEqual({ ton_id: 'T', bi: 1, inv: false });
   });
 
-  it('sem Desligar_bomba a BO de ligar fica mantida; sem Ligar_bomba ligado a BO não há bomba', async () => {
-    const semDesl = PONTOS.filter((p) => p.id !== 'p-desl-bomba');
-    const { svc } = montar(semDesl, { 'p-liga-bomba': { ton_id: 'TON-A', bo: 5, pulso_ms: 500 } }, {});
-    expect((await svc.bombaDosPontos('PIV')).modo).toBe('mantido');
+  it('bomba dos pontos: Ligar = pulso; desliga pelo Desligar do pivô (sem BO própria)', async () => {
+    const { svc } = montar(PONTOS, { 'p-ligar': { ton_id: 'TON-A', bo: 1, pulso_ms: 800 } }, {});
+    expect(await svc.bombaDosPontos('PIV')).toMatchObject({
+      origem: 'pontos', dono_id: 'PIV', modo: 'pulso', ton_id: 'TON-A', bo_liga: 1, pulso_ms: 800,
+      bo_desliga: null, bi_ton_id: 'TON-A', bi_confirma: 1, bi_inv: true,
+    });
     const { svc: s2 } = montar(PONTOS, {}, {});
     expect(await s2.bombaDosPontos('PIV')).toBeNull();
   });
 
-  it('Bomba_ligada invertida: BI 0 = ligada', async () => {
-    const { svc } = montar(PONTOS, { 'p-liga-bomba': { ton_id: 'TON-A', bo: 5, pulso_ms: 500 } }, { 'TON-A:4': 0 });
-    const b = await svc.bombaDosPontos('PIV');
-    expect(await svc.bombaLigada(b)).toBe(1);
+  it('Ligado invertido: BI 0 = ligada', async () => {
+    const { svc } = montar(PONTOS, { 'p-ligar': { ton_id: 'TON-A', bo: 1, pulso_ms: 500 } }, { 'TON-A:1': 0 });
+    expect(await svc.bombaLigada(await svc.bombaDosPontos('PIV'))).toBe(1);
   });
 
   describe('canhão (botão que alterna)', () => {

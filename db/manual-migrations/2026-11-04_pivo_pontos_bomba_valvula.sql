@@ -1,3 +1,4 @@
+-- ATENÇÃO: ajustada pela 2026-11-04b_pivo_ligar_6_comandos.sql (rode as duas, nesta ordem).
 -- Pivô: bomba, solenoide e canhão viram pontos do pivô, ligados na Topologia IoT →
 -- Configurar I/O (antes: TON + BO escolhidas na Configuração do pivô).
 -- docs/IOT-PIVO-LIGAR-BOMBA-CANHAO.md.
