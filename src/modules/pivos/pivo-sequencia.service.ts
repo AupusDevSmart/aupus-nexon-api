@@ -710,11 +710,11 @@ export class PivoSequenciaService implements OnModuleInit {
         if (pts.cmd.desligar) {
           await this.cmd.acionarPonto(id, pts.cmd.desligar, user, false, undefined, cliente);
           await passo('pivo', 'Comando Desligar enviado ao pivô', true);
+          // Mesma regra das travas: parado = Desligado = 1 ou todos os Girando LIGADOS em 0
+          // (pivô com só um Girando cadastrado também confirma).
           const parou = await this.esperar(async () => {
-            const s = await this.statusPivo(pts);
-            if (s.desligado === 1) return true;
-            if (s.direita === 0 && s.esquerda === 0) return true;
-            return s.desligado === null && s.direita === null && s.esquerda === null ? null : false;
+            const t = await this.estadoTrava(pts);
+            return t.estado === 'sem_status' ? null : t.estado === 'parado';
           }, cfg.sequencia.confirma_giro_s, ctl);
           await passo('pivo', parou === null ? 'Pivô sem status cadastrado — sem confirmação' : parou ? 'Pivô parado' : 'Pivô não confirmou parada no tempo', parou !== false);
         }
