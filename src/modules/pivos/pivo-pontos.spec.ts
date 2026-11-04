@@ -158,3 +158,16 @@ describe('percentímetro com o pivô girando', () => {
     }
   });
 });
+
+describe('desligar: perc off depois de concluir', () => {
+  it('a sequência fica concluída antes do perc off e a trava só sai depois do ack', async () => {
+    const { svc } = montar(PONTOS, { 'p-perc': { ton_id: 'TON-B', bo: 5, pulso_ms: 500 } }, { 'TON-B:3': 1 });
+    const ordem: string[] = [];
+    svc.lerConfig = async () => ({ bombeamento: null, bomba_de: null, sequencia: { pressurizacao_s: 0, confirma_giro_s: 5, confirma_bomba_s: 5 } });
+    svc.prisma.$executeRaw = jest.fn(async (s: TemplateStringsArray) => { if (s.join('?').includes('status =')) ordem.push('concluida'); return 1; });
+    svc.cmd.comandoTon = jest.fn(async (o: { cmd: string }) => { ordem.push(o.cmd); expect(ctl.finalizando).toBe(true); });
+    const ctl: { seqId: string; cancelar: boolean; finalizando?: boolean } = { seqId: 'S', cancelar: false };
+    await svc.executar('PIV', 'desligar', ctl);
+    expect(ordem).toEqual(['concluida', 'perc off']);
+  });
+});

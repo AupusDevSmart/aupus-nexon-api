@@ -112,7 +112,8 @@ const MSG_CANHAO: Record<ResCanhao, (ligar: boolean, s: number) => string> = {
 export class PivoSequenciaService implements OnModuleInit {
   private readonly logger = new Logger(PivoSequenciaService.name);
   /** sequências em execução neste processo: pivoId → flag de cancelamento */
-  private readonly rodando = new Map<string, { seqId: string; cancelar: boolean }>();
+  // finalizando = sequência já concluída, só esperando o ack de limpeza (perc off)
+  private readonly rodando = new Map<string, { seqId: string; cancelar: boolean; finalizando?: boolean }>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -444,6 +445,8 @@ export class PivoSequenciaService implements OnModuleInit {
       }
     }
 
+    // Sequência anterior já concluída, só limpando o percentímetro: espera o ack em vez de recusar.
+    for (let i = 0; i < 60 && this.rodando.get(id)?.finalizando; i++) await this.sleep(250);
     const atual = this.rodando.get(id);
     if (atual) {
       if (acao !== 'desligar') throw new ConflictException('Já existe uma sequência em andamento neste pivô. Use Desligar para interromper.');
@@ -734,7 +737,7 @@ export class PivoSequenciaService implements OnModuleInit {
   }
 
   // ------------------------------------------------------------------ execução
-  private async executar(id: string, acao: AcaoPivo, ctl: { seqId: string; cancelar: boolean }, user?: Autor, cliente?: ClienteInfo, irr: Irrigacao | null = null) {
+  private async executar(id: string, acao: AcaoPivo, ctl: { seqId: string; cancelar: boolean; finalizando?: boolean }, user?: Autor, cliente?: ClienteInfo, irr: Irrigacao | null = null) {
     const passos: Passo[] = [];
     const passo = async (etapa: string, msg: string, ok: boolean | null) => {
       passos.push({ t: new Date().toISOString(), etapa, msg, ok });
@@ -766,11 +769,6 @@ export class PivoSequenciaService implements OnModuleInit {
           }, cfg.sequencia.confirma_giro_s, ctl);
           await passo('pivo', parou === null ? 'Pivô sem status cadastrado — sem confirmação' : parou ? 'Pivô parado' : 'Pivô não confirmou parada no tempo', parou !== false);
         }
-        if (pts.cmd.percentimetro) {
-          await this.percentimetro(id, pts, 'off', user, cliente)
-            .then((ok) => (ok ? passo('percentimetro', 'Percentímetro desligado na TON', true) : undefined))
-            .catch((x) => passo('percentimetro', `Percentímetro não desligou: ${msgErro(x)}`, false));
-        }
         if (pts.cmd.canhao && pts.st.canhao && (await this.lerStatus(pts.st.canhao)) === 1) {
           const r = await this.aplicarCanhao(id, pts, false, user, cliente, cfg.sequencia.confirma_giro_s)
             .catch((x) => { this.logger.warn(`[pivo-seq] ${id} canhão: ${msgErro(x)}`); return 'nao_confirmou' as const; });
@@ -778,6 +776,15 @@ export class PivoSequenciaService implements OnModuleInit {
         }
         if (b) await this.desligarBomba(id, b, passo, user, cliente, !!pts.cmd.desligar);
         await fim('concluida');
+        ctl.finalizando = true;
+        // `perc off` depois de concluir: com o Girando em 0 a TON já cortou a BO sozinha, o
+        // comando só limpa o NVS. A tela mostra parado sem esperar mais uma volta no rádio;
+        // a trava (rodando) segue até o ack, então um Ligar logo depois não cruza com ele.
+        if (pts.cmd.percentimetro) {
+          await this.percentimetro(id, pts, 'off', user, cliente)
+            .then((ok) => (ok ? passo('percentimetro', 'Percentímetro desligado na TON', true) : undefined))
+            .catch((x) => passo('percentimetro', `Percentímetro não desligou: ${msgErro(x)}`, false));
+        }
         return;
       }
 
