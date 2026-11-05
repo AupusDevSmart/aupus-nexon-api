@@ -42,23 +42,23 @@ export class UnidadeResponse {
   @ApiProperty({ example: 'Unidade Fotovoltaica 1' })
   nome: string;
 
-  @ApiProperty({ enum: TipoUnidade, example: TipoUnidade.GERACAO })
-  tipo: TipoUnidade;
+  @ApiProperty({ enum: TipoUnidade, example: TipoUnidade.GERACAO, nullable: true })
+  tipo: TipoUnidade | null;
 
-  @ApiProperty({ example: 'SP' })
-  estado: string;
+  @ApiProperty({ example: 'SP', nullable: true })
+  estado: string | null;
 
-  @ApiProperty({ example: 'São Paulo' })
-  cidade: string;
+  @ApiProperty({ example: 'São Paulo', nullable: true })
+  cidade: string | null;
 
-  @ApiProperty({ example: -23.5505 })
-  latitude: number;
+  @ApiProperty({ example: -23.5505, nullable: true })
+  latitude: number | null;
 
-  @ApiProperty({ example: -46.6333 })
-  longitude: number;
+  @ApiProperty({ example: -46.6333, nullable: true })
+  longitude: number | null;
 
-  @ApiProperty({ example: 1000.5, description: 'Potência em kW' })
-  potencia: number;
+  @ApiProperty({ example: 1000.5, description: 'Potência em kW', nullable: true })
+  potencia: number | null;
 
   @ApiProperty({ enum: StatusUnidade, example: StatusUnidade.ativo })
   status: StatusUnidade;

@@ -134,6 +134,29 @@ describe('PlantasService', () => {
       expect(result.endereco.cidade).toBe('São Paulo');
     });
 
+    it('cria planta so com o nome: o resto vai como null, sem consultar proprietario', async () => {
+      prismaService.plantas.create.mockResolvedValue({
+        ...mockPlantaCriada,
+        cnpj: null, localizacao: null, horario_funcionamento: null, logradouro: null,
+        bairro: null, cidade: null, uf: null, cep: null, proprietario_id: null, proprietario: null,
+      });
+
+      const result = await service.create({ nome: 'Planta sem dados' });
+
+      expect(prismaService.usuarios.findUnique).not.toHaveBeenCalled();
+      expect(prismaService.plantas.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            nome: 'Planta sem dados',
+            cnpj: null, localizacao: null, horario_funcionamento: null, logradouro: null,
+            bairro: null, cidade: null, uf: null, cep: null, proprietario_id: null,
+          }),
+        }),
+      );
+      expect(result.proprietario).toBeUndefined();
+      expect(result.cnpj).toBeNull();
+    });
+
     it('should throw NotFoundException when proprietario does not exist', async () => {
       // Arrange
       prismaService.usuarios.findUnique.mockResolvedValue(null);

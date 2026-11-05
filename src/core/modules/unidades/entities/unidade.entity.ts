@@ -4,12 +4,12 @@ export class Unidade {
   id: string;
   plantaId: string;
   nome: string;
-  tipo: TipoUnidade;
-  estado: string;
-  cidade: string;
-  latitude: number;
-  longitude: number;
-  potencia: number;
+  tipo: TipoUnidade | null;
+  estado: string | null;
+  cidade: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  potencia: number | null;
   status: StatusUnidade;
   pontosMedicao?: string[];
   irrigante?: boolean;

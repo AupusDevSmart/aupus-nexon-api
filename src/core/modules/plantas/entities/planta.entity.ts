@@ -39,19 +39,19 @@ export class ProprietarioBasico {
 
 export class Endereco {
   @ApiProperty({ example: 'Av. Industrial, 1000', description: 'Logradouro completo' })
-  logradouro: string;
+  logradouro: string | null;
 
   @ApiProperty({ example: 'Distrito Industrial', description: 'Bairro' })
   bairro?: string;
 
   @ApiProperty({ example: 'São Paulo', description: 'Cidade' })
-  cidade: string;
+  cidade: string | null;
 
   @ApiProperty({ example: 'SP', description: 'UF' })
-  uf: string;
+  uf: string | null;
 
   @ApiProperty({ example: '01234-567', description: 'CEP' })
-  cep: string;
+  cep: string | null;
 }
 
 export class Planta {
@@ -62,13 +62,13 @@ export class Planta {
   nome: string;
 
   @ApiProperty({ example: '12.345.678/0001-90', description: 'CNPJ da planta' })
-  cnpj: string;
+  cnpj: string | null;
 
   @ApiProperty({ example: 'Zona Sul - Galpão Principal', description: 'Localização específica' })
-  localizacao: string;
+  localizacao: string | null;
 
   @ApiProperty({ example: '06:00 às 22:00', description: 'Horário de funcionamento' })
-  horarioFuncionamento: string;
+  horarioFuncionamento: string | null;
 
   @ApiProperty({ example: '123456789', description: 'Número da Unidade Consumidora', required: false })
   numeroUc?: string;
@@ -77,7 +77,7 @@ export class Planta {
   endereco: Endereco;
 
   @ApiProperty({ example: 'usr_empresa_abc_01234567890', description: 'ID do proprietário' })
-  proprietarioId: string;
+  proprietarioId: string | null;
 
   @ApiProperty({ type: ProprietarioBasico, description: 'Dados básicos do proprietário' })
   proprietario?: ProprietarioBasico;

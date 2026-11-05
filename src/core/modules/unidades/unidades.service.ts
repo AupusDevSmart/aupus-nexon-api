@@ -72,7 +72,8 @@ export class UnidadesService {
         planta_id: plantaIdTrimmed,
         pontos_medicao: pontos_medicao ? pontos_medicao : null,
         concessionaria_id: concessionariaIdTrimmed || null,
-        potencia: unidadeData.potencia ?? 0,
+        // Sem potencia e null ("nao informada"), nao 0 (nov/2026)
+        potencia: unidadeData.potencia ?? null,
         status: 'ativo',
       };
 
@@ -657,7 +658,7 @@ export class UnidadesService {
           id: unidade.id,
           nome: unidade.nome,
           tipo: unidade.tipo,
-          potencia: Number(unidade.potencia),
+          potencia: numeroOuNulo(unidade.potencia),
         },
         totais: {
           equipamentos: totalEquipamentos,
@@ -702,9 +703,11 @@ export class UnidadesService {
       tipo: unidadeDb.tipo,
       estado: unidadeDb.estado,
       cidade: unidadeDb.cidade,
-      latitude: Number(unidadeDb.latitude),
-      longitude: Number(unidadeDb.longitude),
-      potencia: Number(unidadeDb.potencia),
+      // Opcionais desde nov/2026: Number(null) daria 0, e a instalacao sem
+      // coordenada apareceria no mapa em (0, 0)
+      latitude: numeroOuNulo(unidadeDb.latitude),
+      longitude: numeroOuNulo(unidadeDb.longitude),
+      potencia: numeroOuNulo(unidadeDb.potencia),
       status: unidadeDb.status,
       pontosMedicao: unidadeDb.pontos_medicao || [],
       irrigante: unidadeDb.irrigante,
@@ -740,4 +743,10 @@ export class UnidadesService {
       atualizadoEm: unidadeDb.updated_at,
     };
   }
+}
+
+/** Decimal do Prisma (ou numero) para number; null e undefined seguem null. */
+function numeroOuNulo(valor: { toString(): string } | number | null | undefined): number | null {
+  if (valor === null || valor === undefined) return null;
+  return Number(valor);
 }

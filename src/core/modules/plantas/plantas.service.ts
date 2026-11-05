@@ -29,22 +29,21 @@ export class PlantasService {
     const { endereco, proprietarioId, cnpj, numero_uc, ...plantaData } = createPlantaDto;
 
     try {
-      // 1. Verificar se o proprietário existe
-      const proprietario = await this.prisma.usuarios.findUnique({
-        where: {
-          id: proprietarioId,
-          is_active: true,
-          deleted_at: null
-        },
-        select: {
-          id: true,
-          nome: true,
-          cpf_cnpj: true
-        }
-      });
+      // 1. O proprietario e opcional desde nov/2026; quando vem, tem de existir
+      const proprietarioIdTrimmed = proprietarioId?.trim() || null;
+      if (proprietarioIdTrimmed) {
+        const proprietario = await this.prisma.usuarios.findUnique({
+          where: {
+            id: proprietarioIdTrimmed,
+            is_active: true,
+            deleted_at: null
+          },
+          select: { id: true }
+        });
 
-      if (!proprietario) {
-        throw new NotFoundException(`Proprietário com ID ${proprietarioId} não encontrado ou inativo`);
+        if (!proprietario) {
+          throw new NotFoundException(`Proprietário com ID ${proprietarioIdTrimmed} não encontrado ou inativo`);
+        }
       }
 
       // 2. CNPJ duplicado é PERMITIDO (decisão do negócio): grupos econômicos têm várias
@@ -54,16 +53,18 @@ export class PlantasService {
       const novaPlanta = await this.prisma.plantas.create({
         data: {
           nome: plantaData.nome,
-          cnpj,
-          localizacao: plantaData.localizacao,
-          horario_funcionamento: plantaData.horarioFuncionamento,
+          // Sem CNPJ e null, nunca "": a coluna e UNIQUE, e o indice aceita
+          // varios NULL mas so um "".
+          cnpj: cnpj ?? null,
+          localizacao: plantaData.localizacao ?? null,
+          horario_funcionamento: plantaData.horarioFuncionamento ?? null,
           numero_uc: numero_uc || null, // ✅ Adicionar numero_uc
-          logradouro: endereco.logradouro,
-          bairro: endereco.bairro,
-          cidade: endereco.cidade,
-          uf: endereco.uf,
-          cep: endereco.cep,
-          proprietario_id: proprietarioId,
+          logradouro: endereco?.logradouro ?? null,
+          bairro: endereco?.bairro ?? null,
+          cidade: endereco?.cidade ?? null,
+          uf: endereco?.uf ?? null,
+          cep: endereco?.cep ?? null,
+          proprietario_id: proprietarioIdTrimmed,
         },
         include: {
           proprietario: {
@@ -280,7 +281,7 @@ export class PlantasService {
       }
 
       // 2. Se há mudança de proprietário, verificar se ele existe
-      if (proprietarioId && proprietarioId !== plantaExistente.proprietario_id) {
+      if (proprietarioId && proprietarioId.trim() !== plantaExistente.proprietario_id?.trim()) {
         const proprietario = await this.prisma.usuarios.findUnique({
           where: {
             id: proprietarioId,
@@ -308,7 +309,7 @@ export class PlantasService {
         updateData.horario_funcionamento = plantaData.horarioFuncionamento;
       }
       if (numero_uc !== undefined) updateData.numero_uc = numero_uc || null; // ✅ Adicionar numero_uc
-      if (proprietarioId !== undefined) updateData.proprietario_id = proprietarioId;
+      if (proprietarioId !== undefined) updateData.proprietario_id = proprietarioId?.trim() || null;
 
       // Campos de endereço
       if (endereco) {
@@ -518,9 +519,10 @@ export class PlantasService {
         tipo: unidade.tipo,
         estado: unidade.estado,
         cidade: unidade.cidade,
-        latitude: unidade.latitude.toString(),
-        longitude: unidade.longitude.toString(),
-        potencia: unidade.potencia.toString(),
+        // Coordenada e potencia sao opcionais desde nov/2026: null segue null
+        latitude: unidade.latitude?.toString() ?? null,
+        longitude: unidade.longitude?.toString() ?? null,
+        potencia: unidade.potencia?.toString() ?? null,
         status: unidade.status,
         totalEquipamentos: unidade._count.equipamentos,
         createdAt: unidade.created_at,

@@ -995,15 +995,15 @@ model usuarios {
 model plantas {
   id                    String                 @id @default(cuid()) @db.Char(26)
   nome                  String                 @db.VarChar(255)
-  cnpj                  String                 @unique @db.VarChar(255)
-  localizacao           String                 @db.VarChar(255)
-  horario_funcionamento String                 @db.VarChar(255)
-  logradouro            String                 @db.VarChar(255)
+  cnpj                  String?                @unique @db.VarChar(255)
+  localizacao           String?                @db.VarChar(255)
+  horario_funcionamento String?                @db.VarChar(255)
+  logradouro            String?                @db.VarChar(255)
   bairro                String?                @db.VarChar(255)
-  cidade                String                 @db.VarChar(255)
-  uf                    String                 @db.VarChar(2)
-  cep                   String                 @db.VarChar(255)
-  proprietario_id       String                 @db.Char(26)
+  cidade                String?                @db.VarChar(255)
+  uf                    String?                @db.VarChar(2)
+  cep                   String?                @db.VarChar(255)
+  proprietario_id       String?                @db.Char(26)
   created_at            DateTime?              @db.Timestamp(0)
   updated_at            DateTime?              @db.Timestamp(0)
   deleted_at            DateTime?              @db.Timestamp(0)
@@ -1013,7 +1013,7 @@ model plantas {
   equipamentos          equipamentos[]
   feriado_plantas       feriado_plantas[]
   ordens_servico        ordens_servico[]
-  proprietario          usuarios               @relation("plantas_proprietario", fields: [proprietario_id], references: [id])
+  proprietario          usuarios?              @relation("plantas_proprietario", fields: [proprietario_id], references: [id])
   operadores            planta_operadores[]
   programacoes_os       programacoes_os[]
   solicitacoes_servico  solicitacoes_servico[]
@@ -1029,12 +1029,12 @@ model unidades {
   id                   String                   @id @default(cuid()) @db.Char(26)
   planta_id            String                   @db.Char(26)
   nome                 String                   @db.VarChar(255)
-  tipo                 String                   @db.VarChar(50)
-  estado               String                   @db.VarChar(2)
-  cidade               String                   @db.VarChar(100)
-  latitude             Decimal                  @db.Decimal(10, 7)
-  longitude            Decimal                  @db.Decimal(10, 7)
-  potencia             Decimal                  @db.Decimal(10, 2)
+  tipo                 String?                  @db.VarChar(50)
+  estado               String?                  @db.VarChar(2)
+  cidade               String?                  @db.VarChar(100)
+  latitude             Decimal?                 @db.Decimal(10, 7)
+  longitude            Decimal?                 @db.Decimal(10, 7)
+  potencia             Decimal?                 @db.Decimal(10, 2)
   status               String                   @default("ativo") @db.VarChar(20)
   pontos_medicao       Json?
   created_at           DateTime                 @default(now()) @db.Timestamp(0)

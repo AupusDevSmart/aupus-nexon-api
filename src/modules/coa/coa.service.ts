@@ -43,7 +43,7 @@ export interface DashboardData {
 export interface PlantaResumo {
   id: string;
   nome: string;
-  cliente: string;
+  cliente: string | null;
   unidades: UnidadeResumo[];
   totais: {
     geracao: number;
@@ -869,7 +869,8 @@ export class CoaService {
       plantasProcessadas.push({
         id: planta.id,
         nome: planta.nome,
-        cliente: planta.proprietario.nome,
+        // Planta sem proprietario existe desde nov/2026 (campo opcional)
+        cliente: planta.proprietario?.nome ?? null,
         unidades: unidadesProcessadas,
         totais: {
           geracao: Math.round(geracaoPlanta * 100) / 100,
