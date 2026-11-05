@@ -1799,12 +1799,15 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       const ehSsuEquip = codigo === 'EQTL001' || categoriaNome === 'Gateway';
       if (ehSsuEquip && ((dPulsos as any).parcial === 1 || (dPulsos as any).fim === 0)) {
         await this.salvarParcialSsu(equipamentoId, dPulsos, timestampDados);
+        // controle automático pelo MED (controle-med): ciclo disparado por minuto do medidor
+        this.emit('ssu_minuto', { equipamentoId: equipamentoId.trim(), dados: dPulsos, ts: timestampDados });
         return;
       }
       // "fim":1 = fechamento do intervalo (bloco oficial): segue como bloco E o último
       // minuto dele entra na série minuto a minuto (sem buraco na curva).
       if (ehSsuEquip && (dPulsos as any).fim === 1 && (dPulsos as any).min) {
         await this.salvarParcialSsu(equipamentoId, dPulsos, timestampDados);
+        this.emit('ssu_minuto', { equipamentoId: equipamentoId.trim(), dados: dPulsos, ts: timestampDados });
       }
       const isGateway = categoriaNome === 'Gateway' || (codigo === 'EQTL001' && temPulsosA966);
       const isM160 = codigo === 'M-160' || codigo === 'M160' || codigo === 'METER_M160';
