@@ -110,7 +110,7 @@ export class OtaStatusResponseDto {
 export class GravacaoUsbDto {
   @ApiProperty({ description: 'FIRMWARE_VERSION do binário gravado (o que a TON anuncia)', example: '2.0.0-build202611031034' })
   @IsString()
-  @Matches(/^[\w.\-]{3,64}$/, { message: 'versao_firmware inválida' })
+  @Matches(/^[\w.-]{3,64}$/, { message: 'versao_firmware inválida' })
   versao_firmware!: string;
 }
 

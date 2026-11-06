@@ -58,6 +58,7 @@ import {
   PlantaOperadoresModule,
   UnidadesModule,
   EquipamentosModule,
+  SincronizacaoModule,
   TiposEquipamentosModule,
   CategoriasEquipamentosModule,
   ConcessionariasModule,
@@ -91,6 +92,9 @@ import { IotCatalogModule } from './modules/iot-catalog/iot-catalog.module';
     PlantaOperadoresModule,
     UnidadesModule,
     EquipamentosModule,
+    // Sincronizacao de cadastro com o AupusService. Saiu daqui por engano no b42774d
+    // (16/09/2026) e a entrega ficou em 404 ate 06/11: sem o modulo nao ha rota /sincronizacao
+    SincronizacaoModule,
     TiposEquipamentosModule,
     CategoriasEquipamentosModule,
     ConcessionariasModule,
