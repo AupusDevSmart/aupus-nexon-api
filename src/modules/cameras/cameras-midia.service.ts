@@ -84,6 +84,26 @@ export class CamerasMidiaService {
     return { u: o.u, r: typeof o.r === 'string' ? o.r : null };
   }
 
+  /**
+   * Token de mídia → usuário vivo no banco. O papel gravado no token é só pista: o que vale é o
+   * papel ATUAL (Spatie `model_has_roles`, senão a coluna legada), e usuário inativo, apagado ou
+   * inexistente não entra — igual ao JwtStrategy. Devolve null quando o token não serve mais.
+   */
+  async usuarioDoTokenMidia(token: string, agora = new Date()): Promise<{ id: string; role: string | null } | null> {
+    const p = this.verificarTokenMidia(token, agora);
+    if (!p) return null;
+    const u = await this.prisma.usuarios.findFirst({
+      where: { id: p.u, deleted_at: null, status: 'Ativo' },
+      select: { id: true, role: true },
+    });
+    if (!u) return null;
+    const mhr = await this.prisma.model_has_roles.findFirst({
+      where: { model_id: p.u, model_type: 'App\\Models\\User' },
+      include: { roles: true },
+    });
+    return { id: u.id.trim(), role: mhr?.roles?.name ?? u.role ?? null };
+  }
+
   /** Token curto para o agente publicar no MediaMTX sem expor o token de longa duração. */
   gerarTokenPublicar(agenteId: string, agora = new Date()): string {
     const payload: PayloadPublicar = { a: agenteId.trim(), e: agora.getTime() + TOKEN_PUBLICAR_S * 1000 };
@@ -213,18 +233,18 @@ export class CamerasMidiaService {
     if (action === 'read' || action === 'playback') {
       const token = tokenDaQuery(typeof b.query === 'string' ? b.query : null);
       if (!token) return recusar('sem token de mídia');
-      const p = this.verificarTokenMidia(token);
-      if (!p) return recusar('token de mídia inválido ou expirado');
+      const usuario = await this.usuarioDoTokenMidia(token);
+      if (!usuario) return recusar('token de mídia inválido, expirado ou de usuário inativo');
       const camera = await this.prisma.cameras.findFirst({
         where: { id: cameraId, deleted_at: null },
         select: { unidade_id: true },
       });
       if (!camera) return recusar('câmera não existe');
       try {
-        await this.scope.assertEntityInScope('unidade', camera.unidade_id.trim(), { id: p.u, role: p.r });
+        await this.scope.assertEntityInScope('unidade', camera.unidade_id.trim(), usuario);
         return true;
       } catch {
-        return recusar(`usuário ${p.u} não vê a unidade da câmera`);
+        return recusar(`usuário ${usuario.id} não vê a unidade da câmera`);
       }
     }
 

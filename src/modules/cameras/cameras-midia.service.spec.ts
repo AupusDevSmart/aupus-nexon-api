@@ -1,10 +1,15 @@
 import { ForbiddenException } from '@nestjs/common';
 import { CamerasMidiaService } from './cameras-midia.service';
 
-function montar(opts: { camera?: any; scopeOk?: boolean } = {}) {
+function montar(opts: { camera?: any; scopeOk?: boolean; usuario?: any; papelSpatie?: string | null } = {}) {
   const prisma: any = {
     cameras: { findFirst: jest.fn().mockResolvedValue(opts.camera ?? null) },
     cameras_agentes: { findFirst: jest.fn().mockResolvedValue(null) },
+    // Usuário do token de mídia é recarregado do banco (ativo + papel atual).
+    usuarios: { findFirst: jest.fn().mockResolvedValue('usuario' in opts ? opts.usuario : { id: 'u1', role: 'operador' }) },
+    model_has_roles: {
+      findFirst: jest.fn().mockResolvedValue(opts.papelSpatie ? { roles: { name: opts.papelSpatie } } : null),
+    },
   };
   const scope: any = {
     assertEntityInScope: jest.fn().mockImplementation(async () => {
@@ -140,5 +145,19 @@ describe('CamerasMidiaService · auth do MediaMTX', () => {
     const { service } = montar();
     expect(service.hlsUrl('cam-c1', 'a.b')).toBe('https://api.exemplo/midia/hls/cam-c1/index.m3u8?token=a.b');
     delete process.env.MIDIA_PUBLIC_URL;
+  });
+
+  it('token de mídia de usuário inativo ou apagado não vale, e o papel vem do banco', async () => {
+    const inativo = montar({ camera: { unidade_id: 'u1 ' }, usuario: null });
+    const { token } = inativo.service.gerarTokenMidia({ id: 'u1', role: 'admin' });
+    expect(await inativo.service.usuarioDoTokenMidia(token)).toBeNull();
+    expect(await inativo.service.autenticarMediaMtx({ action: 'read', path: 'cam-c1', query: `token=${token}` }, '127.0.0.1')).toBe(false);
+    expect(inativo.scope.assertEntityInScope).not.toHaveBeenCalled();
+
+    const rebaixado = montar({ camera: { unidade_id: 'u1 ' }, usuario: { id: 'u1                        ', role: 'vendedor' }, papelSpatie: 'operador' });
+    const t2 = rebaixado.service.gerarTokenMidia({ id: 'u1', role: 'admin' }).token;
+    expect(await rebaixado.service.usuarioDoTokenMidia(t2)).toEqual({ id: 'u1', role: 'operador' });
+    expect(await rebaixado.service.autenticarMediaMtx({ action: 'read', path: 'cam-c1', query: `token=${t2}` }, '127.0.0.1')).toBe(true);
+    expect(rebaixado.scope.assertEntityInScope).toHaveBeenCalledWith('unidade', 'u1', { id: 'u1', role: 'operador' });
   });
 });
