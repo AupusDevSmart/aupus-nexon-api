@@ -1,6 +1,7 @@
 import {
   armadoAte,
   cameraDoCaminho,
+  decidirArmar,
   decidirEvento,
   dentroDaJanela,
   ehJpeg,
@@ -119,6 +120,30 @@ describe('cameras-regras · armamento', () => {
     expect(estaArmado(d, noite)).toBe(false);
     expect(armadoAte(d, noite)).toBeNull();
     expect(modoVigente(d, noite)).toBe('desarmado');
+  });
+
+  it('armar/desarmar sem prazo respeita a agenda', () => {
+    // Noite (agenda armada): desarmar vale até o próximo fim; armar só limpa o override.
+    expect(decidirArmar(agenda, false, null, noite)).toEqual({
+      armamento_modo: 'agenda',
+      armado_manual: false,
+      armado_manual_ate: new Date('2026-11-08T09:30:00.000Z'),
+    });
+    expect(decidirArmar(agenda, true, null, noite)).toEqual({ armamento_modo: 'agenda', armado_manual: true, armado_manual_ate: null });
+    // Dia: armar vale até a agenda assumir às 18:00; desarmar só limpa.
+    expect(decidirArmar(agenda, true, null, tarde).armado_manual_ate!.toISOString()).toBe('2026-11-07T21:00:00.000Z');
+    expect(decidirArmar(agenda, false, null, tarde).armado_manual_ate).toBeNull();
+    // Com prazo: sobrepõe mantendo o modo; desarmado vira manual.
+    const ate = new Date('2026-11-07T23:00:00Z');
+    expect(decidirArmar(agenda, false, ate, noite)).toEqual({ armamento_modo: 'agenda', armado_manual: false, armado_manual_ate: ate });
+    expect(decidirArmar({ ...agenda, armamento_modo: 'desarmado' }, true, ate, noite).armamento_modo).toBe('manual');
+    // Manual: liga/desliga sem prazo.
+    expect(decidirArmar({ ...agenda, armamento_modo: 'manual' }, true, null, tarde)).toEqual({
+      armamento_modo: 'manual',
+      armado_manual: true,
+      armado_manual_ate: null,
+    });
+    expect(decidirArmar({ ...agenda, armamento_modo: 'desarmado' }, false, null, tarde).armamento_modo).toBe('desarmado');
   });
 
   it('início da noite é o último agenda_inicio', () => {

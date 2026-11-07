@@ -274,6 +274,47 @@ export function modoVigente(c: ConfigArmamento | null | undefined, agora = new D
   return (MODOS_ARMAMENTO as readonly string[]).includes(c.armamento_modo) ? (c.armamento_modo as ModoArmamento) : 'agenda';
 }
 
+export interface DecisaoArmar {
+  armamento_modo: ModoArmamento;
+  armado_manual: boolean;
+  armado_manual_ate: Date | null;
+}
+
+function modoGravado(c: ConfigArmamento): ModoArmamento {
+  return (MODOS_ARMAMENTO as readonly string[]).includes(c.armamento_modo) ? (c.armamento_modo as ModoArmamento) : 'agenda';
+}
+
+/**
+ * POST /cameras/unidades/:id/armar. Com `ate`: sobrepõe até lá no modo atual (desarmado vira
+ * manual). Sem `ate`: manual → liga/desliga sem prazo; desarmado → armar vira manual sem prazo e
+ * desarmar não muda nada; agenda → sobrepõe até a próxima virada da agenda (armar fora da janela
+ * vale até o próximo início, desarmar dentro da janela vale até o próximo fim) e um pedido que já
+ * coincide com a agenda só limpa o override — a agenda nunca é desligada por aqui.
+ */
+export function decidirArmar(
+  c: ConfigArmamento,
+  armado: boolean,
+  ate: Date | null,
+  agora = new Date(),
+  fuso = FUSO,
+): DecisaoArmar {
+  const modo = modoGravado(c);
+  if (ate) {
+    return { armamento_modo: modo === 'desarmado' ? 'manual' : modo, armado_manual: armado, armado_manual_ate: ate };
+  }
+  if (modo === 'manual') return { armamento_modo: 'manual', armado_manual: armado, armado_manual_ate: null };
+  if (modo === 'desarmado') {
+    return armado
+      ? { armamento_modo: 'manual', armado_manual: true, armado_manual_ate: null }
+      : { armamento_modo: 'desarmado', armado_manual: false, armado_manual_ate: null };
+  }
+  const a = agendaMinutos(c);
+  const pelaAgenda = dentroDaJanela(minutosLocais(agora, fuso), a.inicio, a.fim);
+  if (pelaAgenda === armado) return { armamento_modo: 'agenda', armado_manual: armado, armado_manual_ate: null };
+  const limite = proximaOcorrencia(agora, armado ? a.inicio : a.fim, fuso);
+  return { armamento_modo: 'agenda', armado_manual: armado, armado_manual_ate: limite };
+}
+
 /** Começo da "noite" do resumo: último agenda_inicio (ou 18:00) até agora. */
 export function inicioDaNoite(c: ConfigArmamento | null | undefined, agora = new Date(), fuso = FUSO): Date {
   const inicio = c ? agendaMinutos(c).inicio : minutosDe(AGENDA_INICIO_PADRAO)!;
