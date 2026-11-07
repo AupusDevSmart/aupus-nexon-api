@@ -3570,3 +3570,148 @@ model chamados_encaminhamentos {
 
   @@index([chamado_id])
 }
+
+// ---------------------------------------------------------------------------
+// NEXON-88 — Câmeras IP por instalação (db/manual-migrations/2026-11-07_cameras.sql)
+// Ids varchar(26) sem padding. Sem relação Prisma com unidades/plantas/equipamentos/
+// usuarios de propósito: essas tabelas são char(26) e o id volta com padding, o que
+// quebra o casamento em memória do `include`. Nomes vêm por consulta (ver chamados).
+// ---------------------------------------------------------------------------
+
+/// Agente local (nexon-camera-agent) na rede das câmeras. O token só existe em hash.
+model cameras_agentes {
+  id                String             @id @db.VarChar(26)
+  unidade_id        String             @db.VarChar(26)
+  planta_id         String             @db.VarChar(26)
+  nome              String             @db.VarChar(120)
+  /// sha256 hex do token em claro (nxcam_...), que só é devolvido ao gerar.
+  token_hash        String             @unique @db.VarChar(64)
+  token_gerado_em   DateTime?          @db.Timestamp(0)
+  versao            String?            @db.VarChar(40)
+  host              String?            @db.VarChar(120)
+  ultimo_contato_em DateTime?          @db.Timestamp(0)
+  ativo             Boolean            @default(true)
+  created_at        DateTime           @default(now()) @db.Timestamp(0)
+  updated_at        DateTime           @default(now()) @updatedAt @db.Timestamp(0)
+  deleted_at        DateTime?          @db.Timestamp(0)
+  cameras           cameras[]
+  comandos          cameras_comandos[]
+
+  @@index([unidade_id])
+}
+
+model cameras {
+  id                    String             @id @db.VarChar(26)
+  unidade_id            String             @db.VarChar(26)
+  planta_id             String             @db.VarChar(26)
+  agente_id             String?            @db.VarChar(26)
+  /// Equipamento CFTV ligado: permite abrir chamado e cair na tela de alarmes (logs_mqtt).
+  equipamento_id        String?            @db.VarChar(26)
+  nome                  String             @db.VarChar(120)
+  fabricante            String             @default("intelbras") @db.VarChar(40)
+  modelo                String?            @db.VarChar(80)
+  ip                    String             @db.VarChar(64)
+  porta_rtsp            Int                @default(554)
+  porta_http            Int                @default(80)
+  usuario               String             @db.VarChar(80)
+  /// Cifrada (AES-256-GCM, chave de MIDIA_TOKEN_SECRET || JWT_SECRET). Nunca sai nas rotas de usuário.
+  senha                 String
+  canal                 Int                @default(1)
+  ativa                 Boolean            @default(true)
+  ordem                 Int                @default(0)
+  /// online | offline | desconhecido
+  status                String             @default("desconhecido") @db.VarChar(12)
+  status_em             DateTime?          @db.Timestamp(0)
+  ultimo_contato_em     DateTime?          @db.Timestamp(0)
+  miniatura_em          DateTime?          @db.Timestamp(0)
+  publicando            Boolean            @default(false)
+  /// Último GET /cameras/:id/stream: o agente publica enquanto isto tiver menos de 90 s.
+  stream_pedido_em      DateTime?          @db.Timestamp(0)
+  stream_continuo       Boolean            @default(false)
+  stream_transcodificar Boolean            @default(false)
+  stream_bitrate_kbps   Int                @default(800)
+  /// { ativa, sensibilidade, area_minima_pct, fps_analise, classificar, classes_alerta, clipe_s, zonas }
+  analise               Json               @default("{}")
+  created_at            DateTime           @default(now()) @db.Timestamp(0)
+  updated_at            DateTime           @default(now()) @updatedAt @db.Timestamp(0)
+  deleted_at            DateTime?          @db.Timestamp(0)
+  agente                cameras_agentes?   @relation(fields: [agente_id], references: [id], onDelete: SetNull)
+  eventos               cameras_eventos[]
+  comandos              cameras_comandos[]
+
+  @@index([unidade_id])
+  @@index([agente_id])
+}
+
+/// Detecção ou aviso de sistema. alerta = conta como não lido e notifica; descartado = só estatística.
+model cameras_eventos {
+  id              String    @id @db.VarChar(26)
+  camera_id       String    @db.VarChar(26)
+  unidade_id      String    @db.VarChar(26)
+  planta_id       String    @db.VarChar(26)
+  /// pessoa | veiculo | animal | movimento | sem_sinal | sinal_restabelecido | foto
+  tipo            String    @db.VarChar(24)
+  inicio_em       DateTime  @db.Timestamp(3)
+  fim_em          DateTime? @db.Timestamp(3)
+  confianca       Decimal?  @db.Decimal(5, 4)
+  armado          Boolean   @default(false)
+  alerta          Boolean   @default(false)
+  descartado      Boolean   @default(false)
+  /// desarmado | classe_ignorada | agente
+  motivo_descarte String?   @db.VarChar(24)
+  snapshot_path   String?   @db.VarChar(255)
+  clipe_path      String?   @db.VarChar(255)
+  dados           Json      @default("{}")
+  lido_em         DateTime? @db.Timestamp(0)
+  lido_por_id     String?   @db.VarChar(26)
+  lido_por_nome   String?   @db.VarChar(255)
+  chamado_id      String?   @db.VarChar(26)
+  created_at      DateTime  @default(now()) @db.Timestamp(0)
+  camera          cameras   @relation(fields: [camera_id], references: [id], onDelete: Cascade)
+
+  @@index([camera_id, inicio_em(sort: Desc)])
+  @@index([unidade_id, inicio_em(sort: Desc)])
+  @@index([unidade_id, alerta, lido_em])
+}
+
+/// Armamento e comandos da instalação. Sem linha = agenda 18:00–06:30, sem refletor/sirene.
+model cameras_unidade_config {
+  unidade_id              String    @id @db.VarChar(26)
+  planta_id               String    @db.VarChar(26)
+  /// agenda | manual | desarmado
+  armamento_modo          String    @default("agenda") @db.VarChar(12)
+  armado_manual           Boolean   @default(false)
+  armado_manual_ate       DateTime? @db.Timestamp(0)
+  /// Hora local (America/Sao_Paulo). Prisma lê como 1970-01-01T18:00:00.000Z.
+  agenda_inicio           DateTime? @db.Time(0)
+  agenda_fim              DateTime? @db.Time(0)
+  refletor_equipamento_id String?   @db.VarChar(26)
+  refletor_ponto_id       String?   @db.VarChar(26)
+  sirene_equipamento_id   String?   @db.VarChar(26)
+  sirene_ponto_id         String?   @db.VarChar(26)
+  abrir_chamado           Boolean   @default(false)
+  notificar_emails        String[]  @default([])
+  updated_at              DateTime  @default(now()) @updatedAt @db.Timestamp(0)
+  updated_por_id          String?   @db.VarChar(26)
+}
+
+/// Pedido da pessoa para o agente (foto agora). Entregue no GET /cameras/agente/comandos.
+model cameras_comandos {
+  id                String          @id @db.VarChar(26)
+  camera_id         String          @db.VarChar(26)
+  agente_id         String          @db.VarChar(26)
+  tipo              String          @db.VarChar(24)
+  parametros        Json            @default("{}")
+  /// pendente | entregue | ok | erro
+  estado            String          @default("pendente") @db.VarChar(12)
+  erro              String?         @db.VarChar(500)
+  evento_id         String?         @db.VarChar(26)
+  solicitado_por_id String?         @db.VarChar(26)
+  created_at        DateTime        @default(now()) @db.Timestamp(0)
+  entregue_em       DateTime?       @db.Timestamp(0)
+  concluido_em      DateTime?       @db.Timestamp(0)
+  camera            cameras         @relation(fields: [camera_id], references: [id], onDelete: Cascade)
+  agente            cameras_agentes @relation(fields: [agente_id], references: [id], onDelete: Cascade)
+
+  @@index([agente_id, estado])
+}
