@@ -45,6 +45,7 @@ import { TonBiModule } from './modules/ton-bi/ton-bi.module';
 import { TonAiModule } from './modules/ton-ai/ton-ai.module';
 import { MonitoramentoFvModule } from './modules/monitoramento-fv/monitoramento-fv.module';
 import { ReleEventosModule } from './modules/rele-eventos/rele-eventos.module';
+import { CamerasModule } from './modules/cameras/cameras.module';
 
 // Modulos do nucleo (src/core)
 import {
@@ -124,6 +125,7 @@ import { IotCatalogModule } from './modules/iot-catalog/iot-catalog.module';
     TonAiModule,
     MonitoramentoFvModule,
     ReleEventosModule,
+    CamerasModule,
     RelatoriosModule,
     RelatoriosOperacaoModule,
     BombaCombustivelModule,

@@ -31,7 +31,18 @@ export type AcaoAuditoria =
   // NEXON-31 (unifilar: layout e agrupamentos)
   | 'diagrama_layout'
   // NEXON-37 (config "Usina" da análise de geração, inclusive a fonte da geração)
-  | 'usina_config';
+  | 'usina_config'
+  // NEXON-88 (câmeras): cadastro, agente e token, armar/desarmar, refletor/sirene/foto, config, lidos em lote
+  | 'camera_cadastro'
+  | 'camera_edicao'
+  | 'camera_exclusao'
+  | 'camera_armada'
+  | 'camera_desarmada'
+  | 'camera_comando'
+  | 'camera_config'
+  | 'camera_agente'
+  | 'camera_agente_token'
+  | 'camera_evento_lido';
 
 export interface RegistroAcesso {
   autorId: string | null;
