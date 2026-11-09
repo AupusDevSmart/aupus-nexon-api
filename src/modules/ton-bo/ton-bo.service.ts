@@ -115,6 +115,7 @@ export class TonBoService {
           },
         },
       });
+      await this.mirror.liberarPontoDeOutrosCanais('ton_bo', row.equipamento_ponto_id, row.id);
       void this.mirror.resyncTonCanais(tId, 'ton_bo');
       return this.toResponse(row);
     } catch (err) {
@@ -162,6 +163,7 @@ export class TonBoService {
           },
         },
       });
+      if (dto.equipamento_ponto_id) await this.mirror.liberarPontoDeOutrosCanais('ton_bo', row.equipamento_ponto_id, row.id);
       void this.mirror.resyncTonCanais(tId, 'ton_bo');
       return this.toResponse(row);
     } catch (err) {

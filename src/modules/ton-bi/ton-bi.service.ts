@@ -177,6 +177,7 @@ export class TonBiService {
       }
       throw err;
     }
+    await this.mirror.liberarPontoDeOutrosCanais('ton_bi', pontoId, id);
     void this.mirror.resyncTonCanais(tId, 'ton_bi');
     return this.getById(tId, id);
   }
@@ -217,6 +218,7 @@ export class TonBiService {
       }
       throw err;
     }
+    if (dto.equipamento_ponto_id) await this.mirror.liberarPontoDeOutrosCanais('ton_bi', dto.equipamento_ponto_id, bId);
     void this.mirror.resyncTonCanais(tId, 'ton_bi');
     return this.getById(tId, bId);
   }

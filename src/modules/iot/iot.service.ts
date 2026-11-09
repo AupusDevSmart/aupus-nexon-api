@@ -932,6 +932,18 @@ export class IoTService {
     });
     const tipoTonId = tipoTon?.id?.trim() || null;
 
+    // Tópico de cada TON é EXCLUSIVO no diagrama: TON nova com o mesmo Tópico Base do
+    // gateway (ex.: satélite antes de ganhar o link LoRa) não pode assumir o tópico dele —
+    // o comando iria para o gateway. Quem já tem o tópico no ativo fica com ele.
+    const donoTopico = new Map<string, string>();
+    for (const c of tons) {
+      const id = this.rawEquipamentoId(c);
+      if (!id) continue;
+      const a = await tx.equipamentos.findFirst({ where: { id, deleted_at: null }, select: { topico_mqtt: true } });
+      const t = (a?.topico_mqtt ?? '').trim();
+      if (t && !donoTopico.has(t)) donoTopico.set(t, String((c as { id?: string }).id));
+    }
+
     for (const comp of tons) {
       const props =
         ((comp as { props?: Record<string, unknown> }).props ?? {}) as Record<
@@ -954,7 +966,19 @@ export class IoTService {
         : null;
       // MAC: do diagrama (override) ou o já cadastrado na TON (a satélite não leva MAC no layout).
       const macSat = String(props.mac_address ?? '').trim().toUpperCase() || (ativo?.mac_address ?? '').trim().toUpperCase();
-      const topico = !ehSatelite ? base : base && macSat ? `${base}/satellite/${macSat}` : '';
+      let topico = !ehSatelite ? base : base && macSat ? `${base}/satellite/${macSat}` : '';
+      const dono = topico ? donoTopico.get(topico) : undefined;
+      if (topico && dono && dono !== String((comp as { id?: string }).id)) {
+        console.warn(`[IoT] TON "${String(props.name ?? '')}" usaria o tópico ${topico}, que é de outra TON do diagrama — fica sem tópico`);
+        topico = '';
+      }
+      // Satélite sem MAC conhecido com tópico que NÃO é de satélite (herdado de quando
+      // estava no WiFi, ou o do gateway): limpa. Comando sem tópico falha com mensagem
+      // clara; com o tópico do gateway ele "funcionava" na TON errada.
+      if (ehSatelite && !topico && ativo?.topico_mqtt && !ativo.topico_mqtt.includes('/satellite/')) {
+        await tx.equipamentos.update({ where: { id: ativo.id }, data: { topico_mqtt: null, mqtt_habilitado: false } });
+        console.warn(`[IoT] TON satélite "${String(props.name ?? '')}" sem MAC: tópico ${ativo.topico_mqtt} removido (era de TON com internet)`);
+      }
 
       // (1) ja vinculado e valido? MANTEM o vinculo; so PROPAGA o topico se ele
       // mudou (usuario preencheu o Topico Base DEPOIS de ja ter o equipamento) —

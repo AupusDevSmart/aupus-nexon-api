@@ -1045,7 +1045,7 @@ export class PivoSequenciaService implements OnModuleInit {
       FROM equipamento_pontos p
       LEFT JOIN ton_bi b ON b.equipamento_ponto_id = p.id AND b.deleted_at IS NULL AND b.ativo
       WHERE p.equipamento_id = ${id}::bpchar AND p.deleted_at IS NULL AND p.ativo
-      ORDER BY p.ordem, p.nome`;
+      ORDER BY p.ordem, p.nome, b.updated_at DESC NULLS LAST`;   // ponto em 2 BIs (legado): vale o vínculo mais recente
     const cmd: Partial<Record<PapelComando, string>> = {};
     const st: Partial<Record<PapelStatus, { ton_id: string; bi: number; inv: boolean }>> = {};
     for (const r of rows) {

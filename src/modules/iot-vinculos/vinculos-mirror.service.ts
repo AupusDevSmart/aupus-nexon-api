@@ -74,6 +74,32 @@ export class VinculosMirrorService {
     }
   }
 
+  /**
+   * Um ponto tem UMA origem: ao vinculá-lo a uma BO/BI, ele sai de qualquer outra BO/BI
+   * (desta ou de outra TON). Sem isso, trocar a TON de um equipamento deixava o ponto
+   * nas duas, e o comando ia para qualquer uma (lookup sem ordem). Devolve as TONs
+   * de onde o ponto saiu (o espelho delas é refeito aqui). NÃO é best-effort: falhou, lança.
+   */
+  async liberarPontoDeOutrosCanais(kind: 'ton_bo' | 'ton_bi', pontoId: string | null | undefined, manterId: string): Promise<string[]> {
+    const pid = (pontoId ?? '').trim();
+    if (!pid) return [];
+    const rows = kind === 'ton_bo'
+      ? await this.prisma.$queryRaw<Array<{ ton_id: string }>>`
+          UPDATE ton_bo SET equipamento_ponto_id = NULL, updated_at = now()
+          WHERE TRIM(equipamento_ponto_id) = ${pid} AND TRIM(id) <> ${manterId.trim()} AND deleted_at IS NULL
+          RETURNING TRIM(ton_id) AS ton_id`
+      : await this.prisma.$queryRaw<Array<{ ton_id: string }>>`
+          UPDATE ton_bi SET equipamento_ponto_id = NULL, updated_at = now()
+          WHERE TRIM(equipamento_ponto_id) = ${pid} AND TRIM(id) <> ${manterId.trim()} AND deleted_at IS NULL
+          RETURNING TRIM(ton_id) AS ton_id`;
+    const tons = [...new Set(rows.map((r) => r.ton_id.trim()))];
+    for (const t of tons) {
+      this.logger.log(`[vinculos] ponto ${pid} saiu de ${kind} da TON ${t} (vinculado em outro canal)`);
+      await this.resyncTonCanais(t, kind);
+    }
+    return tons;
+  }
+
   // ==========================================================================
   // LEITURA de iot_vinculos (Fase 4 usa em SOMBRA; Fase 5 flipa a leitura pra cá).
   // ==========================================================================
@@ -86,6 +112,7 @@ export class VinculosMirrorService {
       SELECT TRIM(fonte_equipamento_id) AS ton_id, canal, params->>'pulso_ms' AS pulso_ms
       FROM iot_vinculos
       WHERE fonte_tipo = 'ton_bo' AND TRIM(equipamento_ponto_id) = ${pid} AND ativo = true AND deleted_at IS NULL
+      ORDER BY updated_at DESC, created_at DESC
       LIMIT 1`;
     if (!rows[0]) return null;
     return { ton_id: rows[0].ton_id.trim(), canal: Number(rows[0].canal), pulso_ms: rows[0].pulso_ms == null ? null : Number(rows[0].pulso_ms) };
