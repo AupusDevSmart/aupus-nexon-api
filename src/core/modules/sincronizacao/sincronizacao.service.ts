@@ -20,7 +20,11 @@ export type Resultado =
   | 'aplicado'
   | 'ignorado_versao'
   | 'ignorado_duplicado'
-  | 'dependencia_ausente';
+  | 'dependencia_ausente'
+  // O vínculo está desligado aqui: o evento não grava nem religa (09/11/2026)
+  | 'ignorado_desvinculado'
+  // Exclusão recebida: o registro fica e o vínculo se desliga (09/11/2026)
+  | 'exclusao_nao_aplicada';
 
 @Injectable()
 export class SincronizacaoService {
@@ -42,6 +46,12 @@ export class SincronizacaoService {
     const versaoRecebida = BigInt(evento.versao);
 
     if (!id) throw new BadRequestException('registro_id vazio');
+    // Operação desconhecida é recusada (o remetente tenta de novo). Antes, tudo o que
+    // não era 'delete' caía no upsert: uma operação nova mandada a um receptor antigo
+    // regravaria o dado em vez de fazer o que ela diz
+    if (operacao !== 'upsert' && operacao !== 'delete') {
+      throw new BadRequestException(`operação desconhecida: ${String(operacao)}`);
+    }
 
     return this.prisma.$transaction(async tx => {
       // Antes de qualquer escrita: o que este metodo grava NAO pode virar evento
@@ -52,6 +62,16 @@ export class SincronizacaoService {
       const vinculo = await tx.sincronizacao_vinculos.findUnique({
         where: { recurso_registro_id: { recurso, registro_id: id } },
       });
+
+      // Vínculo desligado aqui é decisão (09/11/2026): o evento do outro lado não o
+      // religa nem grava o dado. Antes, a próxima edição de lá desfazia o desvínculo
+      // calada (18 unidades desvinculadas no Service voltaram a ativo em 07/11).
+      // O remetente marca como entregue e não repete. Religar é o vincular, de cada lado.
+      if (vinculo && !vinculo.ativo) {
+        const detalhe = 'o vínculo está desligado neste produto';
+        await this.auditar(tx, evento, 'ignorado_desvinculado', detalhe);
+        return { resultado: 'ignorado_desvinculado' as const, detalhe };
+      }
 
       if (vinculo) {
         const decisao = this.quemVence(
@@ -74,27 +94,42 @@ export class SincronizacaoService {
       }
 
       if (operacao === 'delete') {
-        await (tx as any)[recurso].updateMany({ where: { id }, data: { deleted_at: new Date() } });
-      } else {
-        const faltando = await this.dependenciaAusente(tx, recurso, evento.payload);
-        if (faltando) {
-          await this.auditar(tx, evento, 'dependencia_ausente', faltando);
-          return { resultado: 'dependencia_ausente' as const, detalhe: faltando };
+        // Exclusão não atravessa sozinha (09/11/2026): em 26/10 o Service apagou 15
+        // registros, a fila os aplicou no NexON 12 dias depois e escondeu usinas com
+        // TON ativa. Aqui o registro fica, e o vínculo se desliga — sem isso, a próxima
+        // edição daqui recriaria lá o que foi apagado. Apagar dos dois lados é decisão
+        // de alguém, em cada produto.
+        if (vinculo) {
+          await tx.sincronizacao_vinculos.update({
+            where: { recurso_registro_id: { recurso, registro_id: id } },
+            data: { ativo: false, atualizado_em: new Date() },
+          });
         }
+        const detalhe = vinculo
+          ? 'apagado no outro produto: aqui o registro fica e o vínculo foi desligado'
+          : 'apagado no outro produto: aqui não havia vínculo';
+        await this.auditar(tx, evento, 'exclusao_nao_aplicada', detalhe);
+        return { resultado: 'exclusao_nao_aplicada' as const, detalhe };
+      }
 
-        const { dados, ignorados } = filtrarParaEsteBanco(recurso, evento.payload);
-        delete dados.id;
+      const faltando = await this.dependenciaAusente(tx, recurso, evento.payload);
+      if (faltando) {
+        await this.auditar(tx, evento, 'dependencia_ausente', faltando);
+        return { resultado: 'dependencia_ausente' as const, detalhe: faltando };
+      }
 
-        await (tx as any)[recurso].upsert({
-          where: { id },
-          create: { ...dados, id },
-          update: dados,
-        });
-        await aoReceber(tx, recurso, id, evento.payload);
+      const { dados, ignorados } = filtrarParaEsteBanco(recurso, evento.payload);
+      delete dados.id;
 
-        if (ignorados.length) {
-          this.logger.debug(`${recurso}/${id}: campos ignorados — ${ignorados.join(', ')}`);
-        }
+      await (tx as any)[recurso].upsert({
+        where: { id },
+        create: { ...dados, id },
+        update: dados,
+      });
+      await aoReceber(tx, recurso, id, evento.payload);
+
+      if (ignorados.length) {
+        this.logger.debug(`${recurso}/${id}: campos ignorados — ${ignorados.join(', ')}`);
       }
 
       const hash = createHash('sha256').update(JSON.stringify(evento.payload)).digest('hex');
@@ -104,9 +139,10 @@ export class SincronizacaoService {
           recurso, registro_id: id, versao: versaoRecebida,
           origem: evento.origem, hash_conteudo: hash, ativo: true,
         },
+        // O update nunca mexe em `ativo`: chegar aqui já exige o vínculo ligado (ou nenhum)
         update: {
           versao: versaoRecebida, origem: evento.origem,
-          hash_conteudo: hash, ativo: true, atualizado_em: new Date(),
+          hash_conteudo: hash, atualizado_em: new Date(),
         },
       });
 

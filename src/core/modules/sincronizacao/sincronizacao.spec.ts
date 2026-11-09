@@ -195,6 +195,76 @@ describe('sincronizacao (banco real)', () => {
     });
   });
 
+  /**
+   * O incidente de 26/10 a 07/11/2026: a exclusão no Service atravessou para o
+   * NexON 12 dias depois (escondendo usinas com TON ativa), e 18 unidades
+   * desvinculadas voltaram a ativo sozinhas com a próxima edição de lá.
+   */
+  describe('o desvinculo e a exclusao', () => {
+    const vinculoAtivo = async () =>
+      (await prisma.sincronizacao_vinculos.findUnique({
+        where: { recurso_registro_id: { recurso: 'plantas', registro_id: ID_PLANTA } },
+      }))?.ativo;
+
+    it('evento para vinculo desligado nao grava nem religa', async () => {
+      await outbox.vincular('plantas', ID_PLANTA, ID_PROP);
+      await outbox.desvincular('plantas', ID_PLANTA);
+
+      const r = await service.aplicar({
+        recurso: 'plantas', registro_id: ID_PLANTA, operacao: 'upsert',
+        versao: '99', origem: 'nexon', payload: await payloadReal('Veio depois do desvinculo'),
+      });
+
+      expect(r.resultado).toBe('ignorado_desvinculado');
+      expect((await prisma.plantas.findUnique({ where: { id: ID_PLANTA } }))?.nome).toBe('Planta sync');
+      expect(await vinculoAtivo()).toBe(false);
+      const auditoria = await prisma.sincronizacao_auditoria.findFirst({
+        where: { registro_id: ID_PLANTA, resultado: 'ignorado_desvinculado' },
+      });
+      expect(auditoria).not.toBeNull();
+    });
+
+    it('exclusao recebida nao apaga: o registro fica e o vinculo se desliga', async () => {
+      await outbox.vincular('plantas', ID_PLANTA, ID_PROP);
+
+      const r = await service.aplicar({
+        recurso: 'plantas', registro_id: ID_PLANTA, operacao: 'delete',
+        versao: '99', origem: 'nexon', payload: { id: ID_PLANTA },
+      });
+
+      expect(r.resultado).toBe('exclusao_nao_aplicada');
+      expect((await prisma.plantas.findUnique({ where: { id: ID_PLANTA } }))?.deleted_at).toBeNull();
+      // Desligado: a proxima edicao daqui nao recria la o que foi apagado
+      expect(await vinculoAtivo()).toBe(false);
+      await prisma.sincronizacao_outbox.deleteMany({ where: { registro_id: ID_PLANTA } });
+      await prisma.plantas.update({ where: { id: ID_PLANTA }, data: { nome: 'Editada depois' } });
+      expect(await pendentes()).toBe(0);
+    });
+
+    it('exclusao recebida de registro sem vinculo: nada muda, nem nasce vinculo', async () => {
+      const r = await service.aplicar({
+        recurso: 'plantas', registro_id: ID_PLANTA, operacao: 'delete',
+        versao: '99', origem: 'nexon', payload: { id: ID_PLANTA },
+      });
+
+      expect(r.resultado).toBe('exclusao_nao_aplicada');
+      expect((await prisma.plantas.findUnique({ where: { id: ID_PLANTA } }))?.deleted_at).toBeNull();
+      expect(await vinculoAtivo()).toBeUndefined();
+    });
+
+    it('operacao desconhecida e recusada, sem cair no upsert', async () => {
+      await outbox.vincular('plantas', ID_PLANTA, ID_PROP);
+
+      await expect(
+        service.aplicar({
+          recurso: 'plantas', registro_id: ID_PLANTA, operacao: 'desvincular' as 'upsert',
+          versao: '99', origem: 'nexon', payload: await payloadReal('Nao era para gravar'),
+        }),
+      ).rejects.toThrow(/operação desconhecida/);
+      expect((await prisma.plantas.findUnique({ where: { id: ID_PLANTA } }))?.nome).toBe('Planta sync');
+    });
+  });
+
   describe('dependencia', () => {
     it('recusa nomeando o que falta, em vez de arrastar junto', async () => {
       const r = await service.aplicar({
