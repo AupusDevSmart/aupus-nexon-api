@@ -30,6 +30,18 @@ export class ProprietarioBasico {
   @ApiProperty({ required: false, example: 'GO' })
   estado?: string;
 
+  @ApiProperty({ required: false, example: 'Rua 10, 250, Centro' })
+  endereco?: string;
+
+  @ApiProperty({ required: false, example: '75900-000' })
+  cep?: string;
+
+  @ApiProperty({ required: false, example: '@empresa' })
+  instagram?: string;
+
+  @ApiProperty({ required: false, example: 'Ativo' })
+  status?: string;
+
   @ApiProperty({ required: false, example: 'proprietario', description: 'Papel do usuário' })
   role?: string;
 
