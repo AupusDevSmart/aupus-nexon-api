@@ -51,7 +51,7 @@ export class IotCatalogService {
     { id: 'controller', label: 'Controladores TON', types: ['ton1', 'ton2', 'ton3', 'ton4', 'ton1v2', 'ton2v2', 'ton3v2', 'ton4v2'] },
     { id: 'infra', label: 'Infraestrutura', types: ['wifi_router', 'mqtt_broker', 'meter_gateway', 'inverter_datalogger', 'conversor'] },
     { id: 'device', label: 'Dispositivos', types: ['inversor', 'power_meter', 'medidor_comum', 'rele_protecao'] },
-    { id: 'irrigacao', label: 'Irrigação / Bomba', types: ['pivo', 'bomba'] },
+    { id: 'irrigacao', label: 'Irrigação / Bomba', types: ['pivo', 'encoder', 'bomba'] },
     { id: 'carregador', label: 'Carregador Elétrico', types: ['carregador'] },
   ];
 

@@ -3,6 +3,7 @@ import { Prisma, PrismaService, PermissionScopeService, ScopedUser } from '@/cor
 import { novoId26 } from '../../core/common/cliente-info';
 import { colunaTrilhaAusente } from '../logs-mqtt/logs-mqtt-filtros';
 import { PivoConfigDto, ProgramacaoPivoDto } from './dto/pivos.dto';
+import { brutoDoEncoder } from './pivo-posicao.util';
 import { capacidades, isGlobal, MSG_SOMENTE_LEITURA, papelCanonico } from '../../core/modules/auth/papeis';
 import {
   agruparConjugados,
@@ -89,6 +90,10 @@ export class PivosService {
         tempo_volta_100: num(parametros.tempo_volta_100),
         percentimetro_ciclo_s: num(parametros.percentimetro_ciclo_s),
         correcao_angulo_zero: num(parametros.correcao_angulo_zero),
+        encoder_equipamento_id: typeof parametros.encoder_equipamento_id === 'string' && parametros.encoder_equipamento_id.trim()
+          ? parametros.encoder_equipamento_id.trim() : null,
+        encoder_resolucao: num(parametros.encoder_resolucao),
+        encoder_invertido: parametros.encoder_invertido === true,
         direcionamento: parametros.direcionamento === 'fisico' ? 'fisico' : 'valvula',
         valvula_ton_id: typeof parametros.valvula_ton_id === 'string' ? parametros.valvula_ton_id : null,
         valvula_bo: num(parametros.valvula_bo),
@@ -121,6 +126,14 @@ export class PivosService {
           throw new BadRequestException('A motobomba tem de ser da mesma instalação do pivô');
         }
       }
+    }
+    // Encoder: equipamento da MESMA instalação do pivô (escopo do dono).
+    const encId = dto.parametros?.encoder_equipamento_id;
+    if (typeof encId === 'string' && encId.trim()) {
+      const enc = await this.carregarEquipamento(encId, user);
+      if (enc.id === eq.id) throw new BadRequestException('O pivô não pode ser o próprio encoder');
+      if (enc.unidade_id !== eq.unidade_id) throw new BadRequestException('O encoder tem de ser da mesma instalação do pivô');
+      if (dto.parametros) dto.parametros.encoder_equipamento_id = enc.id;
     }
     const bloqueio = dto.bloqueio_ponta ? janelaOuPadrao(dto.bloqueio_ponta, PONTA_PADRAO) : atual.bloqueio_ponta;
     const reservado = dto.reservado ? janelaOuPadrao(dto.reservado, RESERVADO_PADRAO) : atual.reservado;
@@ -164,6 +177,27 @@ export class PivosService {
       } catch { /* trilha nunca derruba a gravação */ }
     }
     return this.getConfig(eq.id, user);
+  }
+
+  /**
+   * Encoders da instalação do pivô (equipamento ENCODER criado pelo diagrama IoT),
+   * com a última leitura bruta, para a Configuração escolher e conferir.
+   */
+  async opcoesEncoder(equipamentoId: string, user?: ScopedUser) {
+    const eq = await this.carregarEquipamento(equipamentoId, user);
+    if (!eq.unidade_id) return [];
+    const rows = await this.prisma.$queryRaw<Array<{ id: string; nome: string; dados: any; ts: Date | null }>>`
+      SELECT TRIM(e.id) AS id, e.nome, d.dados, d.timestamp_dados AS ts
+      FROM equipamentos e
+      LEFT JOIN tipos_equipamentos te ON te.id = e.tipo_equipamento_id
+      LEFT JOIN LATERAL (
+        SELECT dados, timestamp_dados FROM equipamentos_dados x
+        WHERE x.equipamento_id = e.id ORDER BY x.timestamp_dados DESC LIMIT 1
+      ) d ON true
+      WHERE e.unidade_id = ${eq.unidade_id}::bpchar AND e.deleted_at IS NULL
+        AND (te.codigo = 'ENCODER' OR UPPER(TRIM(e.tipo_equipamento)) = 'ENCODER')
+      ORDER BY e.nome`;
+    return rows.map((r) => ({ id: r.id, nome: r.nome?.trim() ?? r.id, bruto: brutoDoEncoder(r.dados), lido_em: r.ts }));
   }
 
   // ==========================================================================

@@ -63,7 +63,7 @@ export function agruparConjugados(linhas: LinhaConjugado[]): GrupoConjugado[] {
 
 /**
  * Parâmetros TÉCNICOS do pivô (só Admin e analistas alteram; proprietário e
- * operador só leem): tempo de volta, pressão mínima, ângulo zero e o
+ * operador só leem): tempo de volta, pressão mínima, ângulo zero, encoder e o
  * direcionamento da água (válvula). Lâmina, bloqueio de ponta e horário
  * reservado são OPERACIONAIS (quem tem acesso ao pivô altera).
  */
@@ -72,6 +72,9 @@ export const PARAMETROS_TECNICOS_PIVO = [
   'tempo_volta_100',
   'percentimetro_ciclo_s',
   'correcao_angulo_zero',
+  'encoder_equipamento_id',
+  'encoder_resolucao',
+  'encoder_invertido',
   'direcionamento',
   'valvula_ton_id',
   'valvula_bo',

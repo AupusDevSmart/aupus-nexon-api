@@ -65,6 +65,15 @@ describe('pivo-config.util', () => {
       expect(camposTecnicosAlterados({}, atual)).toEqual([]);
     });
 
+    it('encoder é técnico; o bloco igual ao gravado (normalizado) não conta', () => {
+      const comEnc = { ...atual, parametros: { ...atual.parametros, encoder_equipamento_id: null, encoder_resolucao: null, encoder_invertido: false } };
+      const dto = { parametros: { lamina_100: 9, encoder_equipamento_id: null, encoder_resolucao: null, encoder_invertido: false } };
+      expect(camposTecnicosAlterados(dto as any, comEnc)).toEqual([]);
+      expect(camposTecnicosAlterados({ parametros: { encoder_equipamento_id: 'ENC1', encoder_resolucao: 8192 } } as any, comEnc))
+        .toEqual(['encoder_equipamento_id', 'encoder_resolucao']);
+      expect(camposTecnicosAlterados({ parametros: { encoder_invertido: true } } as any, comEnc)).toEqual(['encoder_invertido']);
+    });
+
     it('bloco parametros inteiro com técnicos iguais ao gravado não conta', () => {
       expect(camposTecnicosAlterados({ parametros: { ...atual.parametros, lamina_100: 12 } }, atual)).toEqual([]);
       expect(camposTecnicosAlterados({ parametros: { pressao_minima: '2' as any, valvula_bo: undefined } }, atual)).toEqual([]);

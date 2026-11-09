@@ -1604,6 +1604,7 @@ export class IoTService {
         : (ehMedidorSsu(comp) || a966Auto) ? 'cmsyybblg000jjq1qr1na33zz'   // Medidor Concessionária (EQTL001)
         : tipoComp === 'power_meter' ? 'tipo-meter-m160-001'               // categoria Power Meter
         : tipoComp === 'inversor' ? '01JAQTE1INVERSOR000000005'            // categoria Inversor PV
+        : tipoComp === 'encoder' ? '01JAQTE1ENCODER00000000041'            // posição do pivô (2026-11-09_encoder_pivo.sql)
         : undefined;
 
       let equipId: string;

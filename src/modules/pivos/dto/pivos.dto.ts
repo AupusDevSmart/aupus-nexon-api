@@ -69,6 +69,18 @@ export class ParametrosPivoDto {
   @IsOptional() @ValidateIf((_, v) => v !== null) @IsNumber() @Min(-180) @Max(180)
   correcao_angulo_zero?: number | null;
 
+  @ApiPropertyOptional({ description: 'Encoder de posição (equipamento criado pelo diagrama IoT, mesma instalação). null desliga.' })
+  @IsOptional() @ValidateIf((_, v) => v !== null) @IsString() @MaxLength(26)
+  encoder_equipamento_id?: string | null;
+
+  @ApiPropertyOptional({ description: 'Posições por volta do encoder (360, 2048, 4096, 8192…), do código de compra' })
+  @IsOptional() @ValidateIf((_, v) => v !== null) @IsInt() @Min(16) @Max(16_777_216)
+  encoder_resolucao?: number | null;
+
+  @ApiPropertyOptional({ description: 'Encoder conta ao contrário do sentido de Avanço' })
+  @IsOptional() @IsBoolean()
+  encoder_invertido?: boolean;
+
   @ApiPropertyOptional({ enum: ['valvula', 'fisico'], description: 'Sistema conjugado: válvula pelo NexON ou intertravamento físico' })
   @IsOptional() @IsIn(['valvula', 'fisico'])
   direcionamento?: 'valvula' | 'fisico';

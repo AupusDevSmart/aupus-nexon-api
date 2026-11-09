@@ -70,6 +70,12 @@ export class PivosController {
     return this.sequencia.ajustarPercentimetro(id, body ?? {}, user, cliente);
   }
 
+  @Get(':id/encoder/opcoes')
+  @ApiOperation({ summary: 'Encoders da instalação do pivô (criados pelo diagrama IoT) com a última leitura' })
+  opcoesEncoder(@Param('id') id: string, @CurrentUser() user?: any) {
+    return this.service.opcoesEncoder(id, user);
+  }
+
   @Get(':id/bombeamento/opcoes')
   @ApiOperation({ summary: 'Pivôs da planta com a bomba ligada na Topologia (sistema conjugado)' })
   opcoesBombeamento(@Param('id') id: string, @CurrentUser() user?: any) {

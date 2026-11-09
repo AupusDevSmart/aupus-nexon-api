@@ -4,6 +4,7 @@ import { novoId26 } from '../../core/common/cliente-info';
 import { capacidades, MSG_SOMENTE_LEITURA, papelCanonico } from '../../core/modules/auth/papeis';
 import { EquipamentosCmdService } from '../equipamentos-cmd/equipamentos-cmd.service';
 import { FUSO_OPERACAO, JanelaComAtivo, janelaValida, momentoEmSaoPaulo } from '../../shared/util/janela-horario';
+import { anguloDoEncoder, brutoDoEncoder, parametrosEncoder } from './pivo-posicao.util';
 import { dentroDaPonta, duracaoParadaMs, fmtPercentual, Irrigacao, leituraMaisAntiga, mudancasConfig, normalizarIrrigacao, normalizarPercentual, OrigemSequencia, percentualDaLamina, resumoIrrigacao } from './pivo-automacao.util';
 
 /**
@@ -107,6 +108,19 @@ const MSG_CANHAO: Record<ResCanhao, (ligar: boolean, s: number) => string> = {
   sem_leitura: () => 'Canhão: sem leitura do Canhao_ligado — não comandado',
   nao_confirmou: (l, s) => `Canhão não confirmou ${l ? 'ligado' : 'desligado'} em ${s}s`,
 };
+
+/** Posição do pivô para a tela e para a parada por ângulo (ver posicao()). */
+export interface PosicaoPivo {
+  fonte: 'encoder' | 'telemetria';
+  angulo: number | null;
+  /** Ângulo antes da correção do zero (base do "Zerar aqui"). Só com encoder. */
+  angulo_sem_zero: number | null;
+  /** Contagem bruta do encoder. */
+  bruto: number | null;
+  lido_em: Date | null;
+  motivo: string | null;
+  encoder: { equipamento_id: string; resolucao: number | null; invertido: boolean; zero: number } | null;
+}
 
 @Injectable()
 export class PivoSequenciaService implements OnModuleInit {
@@ -355,6 +369,7 @@ export class PivoSequenciaService implements OnModuleInit {
         status: st,
         lido_em: await this.lidoEmPivo(pts),
       },
+      posicao: await this.posicao(id),
       bombeamento: bomba,
       bomba_de: cfg.bomba_de ? { id: cfg.bomba_de, nome: bombaDeNome } : null,
       sequencia_cfg: cfg.sequencia,
@@ -549,15 +564,45 @@ export class PivoSequenciaService implements OnModuleInit {
     return janelaValida(j) ? (j as JanelaComAtivo) : null;
   }
 
-  /** Ângulo lido na telemetria (última leitura até 15 min), ou null. */
+  /** Ângulo atual do pivô (encoder ou telemetria, leitura até 15 min), ou null. */
   async anguloAtual(id: string): Promise<number | null> {
-    const rows = await this.prisma.$queryRaw<Array<{ dados: any }>>`
-      SELECT dados FROM equipamentos_dados WHERE equipamento_id = ${id}::bpchar
-        AND timestamp_dados > now() - interval '15 minutes'
+    return (await this.posicao(id)).angulo;
+  }
+
+  /**
+   * Posição do pivô. Com encoder na Configuração (encoder_equipamento_id): última
+   * leitura do encoder, convertida em ângulo pela resolução, sentido e zero
+   * (pivo-posicao.util). Leitura com mais de 15 min não vale (ângulo null + motivo):
+   * a parada por ângulo e a previsão não podem usar posição velha.
+   * Sem encoder: `angulo` da própria telemetria do pivô (legado).
+   */
+  async posicao(id: string): Promise<PosicaoPivo> {
+    const cfg = await this.prisma.$queryRaw<Array<{ parametros: any }>>`
+      SELECT parametros FROM pivo_config WHERE equipamento_id = ${id}::bpchar LIMIT 1`.catch(() => []);
+    const enc = parametrosEncoder(cfg[0]?.parametros);
+    const deId = enc.equipamentoId ?? id;
+    const rows = await this.prisma.$queryRaw<Array<{ dados: any; ts: Date }>>`
+      SELECT dados, timestamp_dados AS ts FROM equipamentos_dados WHERE equipamento_id = ${deId}::bpchar
       ORDER BY timestamp_dados DESC LIMIT 1`.catch(() => []);
-    const d = rows[0]?.dados;
-    const v = Number(d?.angulo ?? d?.posicao ?? d?.data?.angulo);
-    return d && Number.isFinite(v) ? v : null;
+    const ult = rows[0];
+    const velha = !ult || Date.now() - new Date(ult.ts).getTime() > 15 * 60_000;
+    const lidoEm = ult?.ts ?? null;
+
+    if (!enc.equipamentoId) {
+      const d = ult?.dados;
+      const v = Number(d?.angulo ?? d?.posicao ?? d?.data?.angulo);
+      const ok = !velha && d && Number.isFinite(v);
+      return { fonte: 'telemetria', angulo: ok ? v : null, angulo_sem_zero: null, bruto: null, lido_em: lidoEm, motivo: ok ? null : 'Sem posição na telemetria do pivô', encoder: null };
+    }
+    const encoder = { equipamento_id: enc.equipamentoId, resolucao: enc.resolucao, invertido: enc.invertido, zero: enc.zero };
+    const bruto = brutoDoEncoder(ult?.dados);
+    const semAngulo = (motivo: string) => ({ fonte: 'encoder' as const, angulo: null, angulo_sem_zero: null, bruto, lido_em: lidoEm, motivo, encoder });
+    if (enc.resolucao == null) return semAngulo('Resolução do encoder não configurada');
+    if (!ult) return semAngulo('Encoder ainda sem leitura');
+    if (velha) return semAngulo('Encoder sem leitura há mais de 15 min');
+    if (bruto == null) return semAngulo('Leitura do encoder sem o campo posicao');
+    const a = anguloDoEncoder(bruto, enc)!;
+    return { fonte: 'encoder', angulo: a.angulo, angulo_sem_zero: a.anguloSemZero, bruto, lido_em: lidoEm, motivo: null, encoder };
   }
 
   /** Lâmina a 100 % (mm) e ciclo do percentímetro (s, padrão 60) da Configuração. */
