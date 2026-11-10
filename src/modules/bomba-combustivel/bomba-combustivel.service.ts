@@ -264,6 +264,29 @@ export class BombaCombustivelService {
     return { enviado: topics.length > 0, total: lista.tags.length, versao: lista.versao, topics };
   }
 
+  /**
+   * Rearme pelo NexON: manda `rearme` para as TONs da bomba e devolve o que cada
+   * uma respondeu (`rearme_ociosa` = saiu do bloqueio; `rearme_bloqueada` = a
+   * TON recusou, p.ex. contator ainda fechado). A segurança fica na TON: ela só
+   * rearma com o contator aberto; aqui é só o botão.
+   */
+  async rearmar(bombaId: string, user?: ScopedUser): Promise<{ enviado: boolean; respostas: Array<{ ton: string; status: string; msg?: string }> }> {
+    await this.assertBombaNoEscopo(user, bombaId);
+    const tons = await this.tonsDaBomba(bombaId);
+    if (!tons.length) return { enviado: false, respostas: [] };
+    const respostas: Array<{ ton: string; status: string; msg?: string }> = [];
+    for (const t of tons) {
+      try {
+        const ack = await this.mqtt.publishCommand(t.base, 'rearme', { timeoutMs: 4000, maxAttempts: 2 });
+        respostas.push({ ton: t.nome, status: ack.status, msg: ack.msg });
+      } catch (e) {
+        respostas.push({ ton: t.nome, status: 'timeout', msg: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    this.logger.log(`[posto] rearme ${bombaId}: ${respostas.map((r) => `${r.ton}=${r.status}/${r.msg ?? ''}`).join(', ')}`);
+    return { enviado: true, respostas };
+  }
+
   // ===== Config da bomba =====
   async getConfig(equipamentoId: string, user?: ScopedUser): Promise<any> {
     if (user) await this.assertBombaNoEscopo(user, equipamentoId);

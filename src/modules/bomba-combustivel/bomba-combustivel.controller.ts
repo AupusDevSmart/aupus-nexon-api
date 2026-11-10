@@ -1,7 +1,7 @@
 import { Body, Controller, Delete, ForbiddenException, Get, Param, Post, Put, Query, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard, CurrentUser } from '@/core';
 import { BombaCombustivelService } from './bomba-combustivel.service';
-import { isGlobal, papelCanonico } from '../../core/modules/auth/papeis';
+import { capacidades, isGlobal, papelCanonico } from '../../core/modules/auth/papeis';
 
 /**
  * Posto de Combustível — tags RFID (máquinas), operadores (matrículas), lista de
@@ -83,6 +83,14 @@ export class BombaCombustivelController {
   async putConfig(@Param('id') id: string, @Body() body: any, @CurrentUser() user: any) {
     this.assertAdmin(user);
     return { data: await this.svc.salvarConfig(id, body, user) };
+  }
+
+  // ---- operação ----
+  /** Rearme da bomba bloqueada. Quem comanda (dono/operador no escopo); a TON decide se aceita. */
+  @Post(':id/rearme')
+  async rearme(@Param('id') id: string, @CurrentUser() user: any) {
+    if (!capacidades(papelCanonico(user?.role)).comandar) throw new ForbiddenException('Sem permissão para comandar.');
+    return { data: await this.svc.rearmar(id, user) };
   }
 
   // ---- lista → TON ----
