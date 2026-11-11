@@ -763,7 +763,7 @@ export class EquipamentosCmdService {
       });
       if (cliente?.dispositivo) {
         await this.prisma.$executeRaw`
-          UPDATE logs_mqtt SET dispositivo = ${cliente.dispositivo} WHERE id = ${log.id}`.catch((e) =>
+          UPDATE logs_mqtt SET dispositivo = ${cliente.dispositivo} WHERE id = ${log.id}::bpchar`.catch((e) =>
           this.logger.warn(`[trilha] dispositivo não gravado (SQL da trilha aplicado?): ${(e as Error).message}`),
         );
       }

@@ -61,7 +61,21 @@ export interface AcionarOpts {
   motivo?: string;
   /** desligar da ponta: o que retomar ao fim dela */
   retomar?: { irrigacao: Irrigacao | null; acao: AcaoPivo; restante_ms: number | null } | null;
+  /**
+   * NEXON-98 — "Salvar e enviar" com o pivô LIGADO: desliga (pivô, canhão e bomba), confirma a
+   * parada e liga de novo com a `irrigacao` nova, tudo numa sequência só. Só com girar_*.
+   */
+  reiniciar?: boolean;
+  /**
+   * Reinício sem mexer na Parada: herda a parada em curso. Por tempo (programação) e por voltas
+   * seguem com o que FALTA (o `parar_em` atual, na velocidade nova); por ângulo recalcula do
+   * ângulo atual. Sem isto, a parada enviada vale do zero.
+   */
+  manterParada?: boolean;
 }
+
+/** Descanso entre a parada confirmada e a nova partida no reinício (bomba e painel assentam). */
+const PAUSA_REINICIO_S = 10;
 
 interface Passo { t: string; etapa: string; msg: string; ok: boolean | null }
 type Autor = ScopedUser & { nome?: string };
@@ -430,6 +444,8 @@ export class PivoSequenciaService implements OnModuleInit {
       throw new BadRequestException('Ação inválida (girar_direita | girar_esquerda | desligar).');
     }
     const origem: OrigemSequencia = opts.origem ?? 'manual';
+    const reiniciar = opts.reiniciar === true;
+    if (reiniciar && acao === 'desligar') throw new BadRequestException('Reiniciar vale só para girar_direita | girar_esquerda.');
     const id = await this.assertPivo(pivoId, user);
     const eq = await this.prisma.equipamentos.findFirst({ where: { id }, select: { nome: true, automacao: true } });
     if (!eq?.automacao) throw new BadRequestException(`"${eq?.nome?.trim()}" não tem automação habilitada.`);
@@ -443,6 +459,21 @@ export class PivoSequenciaService implements OnModuleInit {
     const autorId = user?.id?.trim() || opts.responsavelId?.trim() || null;
     let irrigacao = acao === 'desligar' ? null : normalizarIrrigacao(opts.irrigacao);
     if (irrigacao) irrigacao.config.direcao = acao === 'girar_direita' ? 'Avanço' : 'Reverso';
+    let antesDoReinicio: Irrigacao | null = null;
+    let restanteParadaMs: number | null | undefined;   // undefined = calcula do zero na partida
+    if (reiniciar) {
+      if (!irrigacao) throw new BadRequestException('Reiniciar precisa das novas opções da irrigação.');
+      // Reinício é sempre agora: início futuro viraria agendamento com o pivô ainda girando.
+      if (irrigacao.inicio && new Date(irrigacao.inicio).getTime() - Date.now() > 60000) {
+        throw new BadRequestException('Reiniciar é sempre agora: não aceita início agendado.');
+      }
+      irrigacao = { ...irrigacao, inicio: null };
+      // Sem um jeito de PARAR o pivô (ponto Desligar ou saídas mantidas) não há reinício: a
+      // sequência desligaria a bomba e mandaria girar com o pivô ainda girando.
+      if (!pts.cmd.desligar && !(cfg.sequencia.comandos_mantidos && (pts.cmd.direita || pts.cmd.esquerda))) {
+        throw new BadRequestException('Este pivô não tem o comando Desligar cadastrado (ponto ligado a uma BO): desligue no painel e ligue de novo com as novas opções.');
+      }
+    }
     // Lâmina pedida → percentímetro (o servidor é quem calcula, com a lâmina a 100 % do cadastro).
     if (irrigacao?.config.lamina && !irrigacao.config.semAgua) {
       const { lamina100 } = await this.parametrosPercentimetro(id);
@@ -485,11 +516,34 @@ export class PivoSequenciaService implements OnModuleInit {
         return { sequencia_id: seqId, status: 'agendada', inicio_em: ini.toISOString() };
       }
       if (irrigacao) irrigacao = { ...irrigacao, inicio: null };
+      // Sequência anterior já concluída, só limpando o percentímetro: espera o ack ANTES da
+      // trava — assim ela confere o pivô como ficou (um reinício logo após o Desligar não religa).
+      for (let i = 0; i < 60 && this.rodando.get(id)?.finalizando; i++) await this.sleep(250);
+      if (this.rodando.has(id)) throw new ConflictException('Já existe uma sequência em andamento neste pivô. Use Desligar para interromper.');
       // TRAVA: só liga (ou inverte o sentido) com o pivô PARADO. Vale na hora de ligar —
       // o agendamento acima é conferido de novo quando disparar.
-      if (!this.rodando.has(id)) {
-        const motivoNao = await this.travaLigar(id, pts);
-        if (motivoNao) throw new ConflictException(motivoNao);
+      // Reinício é o contrário: só com o pivô LIGADO (parado, é um Ligar comum).
+      const motivoNao = reiniciar ? await this.travaReiniciar(id, pts) : await this.travaLigar(id, pts);
+      if (motivoNao) throw new ConflictException(motivoNao);
+      if (reiniciar && irrigacao) {
+        const ativa = await this.irrigacaoAtiva(id);
+        antesDoReinicio = ativa?.irrigacao ?? null;
+        const pa = antesDoReinicio?.parada;
+        // Parada não alterada: o reinício não pode apagar a parada automática em curso.
+        if (opts.manterParada && pa && pa.tipo !== 'semParar') {
+          irrigacao = { ...irrigacao, parada: pa, programacao: antesDoReinicio?.programacao ?? irrigacao.programacao ?? null };
+          const resta = ativa?.parar_em ? new Date(ativa.parar_em).getTime() - Date.now() : null;
+          if (pa.tipo === 'porTempo') {
+            // o que falta do tempo; já vencido, para em 1 min (o tick ia desligar agora)
+            if (resta != null) restanteParadaMs = Math.max(60000, resta);
+          } else if (pa.tipo === 'porVoltas' && resta != null && resta > 0) {
+            // o que falta percorrer, na velocidade nova (seco anda a 100 %; 0 % não chega)
+            const vAntes = antesDoReinicio!.config.semAgua ? 100 : antesDoReinicio!.config.percentual;
+            const vNovo = irrigacao.config.semAgua ? 100 : irrigacao.config.percentual;
+            if (vAntes > 0) restanteParadaMs = vNovo > 0 ? Math.round(resta * (vAntes / vNovo)) : null;
+          }
+          // por ângulo: a partida recalcula do ângulo atual, no sentido novo
+        }
       }
     }
 
@@ -502,17 +556,27 @@ export class PivoSequenciaService implements OnModuleInit {
       for (let i = 0; i < 40 && this.rodando.has(id); i++) await this.sleep(250);
     }
 
+    // Reserva a trava ANTES de gravar (sem await entre conferir e reservar): dois pedidos
+    // juntos (duplo clique, dois operadores) não rodam duas sequências no mesmo pivô.
     const seqId = novoId26();
-    await this.prisma.$executeRaw`
-      INSERT INTO pivo_sequencias (id, equipamento_id, acao, status, usuario_id, origem, irrigacao, retomar)
-      VALUES (${seqId}, ${id}::bpchar, ${acao}, 'executando', ${autorId}, ${origem},
-        ${irrigacao ? JSON.stringify(irrigacao) : null}::jsonb, ${opts.retomar ? JSON.stringify(opts.retomar) : null}::jsonb)`;
-    await this.trilha(id, acao === 'desligar'
-      ? `Desligar${opts.motivo ? ` · ${opts.motivo}` : ''}`
-      : `Ligar · ${resumoIrrigacao(irrigacao)}${opts.motivo ? ` · ${opts.motivo}` : ''}`, autorId, origem);
     const ctl = { seqId, cancelar: false };
     this.rodando.set(id, ctl);
-    void this.executar(id, acao, ctl, user, cliente, irrigacao).finally(() => {
+    try {
+      await this.prisma.$executeRaw`
+        INSERT INTO pivo_sequencias (id, equipamento_id, acao, status, usuario_id, origem, irrigacao, retomar)
+        VALUES (${seqId}, ${id}::bpchar, ${acao}, 'executando', ${autorId}, ${origem},
+          ${irrigacao ? JSON.stringify(irrigacao) : null}::jsonb, ${opts.retomar ? JSON.stringify(opts.retomar) : null}::jsonb)`;
+      await this.trilha(id, acao === 'desligar'
+        ? `Desligar${opts.motivo ? ` · ${opts.motivo}` : ''}`
+        : reiniciar
+          // Trilha do reinício: o que estava girando → o que passa a valer (busca por "Reiniciar").
+          ? `Reiniciar com novas opções · ${resumoIrrigacao(antesDoReinicio)} → ${resumoIrrigacao(irrigacao)}${opts.motivo ? ` · ${opts.motivo}` : ''}`
+          : `Ligar · ${resumoIrrigacao(irrigacao)}${opts.motivo ? ` · ${opts.motivo}` : ''}`, autorId, origem, 'INFO', cliente?.dispositivo);
+    } catch (e) {
+      if (this.rodando.get(id) === ctl) this.rodando.delete(id);
+      throw e;
+    }
+    void this.executar(id, acao, ctl, user, cliente, irrigacao, { reiniciar, restanteParadaMs }).finally(() => {
       if (this.rodando.get(id) === ctl) this.rodando.delete(id);
     });
     return { sequencia_id: seqId, status: 'executando' };
@@ -543,6 +607,19 @@ export class PivoSequenciaService implements OnModuleInit {
     if (t.estado === 'desconhecido') return 'Sem leitura do status do pivô (entradas da TON): não dá para confirmar que está parado.';
     // Sem entradas de status: vale o que o NexON comandou.
     if (t.estado === 'sem_status' && (await this.irrigacaoAtiva(id))) return 'O pivô já está ligado. Desligue antes de ligar de novo ou inverter o sentido.';
+    return null;
+  }
+
+  /**
+   * null = pode reiniciar (desligar e ligar de novo com outras opções); senão o motivo.
+   * Só com o pivô LIGADO: girando pelo status da TON ou, sem entradas de status, com a
+   * irrigação que o NexON comandou em curso.
+   */
+  private async travaReiniciar(id: string, pts: { st: Partial<Record<string, { ton_id: string; bi: number; inv: boolean }>> }): Promise<string | null> {
+    const t = await this.estadoTrava(pts);
+    if (t.erro === 1) return 'Pivô sinalizando ERRO — verifique no painel antes de reiniciar.';
+    if (t.estado === 'desconhecido') return 'Sem leitura do status do pivô (entradas da TON): não dá para confirmar que está ligado.';
+    if (t.estado === 'parado' || (t.estado === 'sem_status' && !(await this.irrigacaoAtiva(id)))) return 'O pivô não está ligado. Use Ligar.';
     return null;
   }
 
@@ -808,31 +885,38 @@ export class PivoSequenciaService implements OnModuleInit {
    * Trilha (audit log) da automação do pivô em logs_mqtt tipo 'comando',
    * comando_semantico 'pivo.<origem>' — busca por equipamento, autor e origem.
    */
-  async trilha(id: string, mensagem: string, usuarioId: string | null, origem: OrigemSequencia, severidade = 'INFO') {
+  async trilha(id: string, mensagem: string, usuarioId: string | null, origem: OrigemSequencia, severidade = 'INFO', dispositivo?: string | null) {
     const rotulo: Record<OrigemSequencia, string> = {
       manual: '', agendada: 'Agendamento', programacao: 'Programação', ponta: 'Horário de ponta', ponta_retomada: 'Fim da ponta', parada: 'Parada automática',
     };
     try {
-      await this.prisma.logs_mqtt.create({
+      const log = await this.prisma.logs_mqtt.create({
         data: {
           tipo: 'comando', equipamento_id: id, severidade, status: 'gravado',
           mensagem: `${rotulo[origem] ? `${rotulo[origem]}: ` : ''}${mensagem}`.slice(0, 500),
           usuario_id: usuarioId, comando_semantico: `pivo.${origem}`,
         },
       });
+      // Aparelho de quem comandou (web, app), como nas linhas de comando do equipamentos-cmd.
+      if (dispositivo && log?.id != null) {
+        await this.prisma.$executeRaw`UPDATE logs_mqtt SET dispositivo = ${dispositivo} WHERE id = ${log.id}::bpchar`.catch((e) =>
+          this.logger.warn(`[pivo-trilha] dispositivo não gravado: ${(e as Error).message}`));
+      }
     } catch (e: any) {
       this.logger.warn(`[pivo-trilha] ${id}: ${e?.message}`);
     }
   }
 
   // ------------------------------------------------------------------ execução
-  private async executar(id: string, acao: AcaoPivo, ctl: { seqId: string; cancelar: boolean; finalizando?: boolean }, user?: Autor, cliente?: ClienteInfo, irr: Irrigacao | null = null) {
+  private async executar(id: string, acao: AcaoPivo, ctl: { seqId: string; cancelar: boolean; finalizando?: boolean }, user?: Autor, cliente?: ClienteInfo, irr: Irrigacao | null = null,
+    extra: { reiniciar?: boolean; restanteParadaMs?: number | null } = {}) {
+    const reiniciar = extra.reiniciar === true;
     const passos: Passo[] = [];
     const passo = async (etapa: string, msg: string, ok: boolean | null) => {
       passos.push({ t: new Date().toISOString(), etapa, msg, ok });
       await this.prisma.$executeRaw`UPDATE pivo_sequencias SET passos = ${JSON.stringify(passos)}::jsonb WHERE id = ${ctl.seqId}`;
     };
-    const fim = async (status: 'concluida' | 'falhou' | 'interrompida', erro?: string) => {
+    const fim = async (status: 'concluida' | 'falhou' | 'interrompida' | 'cancelada', erro?: string) => {
       await this.prisma.$executeRaw`
         UPDATE pivo_sequencias SET status = ${status}, erro = ${erro ?? null}, finished_at = now(),
           passos = ${JSON.stringify(passos)}::jsonb WHERE id = ${ctl.seqId}`;
@@ -840,6 +924,9 @@ export class PivoSequenciaService implements OnModuleInit {
     const msgErro = (e: any) => e?.response?.message || e?.message || String(e);
     let percEnviado = false;   // percentímetro já configurado na TON nesta partida
     let desligarEnviado = false;   // Desligar do pivô já mandado (a bomba de pontos para junto)
+    // Reinício: em que ponto a sequência está, para o catch saber o que desfazer/completar.
+    let faseReinicio: 'antes' | 'parando' | 'depois' = 'antes';
+    let paradaEnviada = false;     // algum comando de parada chegou ao pivô
 
     try {
       const cfg = await this.lerConfig(id);
@@ -847,24 +934,30 @@ export class PivoSequenciaService implements OnModuleInit {
       const b = cfg.bombeamento;
 
       const mant = cfg.sequencia.comandos_mantidos;
-      if (acao === 'desligar') {
+      /**
+       * O Desligar inteiro: para o pivô, desliga o canhão e a bomba. Devolve a confirmação da
+       * parada — true = parado, false = não confirmou no tempo, null = sem status para confirmar.
+       */
+      const parar = async (): Promise<boolean | null> => {
+        let parou: boolean | null = null;
         if (mant && (pts.cmd.direita || pts.cmd.esquerda)) {
           // Saídas mantidas: baixa as BOs de giro (o pivô para); a bomba desliga em desligarBomba.
           for (const k of ['direita', 'esquerda'] as const) {
-            if (pts.cmd[k]) await this.saidaMantida(id, pts.cmd[k], false, `Girar ${k} desligado`, user, cliente);
+            if (pts.cmd[k]) { await this.saidaMantida(id, pts.cmd[k], false, `Girar ${k} desligado`, user, cliente); paradaEnviada = true; }
           }
           await passo('pivo', 'Saídas de giro desligadas', true);
-          const parou = await this.esperar(async () => {
+          parou = await this.esperar(async () => {
             const t = await this.estadoTrava(pts);
             return t.estado === 'sem_status' ? null : t.estado === 'parado';
           }, cfg.sequencia.confirma_giro_s, ctl);
           await passo('pivo', parou === null ? 'Pivô sem status cadastrado — sem confirmação' : parou ? 'Pivô parado' : 'Pivô não confirmou parada no tempo', parou !== false);
         } else if (pts.cmd.desligar) {
           await this.cmd.acionarPonto(id, pts.cmd.desligar, user, false, undefined, cliente);
+          paradaEnviada = true;
           await passo('pivo', 'Comando Desligar enviado ao pivô', true);
           // Mesma regra das travas: parado = Desligado = 1 ou todos os Girando LIGADOS em 0
           // (pivô com só um Girando cadastrado também confirma).
-          const parou = await this.esperar(async () => {
+          parou = await this.esperar(async () => {
             const t = await this.estadoTrava(pts);
             return t.estado === 'sem_status' ? null : t.estado === 'parado';
           }, cfg.sequencia.confirma_giro_s, ctl);
@@ -876,6 +969,10 @@ export class PivoSequenciaService implements OnModuleInit {
           await passo('canhao', MSG_CANHAO[r](false, cfg.sequencia.confirma_giro_s), r === 'ok' || r === 'ja');
         }
         if (b) await this.desligarBomba(id, b, passo, user, cliente, !!pts.cmd.desligar);
+        return parou;
+      };
+      if (acao === 'desligar') {
+        await parar();
         await fim('concluida');
         ctl.finalizando = true;
         // `perc off` depois de concluir: com o Girando em 0 a TON já cortou a BO sozinha, o
@@ -887,6 +984,34 @@ export class PivoSequenciaService implements OnModuleInit {
             .catch((x) => passo('percentimetro', `Percentímetro não desligou: ${msgErro(x)}`, false));
         }
         return;
+      }
+
+      // ---- reiniciar (NEXON-98): o Desligar inteiro e, só com a parada confirmada, a partida
+      // normal abaixo com as novas opções. Qualquer dúvida sobre o estado NÃO religa — o pivô
+      // fica desligado e a sequência termina em falha, como um Ligar que não partiu.
+      if (reiniciar) {
+        // Sem como parar o pivô, nada é comandado (o acionar já recusa; aqui é a segunda trava).
+        if (!pts.cmd.desligar && !(mant && (pts.cmd.direita || pts.cmd.esquerda))) {
+          throw new Error('Sem comando de parada cadastrado — reinício não executado.');
+        }
+        await passo('reinicio', 'Reinício com novas opções: desligando o pivô', null);
+        faseReinicio = 'parando';
+        const parou = await parar();
+        faseReinicio = 'depois';
+        if (ctl.cancelar) return await this.interrompida(passo, fim);
+        if (parou === false) throw new Error('O pivô não confirmou a parada — não foi religado. Confira o painel e ligue de novo.');
+        // Limpa o percentímetro antigo na TON, como no Desligar (a partida manda o novo).
+        if (pts.cmd.percentimetro) await this.percentimetro(id, pts, 'off', user, cliente).catch(() => undefined);
+        // Com água, a partida confia na leitura "bomba ligada" para pular a pressurização: se a
+        // bomba não confirmou desligada, essa leitura pode ser velha e o pivô giraria a seco.
+        if (b && !irr?.config.semAgua && b.bi_confirma && (await this.bombaLigada(b)) === 1 && !(await this.bombaEmUsoPor(id, b))) {
+          throw new Error('A bomba não confirmou desligada — o pivô não foi religado. Confira o painel e ligue de novo.');
+        }
+        await passo('reinicio', parou === null
+          ? `Sem status de parada — aguardando ${PAUSA_REINICIO_S}s antes de religar`
+          : `Pivô parado — religando em ${PAUSA_REINICIO_S}s com as novas opções`, parou === null ? null : true);
+        for (let i = 0; i < PAUSA_REINICIO_S && !ctl.cancelar; i++) await this.sleep(1000);
+        if (ctl.cancelar) return await this.interrompida(passo, fim);
       }
 
       // ---- girar
@@ -998,7 +1123,10 @@ export class PivoSequenciaService implements OnModuleInit {
       }
       // Parada automática (voltas/tempo/ângulo): o PivoAutomacaoService desliga em parar_em.
       if (irr && irr.parada.tipo !== 'semParar') {
-        const ms = duracaoParadaMs(irr, await this.tempoVolta100(id), await this.anguloAtual(id));
+        // Reinício que herdou a parada em curso: vale o que faltava (não recomeça do zero).
+        const ms = extra.restanteParadaMs !== undefined
+          ? extra.restanteParadaMs
+          : duracaoParadaMs(irr, await this.tempoVolta100(id), await this.anguloAtual(id));
         if (ms != null) {
           const pararEm = new Date(Date.now() + ms);
           await this.prisma.$executeRaw`UPDATE pivo_sequencias SET parar_em = ${pararEm} WHERE id = ${ctl.seqId}`;
@@ -1010,6 +1138,32 @@ export class PivoSequenciaService implements OnModuleInit {
       await fim('concluida');
     } catch (e: any) {
       await passo('erro', msgErro(e), false).catch(() => undefined);
+      const autorTrilha = (user as Autor | undefined)?.id?.trim() || null;
+      // Reinício que falhou ANTES de qualquer comando chegar ao pivô: ele segue girando com a
+      // irrigação anterior. A linha nova sai de cena ('cancelada') para a anterior voltar a
+      // valer — com a parada automática e a pausa de ponta dela.
+      if (reiniciar && faseReinicio !== 'depois' && !paradaEnviada) {
+        await fim('cancelada', `Reinício não executou: ${msgErro(e)}`).catch(() => undefined);
+        await this.trilha(id, `Reinício NÃO executou: ${msgErro(e)} — o pivô segue com a irrigação anterior`, autorTrilha, 'manual', 'ALTA');
+        this.logger.warn(`[pivo-seq] ${id} reinício não executou: ${msgErro(e)}`);
+        return;
+      }
+      // Reinício que falhou NO MEIO da parada: completa o desligamento no que der (giro e
+      // bomba) em vez de deixar pivô parado com bomba ligada, ou meio comandado.
+      if (reiniciar && faseReinicio === 'parando') {
+        const ptsR = await this.pontos(id).catch(() => null);
+        const cfgR = await this.lerConfig(id).catch(() => null);
+        if (ptsR && cfgR?.sequencia.comandos_mantidos) {
+          for (const k of ['direita', 'esquerda'] as const) {
+            if (ptsR.cmd[k]) await this.saidaMantida(id, ptsR.cmd[k], false, `Girar ${k} desligado`, user, cliente).catch(() => undefined);
+          }
+        }
+        if (cfgR?.bombeamento) await this.desligarBomba(id, cfgR.bombeamento, passo, user, cliente, !!ptsR?.cmd.desligar).catch(() => undefined);
+        await fim('falhou', msgErro(e)).catch(() => undefined);
+        await this.trilha(id, `Reinício falhou no meio da parada: ${msgErro(e)} — confira o pivô e a bomba no painel`, autorTrilha, 'manual', 'ALTA');
+        this.logger.warn(`[pivo-seq] ${id} reinício falhou na parada: ${msgErro(e)}`);
+        return;
+      }
       // Giro não confirmado: o comando pode ter ido (retorno atrasado/perdido) e o pivô
       // estar girando sem a sequência saber — sem parada programada e, com a bomba
       // desligada abaixo, a seco. Volta ao estado conhecido: manda Desligar ao pivô.
@@ -1039,6 +1193,8 @@ export class PivoSequenciaService implements OnModuleInit {
         if (cfg?.bombeamento) await this.desligarBomba(id, cfg.bombeamento, passo, user, cliente, desligarEnviado).catch(() => undefined);
       }
       await fim('falhou', msgErro(e)).catch(() => undefined);
+      // Reinício que parou o pivô e não religou: fica na trilha (busca por "Reinício").
+      if (reiniciar) await this.trilha(id, `Reinício não religou o pivô: ${msgErro(e)}`, autorTrilha, 'manual', 'ALTA');
       this.logger.warn(`[pivo-seq] ${id} ${acao} falhou: ${msgErro(e)}`);
     }
   }

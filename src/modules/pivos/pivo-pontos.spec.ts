@@ -226,6 +226,150 @@ describe('saídas mantidas (sequencia.comandos_mantidos)', () => {
     expect(acionados).toEqual([]);
   });
 
+  // NEXON-98 — "Salvar e enviar" com o pivô ligado: desliga inteiro e só então liga com as novas opções.
+  it('reiniciar: o Desligar inteiro primeiro, depois a partida no novo sentido', async () => {
+    const { svc, saidas } = mantido({ 'T:2': 1, 'T:3': 0 });
+    await svc.executar('PIV', 'girar_esquerda', { seqId: 'S', cancelar: false }, undefined, undefined, null, { reiniciar: true });
+    expect(saidas).toEqual(['r2 desliga', 'r3 desliga', 'r6 desliga', 'r1 desliga', 'r1 liga', 'r2 desliga', 'r3 liga']);
+    const status = svc.prisma.$executeRaw.mock.calls.map((c: unknown[]) => c[1]);
+    expect(status).toContain('concluida');
+    expect(status).not.toContain('falhou');
+  });
+
+  it('reiniciar: parada não confirmada NÃO religa e a sequência falha', async () => {
+    const entradas: Record<string, number | null> = { 'T:2': 1, 'T:3': 0 };
+    const { svc } = mantido(entradas);
+    const saidas: string[] = [];
+    // o pivô não responde: o Girando continua em 1 depois de baixar a saída
+    svc.cmd.acionarBoDireto = jest.fn(async (p: { bo: number; modo: string }) => { saidas.push(`r${p.bo} ${p.modo}`); });
+    const seq = { pressurizacao_s: 0, confirma_giro_s: 0, confirma_bomba_s: 0, comandos_mantidos: true };
+    svc.lerConfig = async () => ({ bombeamento: await svc.bombaDosPontos('PIV'), bomba_de: null, sequencia: seq });
+    await svc.executar('PIV', 'girar_esquerda', { seqId: 'S', cancelar: false }, undefined, undefined, null, { reiniciar: true });
+    expect(saidas.filter((x) => x.endsWith(' liga'))).toEqual([]);
+    const chamadas = svc.prisma.$executeRaw.mock.calls as unknown[][];
+    expect(chamadas.some((c) => c[1] === 'falhou' && /não confirmou a parada/.test(String(c[2])))).toBe(true);
+  });
+
+  it('reiniciar: Desligar no meio interrompe e não religa', async () => {
+    const { svc, saidas } = mantido({ 'T:2': 1, 'T:3': 0 });
+    const ctl = { seqId: 'S', cancelar: false };
+    const base = svc.cmd.acionarBoDireto;
+    // o operador manda Desligar enquanto o reinício ainda está parando o pivô
+    svc.cmd.acionarBoDireto = jest.fn(async (p: { bo: number; modo: string }) => { await base(p); ctl.cancelar = true; });
+    await svc.executar('PIV', 'girar_esquerda', ctl, undefined, undefined, null, { reiniciar: true });
+    expect(saidas.filter((x) => x.endsWith(' liga'))).toEqual([]);
+    expect(svc.prisma.$executeRaw.mock.calls.map((c: unknown[]) => c[1])).toContain('interrompida');
+  });
+
+  it('reiniciar: se nem o primeiro comando de parada chega, a linha é cancelada e o pivô segue como estava', async () => {
+    const { svc } = mantido({ 'T:2': 1, 'T:3': 0 });
+    const saidas: string[] = [];
+    svc.cmd.acionarBoDireto = jest.fn(async (p: { bo: number; modo: string }) => { saidas.push(`r${p.bo} ${p.modo}`); throw new Error('TON não respondeu'); });
+    svc.trilha = jest.fn(async () => undefined);
+    await svc.executar('PIV', 'girar_esquerda', { seqId: 'S', cancelar: false }, undefined, undefined, null, { reiniciar: true });
+    expect(saidas).toEqual(['r2 desliga']);   // tentou parar e parou por aí: nada de bomba nem de religar
+    const status = svc.prisma.$executeRaw.mock.calls.map((c: unknown[]) => c[1]);
+    expect(status).toContain('cancelada');
+    expect(status).not.toContain('falhou');
+    expect(svc.trilha).toHaveBeenCalledWith('PIV', expect.stringMatching(/Reinício NÃO executou.*segue com a irrigação anterior/), null, 'manual', 'ALTA');
+  });
+
+  it('reiniciar: parada herdada vale o que faltava, não recomeça do zero', async () => {
+    const { svc } = mantido({ 'T:2': 1, 'T:3': 0 });
+    const irr = { modo: 'simples', config: { direcao: 'Reverso', percentual: 50, semAgua: true, canhao: false }, parada: { tipo: 'porVoltas', voltas: 1 } };
+    const antes = Date.now();
+    await svc.executar('PIV', 'girar_esquerda', { seqId: 'S', cancelar: false }, undefined, undefined, irr, { reiniciar: true, restanteParadaMs: 3600000 });
+    const pararEm = (svc.prisma.$executeRaw.mock.calls as unknown[][]).map((c) => c[1]).find((v) => v instanceof Date) as Date;
+    expect(pararEm.getTime() - antes).toBeGreaterThanOrEqual(3600000);
+    expect(pararEm.getTime() - antes).toBeLessThan(3600000 + 60000);   // 1 volta do zero seriam 21 h
+  });
+
+  describe('acionar com reiniciar', () => {
+    const NOVA = { modo: 'simples', config: { direcao: 'Reverso', percentual: 80, semAgua: false, canhao: false }, parada: { tipo: 'semParar' } };
+    function acionavel(entradas: Record<string, number | null>, ativa: unknown = null) {
+      const m = mantido(entradas);
+      m.svc.assertPivo = async () => 'PIV';
+      m.svc.prisma.equipamentos = { findFirst: async () => ({ nome: 'Pivô 1', automacao: true }) };
+      m.svc.lerPonta = async () => null;
+      m.svc.irrigacaoAtiva = jest.fn(async () => ativa);
+      m.svc.trilha = jest.fn(async () => undefined);
+      m.svc.executar = jest.fn(async () => undefined);
+      return m;
+    }
+
+    it('pivô parado: recusa (é um Ligar comum) e nada executa', async () => {
+      const { svc } = acionavel({ 'T:2': 0, 'T:3': 0 });
+      await expect(svc.acionar('PIV', 'girar_esquerda', undefined, undefined, { irrigacao: NOVA, reiniciar: true })).rejects.toThrow(/não está ligado/);
+      expect(svc.executar).not.toHaveBeenCalled();
+    });
+
+    it('recusa início agendado, falta das opções e o desligar', async () => {
+      const { svc } = acionavel({ 'T:2': 1, 'T:3': 0 });
+      const futuro = new Date(Date.now() + 3600000).toISOString();
+      await expect(svc.acionar('PIV', 'girar_esquerda', undefined, undefined, { irrigacao: { ...NOVA, inicio: futuro }, reiniciar: true })).rejects.toThrow(/sempre agora/);
+      await expect(svc.acionar('PIV', 'girar_esquerda', undefined, undefined, { reiniciar: true })).rejects.toThrow(/novas opções/);
+      await expect(svc.acionar('PIV', 'desligar', undefined, undefined, { reiniciar: true })).rejects.toThrow(/só para girar/);
+      expect(svc.executar).not.toHaveBeenCalled();
+    });
+
+    it('sem jeito de parar o pivô (sem Desligar e sem saídas mantidas): recusa antes de qualquer comando', async () => {
+      const { svc, saidas } = acionavel({ 'T:2': 1, 'T:3': 0 });
+      const seq = { pressurizacao_s: 0, confirma_giro_s: 5, confirma_bomba_s: 5, comandos_mantidos: false };
+      svc.lerConfig = async () => ({ bombeamento: null, bomba_de: null, sequencia: seq });
+      await expect(svc.acionar('PIV', 'girar_esquerda', undefined, undefined, { irrigacao: NOVA, reiniciar: true })).rejects.toThrow(/Desligar cadastrado/);
+      expect(saidas).toEqual([]);
+      expect(svc.executar).not.toHaveBeenCalled();
+    });
+
+    it('girando: grava a trilha antes → depois e executa com reiniciar', async () => {
+      const ativa = { id: 'A', acao: 'girar_direita', irrigacao: { modo: 'simples', config: { direcao: 'Avanço', percentual: 60, semAgua: false, canhao: false }, parada: { tipo: 'semParar' } }, parar_em: null };
+      const { svc } = acionavel({ 'T:2': 1, 'T:3': 0 }, ativa);
+      const r = await svc.acionar('PIV', 'girar_esquerda', { id: 'U1' }, { dispositivo: 'Chrome no Windows' }, { irrigacao: NOVA, reiniciar: true });
+      expect(r.status).toBe('executando');
+      expect(svc.trilha).toHaveBeenCalledWith('PIV', expect.stringMatching(/^Reiniciar com novas opções · Direita · 60% .* → Esquerda · 80%/), 'U1', 'manual', 'INFO', 'Chrome no Windows');
+      expect(svc.executar.mock.calls[0][6]).toEqual({ reiniciar: true, restanteParadaMs: undefined });
+    });
+
+    it('manterParada: parada por tempo da programação segue com o que falta', async () => {
+      const ativa = {
+        id: 'A', acao: 'girar_direita', parar_em: new Date(Date.now() + 30 * 60000),
+        irrigacao: { modo: 'programacao', config: { direcao: 'Avanço', percentual: 60, semAgua: false, canhao: false }, parada: { tipo: 'porTempo', minutos: 480 }, programacao: { id: 'P', nome: 'Noite' } },
+      };
+      const { svc } = acionavel({ 'T:2': 1, 'T:3': 0 }, ativa);
+      await svc.acionar('PIV', 'girar_esquerda', undefined, undefined, { irrigacao: NOVA, reiniciar: true, manterParada: true });
+      const [, , , , , irr, extra] = svc.executar.mock.calls[0];
+      expect(irr.parada).toEqual({ tipo: 'porTempo', minutos: 480 });
+      expect(irr.programacao).toEqual({ id: 'P', nome: 'Noite' });
+      expect(extra.restanteParadaMs).toBeGreaterThan(29 * 60000);
+      expect(extra.restanteParadaMs).toBeLessThanOrEqual(30 * 60000);
+    });
+
+    it('manterParada: por voltas, o que falta anda na velocidade nova', async () => {
+      const ativa = {
+        id: 'A', acao: 'girar_direita', parar_em: new Date(Date.now() + 60 * 60000),
+        irrigacao: { modo: 'simples', config: { direcao: 'Avanço', percentual: 40, semAgua: false, canhao: false }, parada: { tipo: 'porVoltas', voltas: 1 } },
+      };
+      const { svc } = acionavel({ 'T:2': 1, 'T:3': 0 }, ativa);
+      await svc.acionar('PIV', 'girar_esquerda', undefined, undefined, { irrigacao: NOVA, reiniciar: true, manterParada: true });
+      const extra = svc.executar.mock.calls[0][6];
+      // 60 min a 40 % → 30 min a 80 %
+      expect(Math.round(extra.restanteParadaMs / 60000)).toBe(30);
+    });
+
+    it('dois pedidos juntos: só um vira sequência', async () => {
+      const { svc } = acionavel({ 'T:2': 1, 'T:3': 0 });
+      let soltar: () => void = () => undefined;
+      svc.executar = jest.fn(() => new Promise<void>((ok) => { soltar = ok; }));
+      const r = await Promise.allSettled([
+        svc.acionar('PIV', 'girar_esquerda', undefined, undefined, { irrigacao: NOVA, reiniciar: true }),
+        svc.acionar('PIV', 'girar_esquerda', undefined, undefined, { irrigacao: NOVA, reiniciar: true }),
+      ]);
+      soltar();
+      expect(r.map((x) => x.status).sort()).toEqual(['fulfilled', 'rejected']);
+      expect(svc.executar).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('canhão sem status: a saída é o canhão (enviado, sem confirmação)', async () => {
     const { svc, saidas } = mantido({});
     expect(await svc.aplicarCanhao('PIV', await svc.pontos('PIV'), true, undefined, undefined, 5)).toBe('enviado');
