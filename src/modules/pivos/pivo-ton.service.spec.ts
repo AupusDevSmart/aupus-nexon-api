@@ -116,6 +116,19 @@ describe('PivoTonService', () => {
     expect(cmds.filter((c) => /^pivo io/.test(c))).toHaveLength(1);
   });
 
+  it('satélite (sem eventos): os passos saem do código de passo do status', async () => {
+    const { svc } = montar(LAB, respostaPadrao);
+    const alvo = (await svc.alvo('PIV'))!;
+    const e = exec('SEQ00000000000000000000GGGG', 'girar_esquerda', IRR({ tipo: 'porTempo', minutos: 30 }));
+    const st = (e_: number, p: number) => ({ e: e_, p, f: '', d: 'E', a: 1, pm: -1, an: null, pc: 0, al: -1, sg: -1, bi: 0, bo: 0, c: 1 });
+    setTimeout(() => svc.receberStatus('T', st(1, 2)), 200);
+    setTimeout(() => svc.receberStatus('T', st(1, 3)), 1000);
+    setTimeout(() => svc.receberStatus('T', st(2, 0)), 1800);
+    await svc.executar(e.x as any, alvo);
+    expect(e.passos.filter((m) => /Bombeamento ON|girar esquerda ON/.test(m))).toHaveLength(2);
+    expect(e.fins).toEqual([['concluida', undefined]]);
+  });
+
   it('ligar: recusa da TON vira mensagem clara', async () => {
     const { svc } = montar(LAB, (c) => (c.startsWith('pivo ligar') ? 'pivo_pivo_girando' : respostaPadrao(c)));
     const alvo = (await svc.alvo('PIV'))!;

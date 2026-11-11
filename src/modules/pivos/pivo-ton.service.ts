@@ -84,6 +84,14 @@ export const TXT_FALHA: Record<string, string> = {
   concluido: 'Parada programada atingida',
   comando: 'Desligado por comando',
 };
+/** Passo em curso no status (pivo::Passo) — o satélite LoRa não manda eventos, só o status/ack. */
+const TXT_PASSO_N: Record<number, (dir: string) => string> = {
+  1: () => 'Conferindo a tensão (BI02)',
+  2: () => 'Bombeamento ON (BO01) e válvula ON — aguardando pressão (BI01)',
+  3: (d) => `Pressão OK — girar ${d === 'E' ? 'esquerda ON (BO04), aguardando o giro (BI04)' : 'direita ON (BO03), aguardando o giro (BI03)'}`,
+  4: () => 'Bombeamento OFF (BO01) e válvula OFF — aguardando a pressão cair',
+  5: () => 'Percentímetro 0 % e lados OFF — aguardando o pivô parar',
+};
 const TXT_AVISO: Record<string, string> = {
   canhao_nao_ligou: 'O canhão não confirmou ligado (BI06) — segue irrigando',
   canhao_nao_desligou: 'O canhão não confirmou desligado (BI06)',
@@ -377,13 +385,21 @@ export class PivoTonService implements OnModuleInit {
   }
 
   /**
-   * Acompanha a TON até `chegou(estado)`: eventos viram passos; falha → texto; a cada 8 s pergunta
+   * Acompanha a TON até `chegou(estado)`: eventos e o passo do status viram passos; falha → texto; a cada 5 s pergunta
    * o estado pelo ack (o status espontâneo do satélite só sai no POLL). 'ok' | 'cancelado' | erro.
    */
   private async acompanhar(x: ExecutarNaTon, alvo: AlvoTon, t0: number, n0: number, limiteS: number, chegou: (e: number) => boolean, desligando = false): Promise<string> {
     const t = alvo.tonId;
     const id8 = idCurto(x.seqId);
     const vistos = new Set<object>();
+    const passosVistos = new Set<string>();
+    const dir = x.acao === 'girar_esquerda' ? 'E' : 'D';
+    /** Passo novo (por evento OU pelo código do status): grava uma vez só. */
+    const passoUmaVez = async (txt: string, ok: boolean | null = true) => {
+      if (passosVistos.has(txt)) return;
+      passosVistos.add(txt);
+      await x.passo('ton', txt, ok);
+    };
     let ultimaPergunta = Date.now();
     let saiuDoParado = false;
     while (Date.now() - t0 < limiteS * 1000) {
@@ -392,7 +408,7 @@ export class PivoTonService implements OnModuleInit {
         if (vistos.has(ev)) continue;
         vistos.add(ev);
         if (!desligando && ev.id && ev.id !== id8 && ev.t !== 'falha') continue;
-        if (ev.t === 'passo' && TXT_PASSO[ev.x]) await x.passo('ton', TXT_PASSO[ev.x], true);
+        if (ev.t === 'passo' && TXT_PASSO[ev.x]) await passoUmaVez(TXT_PASSO[ev.x]);
         else if (ev.t === 'aviso') await x.passo('ton', TXT_AVISO[ev.x] ?? `Aviso da TON: ${ev.x}`, false);
         else if (ev.t === 'falha' && ev.x !== 'nao_parou' && !desligando) return `Falha na TON: ${TXT_FALHA[ev.x] ?? ev.x}`;
         else if (ev.t === 'falha' && ev.x === 'nao_parou') return TXT_FALHA.nao_parou;
@@ -400,6 +416,8 @@ export class PivoTonService implements OnModuleInit {
       const st = this.status.get(t);
       if (st && st.n > n0) {
         if (st.s.e !== 0) saiuDoParado = true;
+        const txtN = TXT_PASSO_N[st.s.p]?.(dir);
+        if (txtN) await passoUmaVez(txtN);
         if (chegou(st.s.e) && (desligando || st.s.e !== 0)) {
           if (desligando && st.s.f === 'nao_parou') return TXT_FALHA.nao_parou;
           return 'ok';
@@ -407,7 +425,7 @@ export class PivoTonService implements OnModuleInit {
         if (!desligando && st.s.e === 0 && saiuDoParado && st.s.f) return `Falha na TON: ${TXT_FALHA[st.s.f] ?? st.s.f}`;
         if (!desligando && st.s.e === 0 && st.s.f && Date.now() - t0 > 3000) return `Falha na TON: ${TXT_FALHA[st.s.f] ?? st.s.f}`;
       }
-      if (Date.now() - ultimaPergunta >= 8000) {
+      if (Date.now() - ultimaPergunta >= 5000) {
         ultimaPergunta = Date.now();
         await this.lerEstadoPeloAck(x.pivoId, t, x.user, x.cliente).catch(() => undefined);
         continue;
