@@ -46,7 +46,12 @@ export interface Bombeamento {
   /** pivô dono dos pontos da bomba (o próprio ou o do sistema conjugado) */
   dono_id?: string;
 }
-export interface SequenciaCfg { pressurizacao_s: number; confirma_giro_s: number; confirma_bomba_s: number }
+/**
+ * comandos_mantidos: as BOs do pivô ficam em ALTO enquanto a função está ligada (painel sem
+ * selo, ex.: TON no lugar do CLP) — Ligar/Girar/Canhão = `rN on`, desligar = `rN off`.
+ * Padrão (false): pulsos nos botões do painel, que faz o selo.
+ */
+export interface SequenciaCfg { pressurizacao_s: number; confirma_giro_s: number; confirma_bomba_s: number; comandos_mantidos: boolean }
 export interface AcionarOpts {
   irrigacao?: unknown;
   origem?: OrigemSequencia;
@@ -61,14 +66,14 @@ export interface AcionarOpts {
 interface Passo { t: string; etapa: string; msg: string; ok: boolean | null }
 type Autor = ScopedUser & { nome?: string };
 
-const SEQ_PADRAO: SequenciaCfg = { pressurizacao_s: 120, confirma_giro_s: 30, confirma_bomba_s: 30 };
+const SEQ_PADRAO: SequenciaCfg = { pressurizacao_s: 120, confirma_giro_s: 30, confirma_bomba_s: 30, comandos_mantidos: false };
 const norm = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 
 type PapelComando = 'ligar' | 'canhao' | 'percentimetro' | 'direita' | 'esquerda' | 'desligar';
 type PapelStatus = 'ligado' | 'canhao' | 'permissivo' | 'pressao' | 'direita' | 'esquerda' | 'desligado' | 'erro';
 type MapaBi = { ton_id: string; bi: number; inv: boolean };
 /** Resultado de comandar o canhão (aplicarCanhao). */
-type ResCanhao = 'ok' | 'ja' | 'sem_ponto' | 'sem_status' | 'sem_leitura' | 'nao_confirmou';
+type ResCanhao = 'ok' | 'ja' | 'sem_ponto' | 'sem_status' | 'sem_leitura' | 'nao_confirmou' | 'enviado';
 
 /**
  * Pontos do pivô por papel, achados pelo nome (Girar_direita, Girando_esquerda, Desligado, Erro…).
@@ -107,6 +112,7 @@ const MSG_CANHAO: Record<ResCanhao, (ligar: boolean, s: number) => string> = {
   sem_status: () => 'Canhão: sem o status Canhao_ligado o NexON não comanda (o botão alterna)',
   sem_leitura: () => 'Canhão: sem leitura do Canhao_ligado — não comandado',
   nao_confirmou: (l, s) => `Canhão não confirmou ${l ? 'ligado' : 'desligado'} em ${s}s`,
+  enviado: (l) => `Canhão final ${l ? 'ligado' : 'desligado'} (saída mantida, sem status para confirmar)`,
 };
 
 /** Posição do pivô para a tela e para a parada por ângulo (ver posicao()). */
@@ -165,8 +171,27 @@ export class PivoSequenciaService implements OnModuleInit {
         pressurizacao_s: Number.isFinite(Number(s.pressurizacao_s)) ? Number(s.pressurizacao_s) : SEQ_PADRAO.pressurizacao_s,
         confirma_giro_s: Number(s.confirma_giro_s) || SEQ_PADRAO.confirma_giro_s,
         confirma_bomba_s: confirmaBomba,
+        comandos_mantidos: s.comandos_mantidos === true,
       },
     };
+  }
+
+  /** Saídas mantidas (sequencia.comandos_mantidos) do pivô — lido direto, sem montar a config toda. */
+  private async mantido(pivoId: string): Promise<boolean> {
+    const r = await this.prisma.$queryRaw<Array<{ m: boolean | null }>>`
+      SELECT (sequencia->>'comandos_mantidos')::boolean AS m FROM pivo_config WHERE equipamento_id = ${pivoId}::bpchar LIMIT 1`.catch(() => []);
+    return r[0]?.m === true;
+  }
+
+  /**
+   * Saída mantida de um ponto de comando: `rN on` (ligar) ou `rN off`, com as restrições e
+   * a trilha do acionar (acionarBoDireto). false = ponto sem BO vinculada.
+   */
+  private async saidaMantida(id: string, pid: string | undefined, ligar: boolean, rotulo: string, user?: Autor, cliente?: ClienteInfo): Promise<boolean> {
+    const m = await this.boDoPonto(pid);
+    if (!m) return false;
+    await this.cmd.acionarBoDireto({ equipamentoId: id, tonId: m.ton_id, bo: m.bo, modo: ligar ? 'liga' : 'desliga', rotulo }, user, cliente);
+    return true;
   }
 
   /**
@@ -179,7 +204,7 @@ export class PivoSequenciaService implements OnModuleInit {
     if (!liga) return null;
     const bi = pts.st.ligado;
     return {
-      ativo: true, origem: 'pontos', dono_id: pivoId, modo: 'pulso',
+      ativo: true, origem: 'pontos', dono_id: pivoId, modo: (await this.mantido(pivoId)) ? 'mantido' : 'pulso',
       ton_id: liga.ton_id, bo_liga: liga.bo, pulso_ms: liga.pulso_ms, bo_desliga: null,
       bi_confirma: bi?.bi ?? null, bi_ton_id: bi?.ton_id ?? null, bi_inv: !!bi?.inv,
     };
@@ -260,7 +285,12 @@ export class PivoSequenciaService implements OnModuleInit {
       pressurizacao_s: Math.max(0, Math.min(900, Number(body.sequencia?.pressurizacao_s ?? atual.sequencia.pressurizacao_s))),
       confirma_giro_s: Math.max(5, Math.min(300, Number(body.sequencia?.confirma_giro_s ?? atual.sequencia.confirma_giro_s))),
       confirma_bomba_s: Math.max(5, Math.min(300, Number(body.sequencia?.confirma_bomba_s ?? atual.sequencia.confirma_bomba_s))),
+      comandos_mantidos: typeof body.sequencia?.comandos_mantidos === 'boolean' ? body.sequencia.comandos_mantidos : atual.sequencia.comandos_mantidos,
     };
+    // Trocar o modo com o pivô ligado deixaria saída presa (mantido → pulso) ou sem selo (pulso → mantido).
+    if (seq.comandos_mantidos !== atual.sequencia.comandos_mantidos && (this.rodando.has(id) || (await this.irrigacaoAtiva(id)))) {
+      throw new ConflictException('Desligue o pivô antes de trocar o modo das saídas (pulso ↔ mantidas).');
+    }
     const cru = await this.prisma.$queryRaw<Array<{ bombeamento: any }>>`
       SELECT bombeamento FROM pivo_config WHERE equipamento_id = ${id}::bpchar LIMIT 1`;
     const antes = cru[0]?.bombeamento ?? null;
@@ -362,7 +392,9 @@ export class PivoSequenciaService implements OnModuleInit {
     const ativa = await this.irrigacaoAtiva(id);
     return {
       pivo: {
-        comandos: { direita: !!pts.cmd.direita, esquerda: !!pts.cmd.esquerda, desligar: !!pts.cmd.desligar, percentimetro: !!pts.cmd.percentimetro },
+        // Saídas mantidas: desligar = baixar as BOs de giro (não precisa do ponto Desligar)
+        comandos: { direita: !!pts.cmd.direita, esquerda: !!pts.cmd.esquerda, desligar: !!pts.cmd.desligar || (cfg.sequencia.comandos_mantidos && !!(pts.cmd.direita || pts.cmd.esquerda)), percentimetro: !!pts.cmd.percentimetro },
+        comandos_mantidos: cfg.sequencia.comandos_mantidos,
         // Canhão: comandável só com o ponto Canhao (BO) e o status Canhao_ligado (BI)
         canhao: { comando: !!pts.cmd.canhao, tem_status: !!pts.st.canhao, ligado: await this.lerStatus(pts.st.canhao) },
         permissivo: await this.lerStatus(pts.st.permissivo),
@@ -404,7 +436,8 @@ export class PivoSequenciaService implements OnModuleInit {
     const pts = await this.pontos(id);
     const papel = acao === 'girar_direita' ? 'direita' : acao === 'girar_esquerda' ? 'esquerda' : 'desligar';
     const cfg = await this.lerConfig(id);
-    if (!pts.cmd[papel] && !(acao === 'desligar' && cfg.bombeamento)) {
+    const desligaMantido = acao === 'desligar' && cfg.sequencia.comandos_mantidos && !!(pts.cmd.direita || pts.cmd.esquerda);
+    if (!pts.cmd[papel] && !(acao === 'desligar' && cfg.bombeamento) && !desligaMantido) {
       throw new BadRequestException(`O pivô não tem o comando "${papel}" cadastrado (ponto de comando ligado a uma BO).`);
     }
     const autorId = user?.id?.trim() || opts.responsavelId?.trim() || null;
@@ -668,8 +701,16 @@ export class PivoSequenciaService implements OnModuleInit {
     segundos: number, ctl: { cancelar: boolean } = { cancelar: false },
   ): Promise<ResCanhao> {
     if (!pts.cmd.canhao) return 'sem_ponto';
-    if (!pts.st.canhao) return 'sem_status';
     const alvo = ligar ? 1 : 0;
+    if (await this.mantido(id)) {
+      // Saída mantida: a BO É o canhão (on = ligado); o status, se houver, só confirma.
+      if (pts.st.canhao && (await this.lerStatus(pts.st.canhao)) === alvo) return 'ja';
+      await this.saidaMantida(id, pts.cmd.canhao, ligar, ligar ? 'Canhão ligado' : 'Canhão desligado', user, cliente);
+      if (!pts.st.canhao) return 'enviado';
+      const okM = await this.esperar(async () => (await this.lerStatus(pts.st.canhao)) === alvo, segundos, ctl);
+      return okM ? 'ok' : 'nao_confirmou';
+    }
+    if (!pts.st.canhao) return 'sem_status';
     const atual = await this.lerStatus(pts.st.canhao);
     if (atual === null) return 'sem_leitura';
     if (atual === alvo) return 'ja';
@@ -686,10 +727,13 @@ export class PivoSequenciaService implements OnModuleInit {
     if (this.rodando.has(id)) throw new ConflictException('Sequência do pivô em andamento — aguarde terminar.');
     const pts = await this.pontos(id);
     if (!pts.cmd.canhao) throw new BadRequestException('O pivô não tem o ponto Canhao ligado a uma BO (Topologia IoT → Configurar I/O).');
-    if (!pts.st.canhao) throw new BadRequestException('Ligue o status Canhao_ligado a uma BI: sem ele o NexON não comanda o canhão (o botão do painel alterna).');
-    const atual = await this.lerStatus(pts.st.canhao);
-    if (atual === null) throw new ConflictException('Sem leitura do Canhao_ligado — não dá para saber o estado do canhão.');
-    if (atual === (ligar ? 1 : 0)) throw new ConflictException(ligar ? 'O canhão já está ligado.' : 'O canhão já está desligado.');
+    const mant = await this.mantido(id);
+    if (!pts.st.canhao && !mant) throw new BadRequestException('Ligue o status Canhao_ligado a uma BI: sem ele o NexON não comanda o canhão (o botão do painel alterna).');
+    if (pts.st.canhao) {
+      const atual = await this.lerStatus(pts.st.canhao);
+      if (atual === null && !mant) throw new ConflictException('Sem leitura do Canhao_ligado — não dá para saber o estado do canhão.');
+      if (atual === (ligar ? 1 : 0)) throw new ConflictException(ligar ? 'O canhão já está ligado.' : 'O canhão já está desligado.');
+    }
     if (ligar) {
       const st = await this.statusPivo(pts);
       const ativa = await this.irrigacaoAtiva(id);
@@ -802,8 +846,20 @@ export class PivoSequenciaService implements OnModuleInit {
       const pts = await this.pontos(id);
       const b = cfg.bombeamento;
 
+      const mant = cfg.sequencia.comandos_mantidos;
       if (acao === 'desligar') {
-        if (pts.cmd.desligar) {
+        if (mant && (pts.cmd.direita || pts.cmd.esquerda)) {
+          // Saídas mantidas: baixa as BOs de giro (o pivô para); a bomba desliga em desligarBomba.
+          for (const k of ['direita', 'esquerda'] as const) {
+            if (pts.cmd[k]) await this.saidaMantida(id, pts.cmd[k], false, `Girar ${k} desligado`, user, cliente);
+          }
+          await passo('pivo', 'Saídas de giro desligadas', true);
+          const parou = await this.esperar(async () => {
+            const t = await this.estadoTrava(pts);
+            return t.estado === 'sem_status' ? null : t.estado === 'parado';
+          }, cfg.sequencia.confirma_giro_s, ctl);
+          await passo('pivo', parou === null ? 'Pivô sem status cadastrado — sem confirmação' : parou ? 'Pivô parado' : 'Pivô não confirmou parada no tempo', parou !== false);
+        } else if (pts.cmd.desligar) {
           await this.cmd.acionarPonto(id, pts.cmd.desligar, user, false, undefined, cliente);
           await passo('pivo', 'Comando Desligar enviado ao pivô', true);
           // Mesma regra das travas: parado = Desligado = 1 ou todos os Girando LIGADOS em 0
@@ -814,7 +870,7 @@ export class PivoSequenciaService implements OnModuleInit {
           }, cfg.sequencia.confirma_giro_s, ctl);
           await passo('pivo', parou === null ? 'Pivô sem status cadastrado — sem confirmação' : parou ? 'Pivô parado' : 'Pivô não confirmou parada no tempo', parou !== false);
         }
-        if (pts.cmd.canhao && pts.st.canhao && (await this.lerStatus(pts.st.canhao)) === 1) {
+        if (pts.cmd.canhao && (mant || (pts.st.canhao && (await this.lerStatus(pts.st.canhao)) === 1))) {
           const r = await this.aplicarCanhao(id, pts, false, user, cliente, cfg.sequencia.confirma_giro_s)
             .catch((x) => { this.logger.warn(`[pivo-seq] ${id} canhão: ${msgErro(x)}`); return 'nao_confirmou' as const; });
           await passo('canhao', MSG_CANHAO[r](false, cfg.sequencia.confirma_giro_s), r === 'ok' || r === 'ja');
@@ -914,8 +970,16 @@ export class PivoSequenciaService implements OnModuleInit {
       }
 
       if (ctl.cancelar) return await this.interrompida(passo, fim);
-      await this.cmd.acionarPonto(id, pts.cmd[sentido]!, user, false, undefined, cliente);
-      await passo('pivo', `Comando Girar ${sentido} enviado ao pivô`, true);
+      if (mant) {
+        // Saídas mantidas: o outro sentido em baixo ANTES (nunca os dois em alto), depois este em alto.
+        const outro = sentido === 'direita' ? 'esquerda' : 'direita';
+        if (pts.cmd[outro]) await this.saidaMantida(id, pts.cmd[outro], false, `Girar ${outro} desligado`, user, cliente);
+        await this.saidaMantida(id, pts.cmd[sentido], true, `Girar ${sentido}`, user, cliente);
+        await passo('pivo', `Girar ${sentido} ligado (saída mantida)`, true);
+      } else {
+        await this.cmd.acionarPonto(id, pts.cmd[sentido]!, user, false, undefined, cliente);
+        await passo('pivo', `Comando Girar ${sentido} enviado ao pivô`, true);
+      }
       const girou = await this.esperar(async () => {
         const s = await this.statusPivo(pts);
         return s[sentido] === null ? null : s[sentido] === 1;
@@ -951,7 +1015,13 @@ export class PivoSequenciaService implements OnModuleInit {
       // desligada abaixo, a seco. Volta ao estado conhecido: manda Desligar ao pivô.
       if (e instanceof FalhaGiro && acao !== 'desligar') {
         const ptsF = await this.pontos(id).catch(() => null);
-        if (ptsF?.cmd.desligar) {
+        const mantF = await this.mantido(id).catch(() => false);
+        if (ptsF && mantF && (ptsF.cmd.direita || ptsF.cmd.esquerda)) {
+          for (const k of ['direita', 'esquerda'] as const) {
+            if (ptsF.cmd[k]) await this.saidaMantida(id, ptsF.cmd[k], false, `Girar ${k} desligado`, user, cliente).catch(() => undefined);
+          }
+          await passo('pivo', 'Giro não confirmado — saídas de giro desligadas (estado seguro)', true).catch(() => undefined);
+        } else if (ptsF?.cmd.desligar) {
           await this.cmd.acionarPonto(id, ptsF.cmd.desligar, user, false, undefined, cliente)
             .then(() => { desligarEnviado = true; return passo('pivo', 'Giro não confirmado — comando Desligar enviado ao pivô (estado seguro)', true); })
             .catch((x) => passo('pivo', `Giro não confirmado e o Desligar falhou: ${msgErro(x)}`, false))
@@ -996,6 +1066,16 @@ export class PivoSequenciaService implements OnModuleInit {
     }
     if (girando.length) {
       await passo('bomba', `Bomba mantida ligada: ${girando.join(', ')} ainda usando`, true);
+      return;
+    }
+    if (b.origem === 'pontos' && b.modo === 'mantido') {
+      // Saídas mantidas: o Ligar (do dono, no conjugado) vai a baixo — não depende do ponto Desligar.
+      await this.cmd.acionarBoDireto({ equipamentoId: id, tonId: b.ton_id, bo: b.bo_liga, modo: 'desliga', rotulo: 'Ligar desligado (bomba)' }, user, cliente);
+      await passo('bomba', 'Saída Ligar desligada (bomba)', true);
+      if (b.bi_confirma) {
+        const ok = await this.esperar(async () => (await this.bombaLigada(b)) === 0, b.confirma_s ?? 30, { cancelar: false });
+        await passo('bomba', ok ? 'Bomba desligada (Ligado = 0)' : `Bomba não confirmou desligada em ${b.confirma_s ?? 30}s`, !!ok);
+      }
       return;
     }
     if (b.origem === 'pontos') {

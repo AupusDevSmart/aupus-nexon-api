@@ -171,3 +171,64 @@ describe('desligar: perc off depois de concluir', () => {
     expect(ordem).toEqual(['concluida', 'perc off']);
   });
 });
+
+describe('saídas mantidas (sequencia.comandos_mantidos)', () => {
+  // Painel sem selo (TON no lugar do CLP): cada BO fica em alto enquanto a função está ligada.
+  const PTS: Ponto[] = [
+    { id: 'p-ligar', tipo: 'comando', nome: 'Ligar' },
+    { id: 'p-dir', tipo: 'comando', nome: 'Girar_direita' },
+    { id: 'p-esq', tipo: 'comando', nome: 'Girar_esquerda' },
+    { id: 'p-canhao', tipo: 'comando', nome: 'Canhao' },
+    { id: 's-dir', tipo: 'status', nome: 'Girando_direita', ton_id: 'T', bi: 2 },
+    { id: 's-esq', tipo: 'status', nome: 'Girando_esquerda', ton_id: 'T', bi: 3 },
+  ];
+  const BOS = {
+    'p-ligar': { ton_id: 'T', bo: 1, pulso_ms: 500 },
+    'p-dir': { ton_id: 'T', bo: 2, pulso_ms: 500 },
+    'p-esq': { ton_id: 'T', bo: 3, pulso_ms: 500 },
+    'p-canhao': { ton_id: 'T', bo: 6, pulso_ms: 500 },
+  };
+  function mantido(entradas: Record<string, number | null>) {
+    const m = montar(PTS, BOS, entradas);
+    const q = m.svc.prisma.$queryRaw;
+    m.svc.prisma.$queryRaw = jest.fn(async (s: TemplateStringsArray, ...v: unknown[]) =>
+      (s.join('?').includes('comandos_mantidos') ? [{ m: true }] : q(s, ...v)));
+    m.svc.prisma.$executeRaw = jest.fn(async () => 1);
+    const saidas: string[] = [];
+    m.svc.cmd.acionarBoDireto = jest.fn(async (p: { bo: number; modo: string }) => {
+      saidas.push(`r${p.bo} ${p.modo}`);
+      if (p.bo === 2) entradas['T:2'] = p.modo === 'liga' ? 1 : 0;   // o pivô responde no Girando
+      if (p.bo === 3) entradas['T:3'] = p.modo === 'liga' ? 1 : 0;
+    });
+    m.svc.cmd.lerEntradaTon = jest.fn(async (ton: string, bi: number) => ({ valor: entradas[`${ton}:${bi}`] ?? null, updated_at: null }));
+    const seq = { pressurizacao_s: 0, confirma_giro_s: 5, confirma_bomba_s: 5, comandos_mantidos: true };
+    m.svc.lerConfig = async () => ({ bombeamento: await m.svc.bombaDosPontos('PIV'), bomba_de: null, sequencia: seq });
+    m.svc.companheiros = async () => [];
+    return { ...m, saidas };
+  }
+
+  it('bomba dos pontos vira modo mantido', async () => {
+    const { svc } = mantido({});
+    expect(await svc.bombaDosPontos('PIV')).toMatchObject({ modo: 'mantido', bo_liga: 1 });
+  });
+
+  it('girar: Ligar em alto, o outro sentido em baixo ANTES, este em alto — sem pulso', async () => {
+    const { svc, saidas, acionados } = mantido({ 'T:2': 0, 'T:3': 0 });
+    await svc.executar('PIV', 'girar_direita', { seqId: 'S', cancelar: false });
+    expect(saidas).toEqual(['r1 liga', 'r3 desliga', 'r2 liga']);
+    expect(acionados).toEqual([]);
+  });
+
+  it('desligar sem ponto Desligar: baixa os dois sentidos, o canhão e o Ligar', async () => {
+    const { svc, saidas, acionados } = mantido({ 'T:2': 1, 'T:3': 0 });
+    await svc.executar('PIV', 'desligar', { seqId: 'S', cancelar: false });
+    expect(saidas).toEqual(['r2 desliga', 'r3 desliga', 'r6 desliga', 'r1 desliga']);
+    expect(acionados).toEqual([]);
+  });
+
+  it('canhão sem status: a saída é o canhão (enviado, sem confirmação)', async () => {
+    const { svc, saidas } = mantido({});
+    expect(await svc.aplicarCanhao('PIV', await svc.pontos('PIV'), true, undefined, undefined, 5)).toBe('enviado');
+    expect(saidas).toEqual(['r6 liga']);
+  });
+});
