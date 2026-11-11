@@ -3,6 +3,7 @@ import { PrismaModule } from '../../prisma/prisma.module';
 import { EntregaWorker } from './entrega.worker';
 import { OutboxService } from './outbox.service';
 import { RecepcaoController, VinculosController } from './sincronizacao.controller';
+import { AvisosDeExclusaoController, SaudeDaSincronizacaoController } from './avisos.controller';
 import { SincronizacaoService } from './sincronizacao.service';
 
 /**
@@ -24,7 +25,7 @@ import { SincronizacaoService } from './sincronizacao.service';
  */
 @Module({
   imports: [PrismaModule],
-  controllers: [RecepcaoController, VinculosController],
+  controllers: [RecepcaoController, VinculosController, AvisosDeExclusaoController, SaudeDaSincronizacaoController],
   providers: [SincronizacaoService, OutboxService, EntregaWorker],
   exports: [SincronizacaoService, OutboxService],
 })

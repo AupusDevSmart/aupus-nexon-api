@@ -1,5 +1,6 @@
 // src/modules/plantas/plantas.service.ts - CORRIGIDO
-import { Injectable, NotFoundException, BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, BadRequestException, ConflictException, ForbiddenException, HttpException } from '@nestjs/common';
+import { apagarComDescendentes, compartilhadosNaCascata, descreverCompartilhados } from '../sincronizacao/arvore';
 import { PrismaService } from '../../prisma/prisma.service';
 import { Planta } from './entities/planta.entity';
 import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
@@ -20,6 +21,8 @@ export interface PaginatedResponse<T> {
 
 @Injectable()
 export class PlantasService {
+  private readonly logger = new Logger(PlantasService.name);
+
   constructor(
     private prisma: PrismaService,
     private scopeService: PermissionScopeService,
@@ -556,7 +559,7 @@ export class PlantasService {
     }
   }
 
-  async remove(id: string): Promise<{ message: string; deletedUnits?: number; deletedEquipments?: number }> {
+  async remove(id: string, confirmarCompartilhado = false): Promise<{ message: string; deletedUnits?: number; deletedEquipments?: number }> {
     try {
       const plantaId = id.trim(); // TRIM do ID para garantir que não há espaços
 
@@ -572,68 +575,22 @@ export class PlantasService {
         throw new NotFoundException(`Planta com ID ${id} não encontrada`);
       }
 
-      // 2. Contar unidades e equipamentos que serão deletados
-      const unidades = await this.prisma.unidades.findMany({
-        where: {
-          planta_id: plantaId,
-          deleted_at: null
-        },
-        include: {
-          _count: {
-            select: {
-              equipamentos: {
-                where: { deleted_at: null }
-              }
-            }
-          }
-        }
-      });
+      // Compartilhada com o outro produto (10/11/2026): a exclusão não atravessa (lá vira
+      // aviso, com decisão de alguém), mas quem exclui tem de saber. A tela pergunta antes;
+      // chamada direta (script, Postman, outro front) não pula a pergunta
+      const compartilhados = await compartilhadosNaCascata(this.prisma, 'plantas', plantaId.trim());
+      if (compartilhados.total > 0 && !confirmarCompartilhado) {
+        throw new ConflictException(
+          `Esta planta é compartilhada com o outro produto (${descreverCompartilhados(compartilhados)}). Confirme a exclusão na tela, que mostra o que acontece lá.`,
+        );
+      }
 
-      const unidadesCount = unidades.length;
-      const equipamentosCount = unidades.reduce((total, unidade) => total + unidade._count.equipamentos, 0);
-
-      // 3. Realizar soft delete em cascata usando transação
-      const result = await this.prisma.$transaction(async (prisma) => {
-        // Deletar todos os equipamentos das unidades da planta
-        if (equipamentosCount > 0) {
-          for (const unidade of unidades) {
-            await prisma.equipamentos.updateMany({
-              where: {
-                unidade_id: unidade.id,
-                deleted_at: null
-              },
-              data: {
-                deleted_at: new Date()
-              }
-            });
-          }
-          console.log(`✅ [PLANTAS SERVICE] ${equipamentosCount} equipamento(s) deletado(s) em cascata`);
-        }
-
-        // Deletar todas as unidades da planta
-        if (unidadesCount > 0) {
-          await prisma.unidades.updateMany({
-            where: {
-              planta_id: plantaId,
-              deleted_at: null
-            },
-            data: {
-              deleted_at: new Date()
-            }
-          });
-          console.log(`✅ [PLANTAS SERVICE] ${unidadesCount} unidade(s) deletada(s) em cascata`);
-        }
-
-        // Deletar a planta
-        await prisma.plantas.update({
-          where: { id: plantaId },
-          data: {
-            deleted_at: new Date()
-          }
-        });
-
-        return { unidadesCount, equipamentosCount };
-      });
+      // 2. A planta, as instalações, os equipamentos delas e os sub-equipamentos: o
+      // mesmo conjunto que a tela mostrou antes (e que o aviso do outro lado apaga).
+      // Antes ia pelo `unidade_id`, e o sub-equipamento (que nasce só com o pai)
+      // ficava vivo, e compartilhado, debaixo de um pai apagado
+      const apagados = await this.prisma.$transaction((tx) => apagarComDescendentes(tx, 'plantas', plantaId), { timeout: 30_000 });
+      const result = { unidadesCount: apagados.unidades, equipamentosCount: apagados.equipamentos };
 
       console.log(`✅ [PLANTAS SERVICE] Planta ${id} deletada com sucesso (soft delete)`);
 
@@ -652,13 +609,11 @@ export class PlantasService {
       };
 
     } catch (error) {
-      console.error('❌ [PLANTAS SERVICE] Erro ao deletar planta:', error);
-
-      if (error instanceof NotFoundException) {
-        throw error;
-      }
-
-      throw new BadRequestException('Erro interno ao deletar planta');
+      if (error instanceof HttpException) throw error;
+      // O erro que não é HTTP (o banco) sobe como está: o filtro responde 500 e o
+      // Sentry fica sabendo. Antes virava um 400 "Erro interno" só no console
+      this.logger.error(`Erro ao excluir a planta ${id}`, error instanceof Error ? error.stack : String(error));
+      throw error;
     }
   }
 
