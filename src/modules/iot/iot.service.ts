@@ -3,7 +3,7 @@ import { papelDoPonto, valorDoBit } from './status-pontos.util';
 import { randomBytes } from 'node:crypto';
 import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
 import { Prisma } from '@/core';
-import { tonCapsForTipo } from '../../shared/util/ton-caps';
+import { tonBiCount, tonBoMax, tonCapsForTipo } from '../../shared/util/ton-caps';
 import { VinculosMirrorService } from '../iot-vinculos/vinculos-mirror.service';
 import type {
   IotDiagrama,
@@ -45,6 +45,8 @@ const PROJETO_SELECT = {
  */
 @Injectable()
 export class IoTService {
+  private readonly logger = new Logger(IoTService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly scopeService: PermissionScopeService,
@@ -800,6 +802,7 @@ export class IoTService {
       if (unidadeId) await this.scopeService.assertEntityInScope('unidade', unidadeId, user);
     }
 
+    let tonsPivo: string[] = [];
     const _projetoRow = await this.prisma.$transaction(async (tx) => {
       const existing = await tx.iot_projetos.findFirst({
         where: { id: trimmedId, deleted_at: null },
@@ -824,6 +827,8 @@ export class IoTService {
         await this.ensureBombaEquipamentos(tx, trimmedId, data.diagrama);
         // Carregador eletrico: mesmo padrao — auto-cria/associa + pontos + config.
         await this.ensureCarregadorEquipamentos(tx, trimmedId, data.diagrama);
+        // Pivo ligado a uma TON: I/O padrao (BO01-06/BI01-06) nas BOs/BIs livres.
+        tonsPivo = await this.ensurePivoIoPadrao(tx, data.diagrama);
         updateData.diagrama = data.diagrama as unknown as Prisma.InputJsonValue;
         updateData.view_pan_x = data.diagrama.pan?.x ?? 0;
         updateData.view_pan_y = data.diagrama.pan?.y ?? 0;
@@ -856,7 +861,77 @@ export class IoTService {
     // Fase 3 (dual-write): espelha os vínculos Modbus (io_config) do projeto para
     // iot_vinculos — DEPOIS do commit (mirror usa this.prisma, não a tx). Best-effort.
     void this.mirror.resyncProjetoModbus(trimmedId);
+    for (const t of tonsPivo) {
+      void this.mirror.resyncTonCanais(t, 'ton_bo');
+      void this.mirror.resyncTonCanais(t, 'ton_bi');
+    }
     return _projetoRow;
+  }
+
+  /**
+   * Pivô ligado a uma TON no diagrama: I/O PADRÃO da sequência local (docs/IOT-PIVO-TON-LOCAL.md)
+   *   BO1 Bombeamento · BO2 Valvula · BO3 Girar_direita · BO4 Girar_esquerda · BO5 Percentimetro · BO6 Canhao
+   *   BI1 Pressao_ok  · BI2 Tensao_ok · BI3 Girando_direita · BI4 Girando_esquerda · BI5 Seguranca · BI6 Canhao_ligado
+   * Só preenche: ponto que já tem BO/BI (nesta ou noutra TON) fica onde está, e BO/BI da TON
+   * ocupada por outro ponto não é tocada — o usuário altera no Configurar I/O da TON.
+   * Devolve as TONs alteradas (o espelho iot_vinculos é refeito depois do commit).
+   */
+  private async ensurePivoIoPadrao(tx: Prisma.TransactionClient, diagrama: IotDiagrama): Promise<string[]> {
+    const comps = Array.isArray(diagrama.components) ? (diagrama.components as Array<Record<string, any>>) : [];
+    const conns = Array.isArray((diagrama as any).connections) ? ((diagrama as any).connections as Array<Record<string, any>>) : [];
+    const PADRAO: Array<{ tipo: 'comando' | 'status'; nome: string; canal: number }> = [
+      { tipo: 'comando', nome: 'Bombeamento', canal: 1 }, { tipo: 'comando', nome: 'Valvula', canal: 2 },
+      { tipo: 'comando', nome: 'Girar_direita', canal: 3 }, { tipo: 'comando', nome: 'Girar_esquerda', canal: 4 },
+      { tipo: 'comando', nome: 'Percentimetro', canal: 5 }, { tipo: 'comando', nome: 'Canhao', canal: 6 },
+      { tipo: 'status', nome: 'Pressao_ok', canal: 1 }, { tipo: 'status', nome: 'Tensao_ok', canal: 2 },
+      { tipo: 'status', nome: 'Girando_direita', canal: 3 }, { tipo: 'status', nome: 'Girando_esquerda', canal: 4 },
+      { tipo: 'status', nome: 'Seguranca', canal: 5 }, { tipo: 'status', nome: 'Canhao_ligado', canal: 6 },
+    ];
+    const alteradas = new Set<string>();
+    for (const piv of comps.filter((c) => String(c?.type ?? '').toLowerCase() === 'pivo')) {
+      const pivoId = this.rawEquipamentoId(piv as unknown as IotDiagramaComponent);
+      if (!pivoId) continue;
+      const vizinhos = conns
+        .filter((k) => k?.from?.componentId === piv.id || k?.to?.componentId === piv.id)
+        .map((k) => (k.from?.componentId === piv.id ? k.to?.componentId : k.from?.componentId));
+      const ton = comps.find((c) => vizinhos.includes(c.id) && /^ton/i.test(String(c?.type ?? '')));
+      const tonId = ton ? this.rawEquipamentoId(ton as unknown as IotDiagramaComponent) : null;
+      if (!tonId) continue;
+      const tonRow = await tx.equipamentos.findFirst({ where: { id: tonId, deleted_at: null }, select: { tipo_equipamento: true } });
+      if (!tonRow) continue;
+      const boMax = tonBoMax(tonRow.tipo_equipamento);
+      const biMax = tonBiCount(tonRow.tipo_equipamento);
+      const pontos = await tx.$queryRaw<Array<{ id: string; tipo: string; nome: string; tem_io: boolean }>>`
+        SELECT TRIM(p.id) AS id, p.tipo, p.nome,
+               (EXISTS (SELECT 1 FROM ton_bo b WHERE b.equipamento_ponto_id = p.id AND b.deleted_at IS NULL)
+                OR EXISTS (SELECT 1 FROM ton_bi b WHERE b.equipamento_ponto_id = p.id AND b.deleted_at IS NULL)) AS tem_io
+        FROM equipamento_pontos p
+        WHERE p.equipamento_id = ${pivoId}::bpchar AND p.deleted_at IS NULL AND p.ativo`;
+      for (const d of PADRAO) {
+        const pt = pontos.find((p) => p.nome === d.nome && p.tipo === d.tipo);
+        if (!pt || pt.tem_io) continue;
+        if (d.tipo === 'comando') {
+          if (d.canal > boMax) continue;
+          const row = await tx.ton_bo.findFirst({ where: { ton_id: tonId, bo_numero: d.canal, deleted_at: null }, select: { id: true, equipamento_ponto_id: true } });
+          if (row && row.equipamento_ponto_id) continue;   // ocupada por outro ponto
+          if (row) await tx.ton_bo.update({ where: { id: row.id }, data: { equipamento_ponto_id: pt.id, ativo: true } });
+          else await tx.ton_bo.create({ data: { ton_id: tonId, bo_numero: d.canal, equipamento_ponto_id: pt.id, pulso_ms: 500, ativo: true } });
+        } else {
+          if (d.canal > biMax) continue;
+          const rows = await tx.$queryRaw<Array<{ id: string; ponto: string | null }>>`
+            SELECT TRIM(id) AS id, TRIM(equipamento_ponto_id) AS ponto FROM ton_bi
+            WHERE ton_id = ${tonId}::bpchar AND bi_numero = ${d.canal} AND deleted_at IS NULL LIMIT 1`;
+          if (rows[0]?.ponto) continue;
+          if (rows[0]) await tx.$executeRaw`UPDATE ton_bi SET equipamento_ponto_id = ${pt.id}::bpchar, ativo = true, updated_at = now() WHERE id = ${rows[0].id}::bpchar`;
+          else await tx.$executeRaw`
+            INSERT INTO ton_bi (id, ton_id, bi_numero, equipamento_ponto_id, invertido, ativo, created_at, updated_at)
+            VALUES (${randomBytes(13).toString('hex')}, ${tonId}::bpchar, ${d.canal}, ${pt.id}::bpchar, false, true, now(), now())`;
+        }
+        alteradas.add(tonId);
+        this.logger.log(`[pivo-io] ${d.nome} -> ${d.tipo === 'comando' ? 'BO' : 'BI'}${d.canal} da TON ${tonId} (pivô ${pivoId})`);
+      }
+    }
+    return [...alteradas];
   }
 
   async deleteProjeto(id: string, user?: ScopedUser): Promise<void> {
