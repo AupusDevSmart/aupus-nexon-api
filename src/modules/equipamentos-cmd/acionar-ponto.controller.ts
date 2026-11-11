@@ -70,13 +70,14 @@ export class EquipamentosAcionarPontoController {
     @CurrentUser() user?: any,
     @Cliente() cliente?: ClienteInfo,
   ): Promise<AcionarPontoResultDto> {
-    return this.cmdService.acionarPonto(
-      id,
-      pontoId,
-      user,
-      dto?.sim === true,
-      dto?.sim === true ? dto?.testMac : undefined,
-      cliente,
-    );
+    const sim = dto?.sim === true;
+    // Comando externo de verdade: quem observa o ponto (sequência do pivô) fica sabendo antes
+    // do pulso (para não seguir religando) e depois dele (para completar o desligamento).
+    if (!sim) await this.cmdService.avisarPontoExterno('antes', id, pontoId, user, cliente);
+    try {
+      return await this.cmdService.acionarPonto(id, pontoId, user, sim, sim ? dto?.testMac : undefined, cliente);
+    } finally {
+      if (!sim) void this.cmdService.avisarPontoExterno('depois', id, pontoId, user, cliente);
+    }
   }
 }

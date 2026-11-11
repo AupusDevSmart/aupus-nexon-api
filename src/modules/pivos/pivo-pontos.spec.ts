@@ -261,17 +261,51 @@ describe('saídas mantidas (sequencia.comandos_mantidos)', () => {
     expect(svc.prisma.$executeRaw.mock.calls.map((c: unknown[]) => c[1])).toContain('interrompida');
   });
 
-  it('reiniciar: se nem o primeiro comando de parada chega, a linha é cancelada e o pivô segue como estava', async () => {
+  it('reiniciar: comando recusado antes de sair (broker fora) cancela a linha e o pivô segue como estava', async () => {
     const { svc } = mantido({ 'T:2': 1, 'T:3': 0 });
     const saidas: string[] = [];
-    svc.cmd.acionarBoDireto = jest.fn(async (p: { bo: number; modo: string }) => { saidas.push(`r${p.bo} ${p.modo}`); throw new Error('TON não respondeu'); });
+    svc.cmd.acionarBoDireto = jest.fn(async (p: { bo: number; modo: string }) => { saidas.push(`r${p.bo} ${p.modo}`); throw Object.assign(new Error('Broker MQTT fora'), { status: 503 }); });
     svc.trilha = jest.fn(async () => undefined);
     await svc.executar('PIV', 'girar_esquerda', { seqId: 'S', cancelar: false }, undefined, undefined, null, { reiniciar: true });
-    expect(saidas).toEqual(['r2 desliga']);   // tentou parar e parou por aí: nada de bomba nem de religar
+    expect(saidas).toEqual(['r2 desliga']);   // nada saiu: sem nova tentativa, sem bomba, sem religar
     const status = svc.prisma.$executeRaw.mock.calls.map((c: unknown[]) => c[1]);
     expect(status).toContain('cancelada');
     expect(status).not.toContain('falhou');
     expect(svc.trilha).toHaveBeenCalledWith('PIV', expect.stringMatching(/Reinício NÃO executou.*segue com a irrigação anterior/), null, 'manual', 'ALTA');
+  });
+
+  it('reiniciar: timeout na parada com o pivô ainda girando NÃO mexe na bomba e cancela a linha', async () => {
+    const { svc } = mantido({ 'T:2': 1, 'T:3': 0 });
+    const saidas: string[] = [];
+    // ack perdido e o pivô não parou: o Girando segue em 1
+    svc.cmd.acionarBoDireto = jest.fn(async (p: { bo: number; modo: string }) => { saidas.push(`r${p.bo} ${p.modo}`); throw Object.assign(new Error('TON não respondeu'), { status: 504 }); });
+    svc.trilha = jest.fn(async () => undefined);
+    await svc.executar('PIV', 'girar_esquerda', { seqId: 'S', cancelar: false }, undefined, undefined, null, { reiniciar: true });
+    expect(saidas).not.toContain('r1 desliga');   // bomba intocada: não gira a seco
+    expect(saidas.filter((x) => x.endsWith(' liga'))).toEqual([]);
+    const status = svc.prisma.$executeRaw.mock.calls.map((c: unknown[]) => c[1]);
+    expect(status).toContain('cancelada');
+    expect(svc.trilha).toHaveBeenCalledWith('PIV', expect.stringMatching(/Reinício NÃO executou.*vale a irrigação anterior/), null, 'manual', 'ALTA');
+  });
+
+  it('reiniciar: timeout na parada mas o pivô parou (ack perdido) → completa o desligamento, não religa', async () => {
+    const entradas: Record<string, number | null> = { 'T:2': 1, 'T:3': 0 };
+    const { svc } = mantido(entradas);
+    const saidas: string[] = [];
+    let primeira = true;
+    svc.cmd.acionarBoDireto = jest.fn(async (p: { bo: number; modo: string }) => {
+      saidas.push(`r${p.bo} ${p.modo}`);
+      if (p.bo === 2) entradas['T:2'] = p.modo === 'liga' ? 1 : 0;   // o comando chegou ao pivô
+      if (primeira) { primeira = false; throw Object.assign(new Error('TON não respondeu'), { status: 504 }); }
+    });
+    svc.trilha = jest.fn(async () => undefined);
+    await svc.executar('PIV', 'girar_esquerda', { seqId: 'S', cancelar: false }, undefined, undefined, null, { reiniciar: true });
+    expect(saidas).toContain('r1 desliga');       // bomba desligada: pivô parado não fica com bomba ligada
+    expect(saidas.filter((x) => x.endsWith(' liga'))).toEqual([]);
+    const status = svc.prisma.$executeRaw.mock.calls.map((c: unknown[]) => c[1]);
+    expect(status).toContain('falhou');
+    expect(status).not.toContain('cancelada');
+    expect(svc.trilha).toHaveBeenCalledWith('PIV', expect.stringMatching(/Reinício falhou no meio da parada.*ficou desligado/), null, 'manual', 'ALTA');
   });
 
   it('reiniciar: parada herdada vale o que faltava, não recomeça do zero', async () => {
@@ -282,6 +316,29 @@ describe('saídas mantidas (sequencia.comandos_mantidos)', () => {
     const pararEm = (svc.prisma.$executeRaw.mock.calls as unknown[][]).map((c) => c[1]).find((v) => v instanceof Date) as Date;
     expect(pararEm.getTime() - antes).toBeGreaterThanOrEqual(3600000);
     expect(pararEm.getTime() - antes).toBeLessThan(3600000 + 60000);   // 1 volta do zero seriam 21 h
+  });
+
+  it('Desligar direto no ponto com sequência em andamento: interrompe e completa o desligamento', async () => {
+    const { svc } = montar(PONTOS, {}, {});
+    const ctl = { seqId: 'S', cancelar: false };
+    svc.rodando.set('PIV', ctl);
+    svc.acionar = jest.fn(async () => ({ status: 'executando' }));
+    // outro ponto do pivô não interrompe nada
+    await svc.pontoExterno('antes', 'PIV', 'p-canhao');
+    expect(ctl.cancelar).toBe(false);
+    await svc.pontoExterno('depois', 'PIV', 'p-canhao');
+    expect(svc.acionar).not.toHaveBeenCalled();
+    // o Desligar interrompe antes do pulso e, depois dele, roda o desligar inteiro
+    await svc.pontoExterno('antes', 'PIV ', 'p-desl');
+    expect(ctl.cancelar).toBe(true);
+    await svc.pontoExterno('depois', 'PIV', 'p-desl', { id: 'U1' });
+    expect(svc.acionar).toHaveBeenCalledWith('PIV', 'desligar', { id: 'U1' }, undefined, expect.objectContaining({ motivo: expect.stringMatching(/direto no ponto/) }));
+    // sem sequência em andamento, o Desligar no ponto segue como sempre foi
+    svc.rodando.delete('PIV');
+    svc.acionar.mockClear();
+    await svc.pontoExterno('antes', 'PIV', 'p-desl');
+    await svc.pontoExterno('depois', 'PIV', 'p-desl');
+    expect(svc.acionar).not.toHaveBeenCalled();
   });
 
   describe('acionar com reiniciar', () => {
@@ -354,6 +411,19 @@ describe('saídas mantidas (sequencia.comandos_mantidos)', () => {
       const extra = svc.executar.mock.calls[0][6];
       // 60 min a 40 % → 30 min a 80 %
       expect(Math.round(extra.restanteParadaMs / 60000)).toBe(30);
+    });
+
+    it('manterParada: voltas já vencidas param em 1 min, nunca recomeçam do zero', async () => {
+      const ativa = {
+        id: 'A', acao: 'girar_direita', parar_em: new Date(Date.now() - 5000),
+        irrigacao: { modo: 'simples', config: { direcao: 'Avanço', percentual: 40, semAgua: false, canhao: false }, parada: { tipo: 'porVoltas', voltas: 3 } },
+      };
+      const { svc } = acionavel({ 'T:2': 1, 'T:3': 0 }, ativa);
+      await svc.acionar('PIV', 'girar_esquerda', undefined, undefined, { irrigacao: NOVA, reiniciar: true, manterParada: true });
+      expect(svc.executar.mock.calls[0][6].restanteParadaMs).toBe(60000);
+      // parar_em provisório vai na linha, para a ponta que começar no meio do reinício
+      const insert = (svc.prisma.$executeRaw.mock.calls as unknown[][]).find((c) => (c[0] as string[]).join('?').includes('INSERT INTO pivo_sequencias'))!;
+      expect(insert[insert.length - 1]).toBeInstanceOf(Date);
     });
 
     it('dois pedidos juntos: só um vira sequência', async () => {

@@ -55,6 +55,23 @@ type Autor = ScopedUser & { nome?: string };
 export class EquipamentosCmdService {
   private readonly logger = new Logger(EquipamentosCmdService.name);
 
+  /**
+   * Quem precisa saber de um comando EXTERNO num ponto (rota equipamentos/:id/pontos/:pid/acionar,
+   * a que os apps usam) — 'antes' e 'depois' do pulso. O pivô usa para interromper a sequência
+   * em andamento quando alguém manda Desligar direto no ponto (NEXON-98). Comandos que o
+   * próprio serviço de sequência manda não passam por aqui.
+   */
+  private readonly observadoresPonto: Array<(fase: 'antes' | 'depois', equipamentoId: string, pontoId: string, user?: any, cliente?: ClienteInfo) => Promise<void>> = [];
+  observarPontoExterno(fn: (fase: 'antes' | 'depois', equipamentoId: string, pontoId: string, user?: any, cliente?: ClienteInfo) => Promise<void>) {
+    this.observadoresPonto.push(fn);
+  }
+  /** Nunca derruba o comando: falha de observador só vai para o log. */
+  async avisarPontoExterno(fase: 'antes' | 'depois', equipamentoId: string, pontoId: string, user?: any, cliente?: ClienteInfo) {
+    for (const fn of this.observadoresPonto) {
+      await fn(fase, equipamentoId, pontoId, user, cliente).catch((e) => this.logger.warn(`[ponto-externo] ${equipamentoId}/${pontoId} (${fase}): ${(e as Error)?.message}`));
+    }
+  }
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly mqtt: MqttService,
