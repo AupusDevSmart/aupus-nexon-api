@@ -1073,6 +1073,9 @@ export class PivoSequenciaService implements OnModuleInit {
     const irr = ativa?.irrigacao;
     if (!ativa || !irr) throw new ConflictException('O pivô não está irrigando. Ligue com o percentual desejado.');
     if (irr.config.semAgua) throw new ConflictException('Girando sem água: o percentímetro fica em 100 %.');
+    // Irrigando parado só com a bomba: o pivô nunca recebeu giro, então não há percentímetro para
+    // trocar. Antes respondia 200 e regravava o registro sem mandar nada à TON.
+    if (irr.config.semGiro) throw new ConflictException('O pivô está irrigando parado (só a bomba). Para voltar a girar, salve e envie pelo Planejamento.');
 
     const lamina = Number(body?.lamina) > 0 ? Math.round(Number(body.lamina) * 100) / 100 : null;
     let pct: number;
@@ -1089,7 +1092,8 @@ export class PivoSequenciaService implements OnModuleInit {
     const antes = irr.config.percentual;
     if (pct === antes) throw new ConflictException(`O percentímetro já está em ${fmtPercentual(pct)}%.`);
 
-    await this.percentimetro(id, pts, pct * 10, user, cliente);
+    const aplicou = await this.percentimetro(id, pts, pct * 10, user, cliente);
+    if (aplicou === false) throw new BadRequestException('O ponto Percentimetro não está ligado a uma BO (Topologia IoT → Configurar I/O): o ajuste fica no painel.');
 
     // Parada por voltas/ângulo: o que falta percorrer, na velocidade nova (0 % = não chega).
     let pararEm = ativa.parar_em;
