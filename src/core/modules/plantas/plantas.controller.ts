@@ -360,13 +360,17 @@ export class PlantasController {
     description: 'Planta possui dependências que impedem a exclusão'
   })
   @UsePlantaScope({ entity: 'planta' })
-  async remove(@Param('id') id: string): Promise<{ message: string; deletedUnits?: number; deletedEquipments?: number }> {
+  async remove(
+    @Param('id') id: string,
+    // A planta compartilhada com o Service só sai com a confirmação da tela (409 sem ela, 10/11/2026)
+    @Query('confirmarCompartilhado') confirmarCompartilhado?: string,
+  ): Promise<{ message: string; deletedUnits?: number; deletedEquipments?: number }> {
     // Fazer trim do ID para garantir que não há espaços
     const plantaId = id.trim();
     this.logger.log(`🗑️ [DELETE PLANTA] Deletando planta ${plantaId}`);
 
     try {
-      const result = await this.plantasService.remove(plantaId);
+      const result = await this.plantasService.remove(plantaId, String(confirmarCompartilhado) === 'true');
 
       this.logger.log(`✅ [DELETE PLANTA] Planta ${plantaId} deletada com sucesso`);
       if (result.deletedUnits) {

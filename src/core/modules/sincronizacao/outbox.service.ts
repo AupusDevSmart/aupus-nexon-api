@@ -2,6 +2,26 @@ import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { Recurso } from './recursos';
 import { resolverCadeia } from './cadeia-de-dependencias';
+import { comDescendentes } from './arvore';
+
+/**
+ * As operacoes que a fila leva. VARCHAR(10) na tabela: "desvincular" nao cabe.
+ * Operacao nova: o RECEPTOR dos dois lados vai para producao antes do remetente
+ * (o receptor antigo recusa o que nao conhece, desde 09/11/2026).
+ *
+ * - upsert: o registro mudou aqui (o trigger)
+ * - delete: foi apagado aqui; la vira aviso (o trigger)
+ * - desvinculo: parou de ser compartilhado aqui; la desliga o vinculo
+ * - vinculo: foi compartilhado aqui (o botao). Religa o vinculo de la que estava
+ *   desligado: sem ele, compartilhar de novo depois de parar nunca atravessava
+ *   (la o upsert caia no vinculo desligado e a tela daqui dizia "compartilhado")
+ * - restauro: voltou aqui depois de apagado (o trigger); la fecha o aviso
+ */
+export const OPERACAO_DESVINCULO = 'desvinculo';
+export const OPERACAO_VINCULO = 'vinculo';
+export const OPERACAO_RESTAURO = 'restauro';
+export const OPERACOES = ['upsert', 'delete', OPERACAO_DESVINCULO, OPERACAO_VINCULO, OPERACAO_RESTAURO] as const;
+export type Operacao = (typeof OPERACOES)[number];
 
 type Tx = any;
 
@@ -89,24 +109,54 @@ export class OutboxService {
       // Payload vazio de proposito: quem monta e o worker, na hora de enviar,
       // lendo a linha atual. Assim a lista do que nunca viaja fica num lugar
       // so e o envio leva o estado de agora, nao uma foto do clique.
-      data: { recurso, registro_id: id, operacao: 'upsert', versao, payload: {} },
+      data: { recurso, registro_id: id, operacao: OPERACAO_VINCULO, versao, payload: {} },
     });
   }
 
   /**
-   * Para de sincronizar, sem apagar nada do outro lado.
+   * Para de sincronizar, sem apagar nada de nenhum lado.
    *
    * Desvincular nao e excluir. O que ja foi entregue continua la: apagar a
    * partir de um botao que o usuario leu como "parar de compartilhar" seria
    * destrutivo, irreversivel e surpreendente.
+   *
+   * Vale para os DOIS lados e desce a hierarquia (10/11/2026). Antes so
+   * desligava o vinculo daqui: o outro lado seguia mandando edicoes, que o
+   * receptor daqui gravava e religava (18 das 40 instalacoes desvinculadas em
+   * 26/10 voltaram a ativo assim), e os equipamentos da instalacao seguiam
+   * compartilhados. Agora cada vinculo desligado vira um evento `desvinculo`,
+   * que o outro lado aplica so no vinculo dele, sem tocar no dado.
    */
-  async desvincular(recurso: Recurso, registroId: string): Promise<void> {
+  async desvincular(recurso: Recurso, registroId: string): Promise<{ desligados: number }> {
     const id = registroId?.trim();
-    await this.prisma.sincronizacao_vinculos.updateMany({
-      where: { recurso, registro_id: id },
-      data: { ativo: false },
-    });
-    this.logger.log(`desvinculado: ${recurso}/${id}`);
+    if (!id) throw new BadRequestException('id vazio');
+
+    const desligados = await this.prisma.$transaction(
+      async (tx) => {
+        const elos = await comDescendentes(tx, recurso, id, { soVivos: false });
+        // Num comando so (a planta grande tem centenas de equipamentos): desliga o que
+        // esta ligado, sobe a versao na mesma escrita (o trigger concorrente nao sai
+        // com a mesma) e enfileira um desvinculo por vinculo desligado
+        const linhas = await tx.$queryRaw<{ id: bigint }[]>`
+          WITH alvo AS (
+            SELECT * FROM unnest(${elos.map((e) => e.recurso)}::text[], ${elos.map((e) => e.registro_id)}::text[]) AS c(recurso, registro_id)
+          ),
+          desligados AS (
+            UPDATE sincronizacao_vinculos v
+               SET ativo = false, versao = v.versao + 1, atualizado_em = now()
+              FROM alvo
+             WHERE v.recurso = alvo.recurso AND v.registro_id = alvo.registro_id AND v.ativo
+            RETURNING v.recurso, v.registro_id, v.versao
+          )
+          INSERT INTO sincronizacao_outbox (recurso, registro_id, operacao, versao, payload)
+          SELECT recurso, registro_id, ${OPERACAO_DESVINCULO}, versao, '{}'::jsonb FROM desligados
+          RETURNING id`;
+        return linhas.length;
+      },
+      { timeout: 30_000 },
+    );
+    this.logger.log(`desvinculado: ${recurso}/${id} (${desligados} vinculo(s), com o que fica debaixo)`);
+    return { desligados };
   }
 
   private async origem(tx: Tx): Promise<string> {

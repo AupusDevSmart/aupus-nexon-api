@@ -103,7 +103,11 @@ describe('sincronizacao (banco real)', () => {
       await outbox.desvincular('plantas', ID_PLANTA);
       await prisma.plantas.update({ where: { id: ID_PLANTA }, data: { nome: 'Depois' } });
 
-      expect(await pendentes()).toBe(1); // so o inicial
+      // O inicial (o vinculo, que la religa o que estiver desligado) e o desvinculo, que
+      // desliga o vinculo do outro lado (10/11/2026); a edicao de depois nao atravessa
+      const ops = (await prisma.sincronizacao_outbox.findMany({ where: { registro_id: ID_PLANTA, entregue_em: null }, orderBy: { id: 'asc' } }))
+        .map((e) => e.operacao);
+      expect(ops).toEqual(['vinculo', 'desvinculo']);
       expect(await prisma.plantas.findUnique({ where: { id: ID_PLANTA } })).not.toBeNull();
     });
   });
