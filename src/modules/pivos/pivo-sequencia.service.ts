@@ -1,10 +1,11 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException, OnModuleInit, Optional } from '@nestjs/common';
 import { PrismaService, PermissionScopeService, ScopedUser, ClienteInfo } from '@/core';
 import { novoId26 } from '../../core/common/cliente-info';
 import { capacidades, MSG_SOMENTE_LEITURA, papelCanonico } from '../../core/modules/auth/papeis';
 import { EquipamentosCmdService } from '../equipamentos-cmd/equipamentos-cmd.service';
 import { FUSO_OPERACAO, JanelaComAtivo, janelaValida, momentoEmSaoPaulo } from '../../shared/util/janela-horario';
 import { anguloDoEncoder, brutoDoEncoder, parametrosEncoder } from './pivo-posicao.util';
+import { PivoTonService, TXT_FALHA } from './pivo-ton.service';
 import { dentroDaPonta, duracaoParadaMs, fmtPercentual, Irrigacao, leituraMaisAntiga, mudancasConfig, normalizarIrrigacao, normalizarPercentual, OrigemSequencia, percentualDaLamina, resumoIrrigacao } from './pivo-automacao.util';
 
 /**
@@ -158,8 +159,31 @@ export class PivoSequenciaService implements OnModuleInit {
     private readonly prisma: PrismaService,
     private readonly scope: PermissionScopeService,
     private readonly cmd: EquipamentosCmdService,
+    // Sequência na TON (docs/IOT-PIVO-TON-LOCAL.md, Fase 3). Opcional: sem ela tudo segue no servidor.
+    @Optional() private readonly ton?: PivoTonService,
   ) {
     this.cmd.observarPontoExterno?.((fase, eq, ponto, user, cliente) => this.pontoExterno(fase, eq, ponto, user, cliente));
+    if (this.ton) this.ton.aoPararSozinho = (tonId, motivo, falha) => { void this.paradaDaTon(tonId, motivo, falha); };
+  }
+
+  /** A TON parou o pivô sozinha (parada programada, segurança, falha, reinício): fica na trilha do pivô. */
+  private async paradaDaTon(tonId: string, motivo: string, falha: boolean) {
+    const rows = await this.prisma.$queryRaw<Array<{ id: string }>>`
+      SELECT DISTINCT TRIM(p.equipamento_id) AS id FROM ton_bo b
+      JOIN equipamento_pontos p ON p.id = b.equipamento_ponto_id AND p.deleted_at IS NULL
+      JOIN equipamentos e ON e.id = p.equipamento_id
+      LEFT JOIN tipos_equipamentos te ON te.id = e.tipo_equipamento_id
+      WHERE b.ton_id = ${tonId}::bpchar AND b.deleted_at IS NULL AND UPPER(COALESCE(te.codigo, e.tipo_equipamento, '')) LIKE '%PIVO%'`.catch(() => []);
+    for (const r of rows) {
+      await this.trilha(r.id, `Pivô parou pela TON: ${TXT_FALHA[motivo] ?? motivo ?? 'parado'}`, null, 'parada', falha ? 'ALTA' : 'INFO').catch(() => undefined);
+    }
+  }
+
+  /** Estado da sequência na TON do pivô (status/ack mais recente), para a ficha. */
+  private async tonLocal(pts: { cmd: Partial<Record<PapelComando, string>> }) {
+    if (!this.ton) return null;
+    const m = await this.boDoPonto(pts.cmd.direita ?? pts.cmd.esquerda);
+    return m ? this.ton.statusDaTon(m.ton_id) : null;
   }
 
   /** Pivôs que receberam Desligar direto no ponto com sequência em andamento (ver pontoExterno). */
@@ -478,6 +502,8 @@ export class PivoSequenciaService implements OnModuleInit {
         permissivo: await this.lerStatus(pts.st.permissivo),
         status: st,
         lido_em: await this.lidoEmPivo(pts),
+        // Sequência na TON (Fase 3): estado/passo/falha/ângulo como a TON reportou (null = TON sem sequência local)
+        ton_local: await this.tonLocal(pts).catch(() => null),
       },
       posicao: await this.posicao(id),
       bombeamento: bomba,
@@ -931,6 +957,13 @@ export class PivoSequenciaService implements OnModuleInit {
     if (!pid) return false;
     const m = await this.boDoPonto(pid);
     if (!m) return false;
+    // Pivô ligado pela sequência na TON: o percentímetro é dela (o "perc" antigo é recusado).
+    if (this.ton?.ligadaNaTon(m.ton_id)) {
+      if (permil === 'off') return { bo: m.bo, cicloS: 0 };   // a TON zera no Desligar
+      const pmT = Math.max(0, Math.min(1000, Math.round(permil)));
+      await this.cmd.comandoTon({ equipamentoId: id, tonId: m.ton_id, cmd: `pivo perc ${pmT}`, rotulo: `Percentímetro ${fmtPercentual(pmT / 10)}%`, ackOk: new RegExp(`^pivo_perc_${pmT}$`) }, user, cliente);
+      return { bo: m.bo, cicloS: (await this.parametrosPercentimetro(id)).cicloS };
+    }
     if (permil === 'off') {
       await this.cmd.comandoTon({ equipamentoId: id, tonId: m.ton_id, cmd: 'perc off', rotulo: 'Percentímetro desligado', ackOk: /^perc_off$/ }, user, cliente);
       return { bo: m.bo, cicloS: 0 };
@@ -969,6 +1002,14 @@ export class PivoSequenciaService implements OnModuleInit {
   ): Promise<ResCanhao> {
     if (!pts.cmd.canhao) return 'sem_ponto';
     const alvo = ligar ? 1 : 0;
+    // Pivô ligado pela sequência na TON: o canhão é dela ("pivo canhao"); o status só confirma.
+    const mCan = this.ton ? await this.boDoPonto(pts.cmd.canhao) : null;
+    if (mCan && this.ton?.ligadaNaTon(mCan.ton_id)) {
+      await this.cmd.comandoTon({ equipamentoId: id, tonId: mCan.ton_id, cmd: `pivo canhao ${alvo}`, rotulo: ligar ? 'Canhão ligado' : 'Canhão desligado', ackOk: /^pivo_canhao_(on|off)$/ }, user, cliente);
+      if (!pts.st.canhao) return 'enviado';
+      const okT = await this.esperar(async () => (await this.lerStatus(pts.st.canhao)) === alvo, segundos, ctl);
+      return okT ? 'ok' : 'nao_confirmou';
+    }
     if (await this.mantido(id)) {
       // Saída mantida: a BO É o canhão (on = ligado). Manda SEMPRE o nível pedido; o status, se
       // houver, só confirma. Antes um Canhao_ligado lendo 1 (entrada presa, bancada) fazia o NexON
@@ -1137,6 +1178,18 @@ export class PivoSequenciaService implements OnModuleInit {
       const cfg = await this.lerConfig(id);
       const pts = await this.pontos(id);
       const b = cfg.bombeamento;
+
+      // Fase 3: a TON do pivô tem a sequência local → ela executa tudo; o NexON só acompanha.
+      const alvoTon = this.ton ? await this.ton.alvo(id, user, cliente).catch(() => null) : null;
+      if (alvoTon && this.ton) {
+        const params = await this.parametrosPercentimetro(id).catch(() => ({ cicloS: 60, lamina100: null }));
+        await this.ton.executar({
+          pivoId: id, seqId: ctl.seqId, acao, irr, ctl, reiniciar, restanteParadaMs: extra.restanteParadaMs,
+          sequencia: cfg.sequencia, cicloPercS: params.cicloS, tempoVolta100h: await this.tempoVolta100(id).catch(() => 6),
+          anguloAtual: await this.anguloAtual(id).catch(() => null), passo, fim, user, cliente,
+        }, alvoTon);
+        return;
+      }
 
       const mant = cfg.sequencia.comandos_mantidos;
       /**

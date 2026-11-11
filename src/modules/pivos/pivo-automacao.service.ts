@@ -149,6 +149,9 @@ export class PivoAutomacaoService {
       const at = await this.seq.irrigacaoAtiva(pivo);
       if (!at?.irrigacao) continue;
       const irr = at.irrigacao;
+      // Sequência na TON (Fase 3): a própria TON para (tempo/voltas/ângulo), mesmo sem internet.
+      // parar_em fica só para a ficha mostrar o término previsto.
+      if ((irr as Irrigacao & { naTon?: boolean }).naTon) continue;
       if (at.parar_em && new Date(at.parar_em).getTime() <= Date.now()) {
         // Desligar que já não desligou a bomba: espaça as novas tentativas (3 seguidas, depois 5 em 5 min).
         if (!this.seq.podeTentarDesligar(pivo)) continue;

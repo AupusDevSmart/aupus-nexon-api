@@ -704,7 +704,7 @@ export class EquipamentosCmdService {
    * (erro) ou algo diferente — sem casar, é falha (não segue achando que a TON aplicou).
    */
   async comandoTon(
-    p: { equipamentoId: string; tonId: string; cmd: string; rotulo: string; ackOk?: RegExp },
+    p: { equipamentoId: string; tonId: string; cmd: string; rotulo: string; ackOk?: RegExp; silencioso?: boolean },
     user?: Autor,
     cliente?: ClienteInfo,
   ): Promise<{ status: string; msg: string; latency_ms: number }> {
@@ -728,7 +728,7 @@ export class EquipamentosCmdService {
       // Satélite LoRa: o ack não voltou (rádio ocupado com o relatório das entradas).
       // Comandos de texto (perc) são idempotentes — repetir uma vez é seguro.
       if (ack.status === 'error' && String(ack.msg ?? '') === 'lora_no_ack') {
-        await this.registrarComando(
+        if (!p.silencioso) await this.registrarComando(
           { equipamentoId: eqId, mensagem: `${semantico}: sem ack pelo LoRa, repetindo`, status: 'error', severidade: 'WARN', cmdId: ack.cmd_id, latencyMs: Date.now() - t0, tonId: ton.id, comandoTecnico: p.cmd, comandoSemantico: semantico },
           user, cliente,
         );
@@ -737,7 +737,7 @@ export class EquipamentosCmdService {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Erro desconhecido';
-      await this.registrarComando(
+      if (!p.silencioso) await this.registrarComando(
         { equipamentoId: eqId, mensagem: `${semantico}: sem resposta da TON ${ton.nome} (${msg})`, status: 'timeout', severidade: 'ERROR', latencyMs: Date.now() - t0, tonId: ton.id, comandoTecnico: p.cmd, comandoSemantico: semantico },
         user, cliente,
       );
@@ -746,7 +746,7 @@ export class EquipamentosCmdService {
     const latency_ms = Date.now() - t0;
     const casou = ack.status === 'duplicate' || (ack.status !== 'error' && (!p.ackOk || p.ackOk.test(String(ack.msg ?? ''))));
     if (!casou) {
-      await this.registrarComando(
+      if (!p.silencioso) await this.registrarComando(
         { equipamentoId: eqId, mensagem: `${semantico}: TON não aplicou (${ack.msg || ack.status})`, status: 'error', severidade: 'ERROR', cmdId: ack.cmd_id, latencyMs: latency_ms, tonId: ton.id, comandoTecnico: p.cmd, comandoSemantico: semantico },
         user, cliente,
       );
@@ -756,7 +756,8 @@ export class EquipamentosCmdService {
         : `${ack.msg || ack.status} (firmware sem suporte? regrave a TON)`;
       throw new BadGatewayException({ message: `TON não aplicou "${p.cmd}": ${motivo}`, cmd_id: ack.cmd_id, latency_ms });
     }
-    await this.registrarComando(
+    // silencioso: consulta de estado (ex.: "pivo status" a cada poucos segundos) não vai pro registro.
+    if (!p.silencioso) await this.registrarComando(
       { equipamentoId: eqId, mensagem: `${semantico} (${p.cmd} @ ${ton.nome})`, status: ack.status, severidade: 'INFO', cmdId: ack.cmd_id, latencyMs: latency_ms, tonId: ton.id, comandoTecnico: p.cmd, comandoSemantico: semantico },
       user, cliente,
     );

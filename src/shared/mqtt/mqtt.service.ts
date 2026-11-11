@@ -109,6 +109,15 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
   public setOtaHooks(h: { otaStatus?: (topic: string, dados: any) => void; tonStatus?: (equipamentoId: string, dados: any) => void }): void {
     this.otaHooks = h;
   }
+  // Pivô com sequência local na TON (docs/IOT-PIVO-TON-LOCAL.md): <base>/pivo (status) e
+  // <base>/pivo/evento. Quem consome é o PivoTonService (registra no init).
+  private pivoHooks: {
+    status?: (tonId: string, dados: any) => void;
+    evento?: (tonId: string, dados: any) => void;
+  } = {};
+  public setPivoHooks(h: { status?: (tonId: string, dados: any) => void; evento?: (tonId: string, dados: any) => void }): void {
+    this.pivoHooks = h;
+  }
 
   // Buffer para agregação de 1 minuto
   private buffers: Map<string, BufferData> = new Map();
@@ -477,7 +486,7 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     }
 
     // 6) Bomba de combustível + carregador: <base>/abastecimento, <base>/bomba, <base>/carregador.
-    for (const suf of ['abastecimento', 'bomba', 'evento', 'auth/req', 'carregador']) {
+    for (const suf of ['abastecimento', 'bomba', 'evento', 'auth/req', 'carregador', 'pivo', 'pivo/evento']) {
       const t = `${topic}/${suf}`;
       if (!this.subscriptions.has(t)) {
         this.subscriptions.set(t, []);
@@ -960,6 +969,19 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       if (topic.endsWith('/evt')) {
         for (const equipamentoId of equipamentoIds) {
           await this.processReleEvento(equipamentoId, dados);
+        }
+        return;
+      }
+
+      // Pivô na TON: status e eventos da sequência local (antes do posto: /pivo/evento
+      // também termina em /evento). Retido = estado velho reentregue: só o status vale.
+      if (topic.endsWith('/pivo') || topic.endsWith('/pivo/evento')) {
+        const ev = topic.endsWith('/pivo/evento');
+        if (ev && retained) return;
+        for (const equipamentoId of equipamentoIds) {
+          try { (ev ? this.pivoHooks.evento : this.pivoHooks.status)?.(equipamentoId.trim(), dados); } catch (e) {
+            console.error(`❌ Erro no pivô (${topic}):`, e);
+          }
         }
         return;
       }
@@ -1959,7 +1981,7 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     // + os do posto/carregador (subscribeToEquipamento item 6): sem eles aqui o reconcile
     // desinscrevia /bomba, /evento, /auth/req, /abastecimento e /carregador a cada 5 min
     // (ingestão da bancada parava logo após o 1º reconcile — visto em 22/09/2026).
-    const DERIVADOS = ['/status', '/diagnostics', '/log', '/cmd/ack', '/inputs', '/evt', '/abastecimento', '/bomba', '/evento', '/auth/req', '/carregador'];
+    const DERIVADOS = ['/status', '/diagnostics', '/log', '/cmd/ack', '/inputs', '/evt', '/abastecimento', '/bomba', '/evento', '/auth/req', '/carregador', '/pivo', '/pivo/evento'];
     const currentMap = new Map<string, Set<string>>();
     for (const [topic, equipIds] of this.subscriptions.entries()) {
       if (DERIVADOS.some((suf) => topic.endsWith(suf))) continue;
