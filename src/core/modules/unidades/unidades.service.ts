@@ -1,5 +1,4 @@
-import { Injectable, Logger, NotFoundException, BadRequestException, ForbiddenException, ConflictException, HttpException } from '@nestjs/common';
-import { apagarComDescendentes, compartilhadosNaCascata, descreverCompartilhados } from '../sincronizacao/arvore';
+import { Injectable, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateUnidadeDto } from './dto/create-unidade.dto';
 import { UpdateUnidadeDto } from './dto/update-unidade.dto';
@@ -10,8 +9,6 @@ import { PermissionScopeService, ScopedUser } from '../auth/permission-scope.ser
 
 @Injectable()
 export class UnidadesService {
-  private readonly logger = new Logger(UnidadesService.name);
-
   constructor(
     private prisma: PrismaService,
     private scopeService: PermissionScopeService,
@@ -536,12 +533,21 @@ export class UnidadesService {
     }
   }
 
-  async remove(id: string, confirmarCompartilhado = false): Promise<{ message: string; deletedEquipments?: number }> {
+  async remove(id: string): Promise<{ message: string; deletedEquipments?: number }> {
     try {
       const unidade = await this.prisma.unidades.findFirst({
         where: {
           id,
           deleted_at: null,
+        },
+        include: {
+          _count: {
+            select: {
+              equipamentos: {
+                where: { deleted_at: null }
+              },
+            },
+          },
         },
       });
 
@@ -549,21 +555,35 @@ export class UnidadesService {
         throw new NotFoundException(`Unidade com ID ${id} não encontrada`);
       }
 
-      // Compartilhada com o outro produto (10/11/2026): a exclusão não atravessa (lá vira
-      // aviso, com decisão de alguém), mas quem exclui tem de saber. A tela pergunta antes;
-      // chamada direta (script, Postman, outro front) não pula a pergunta
-      const compartilhados = await compartilhadosNaCascata(this.prisma, 'unidades', id.trim());
-      if (compartilhados.total > 0 && !confirmarCompartilhado) {
-        throw new ConflictException(
-          `Esta instalação é compartilhada com o outro produto (${descreverCompartilhados(compartilhados)}). Confirme a exclusão na tela, que mostra o que acontece lá.`,
-        );
-      }
+      // Contar equipamentos que serão deletados
+      const equipamentosCount = unidade._count.equipamentos;
 
-      // A instalação, os equipamentos dela e os sub-equipamentos: o mesmo conjunto que
-      // a tela mostrou antes. Antes ia pelo `unidade_id`, e o sub-equipamento (só com
-      // o pai) ficava vivo debaixo de um pai apagado
-      const apagados = await this.prisma.$transaction((tx) => apagarComDescendentes(tx, 'unidades', unidade.id), { timeout: 30_000 });
-      const result = { equipamentosCount: apagados.equipamentos };
+      // Iniciar transação para deletar unidade e equipamentos em cascata
+      const result = await this.prisma.$transaction(async (prisma) => {
+        // 1. Soft delete de todos os equipamentos da unidade
+        if (equipamentosCount > 0) {
+          await prisma.equipamentos.updateMany({
+            where: {
+              unidade_id: id,
+              deleted_at: null,
+            },
+            data: {
+              deleted_at: new Date(),
+            },
+          });
+          console.log(`✅ [UNIDADES SERVICE] ${equipamentosCount} equipamento(s) deletado(s) em cascata`);
+        }
+
+        // 2. Soft delete da unidade
+        await prisma.unidades.update({
+          where: { id },
+          data: {
+            deleted_at: new Date(),
+          },
+        });
+
+        return { equipamentosCount };
+      });
 
       const message = result.equipamentosCount > 0
         ? `Unidade removida com sucesso junto com ${result.equipamentosCount} equipamento(s)`
@@ -574,11 +594,13 @@ export class UnidadesService {
         deletedEquipments: result.equipamentosCount
       };
     } catch (error) {
-      if (error instanceof HttpException) throw error;
-      // O erro que não é HTTP (o banco) sobe como está: o filtro responde 500 e o
-      // Sentry fica sabendo. Antes virava um 400 genérico só no console
-      this.logger.error(`Erro ao excluir a instalação ${id}`, error instanceof Error ? error.stack : String(error));
-      throw error;
+      console.error('❌ [UNIDADES SERVICE] Erro ao remover unidade:', error);
+
+      if (error instanceof NotFoundException) {
+        throw error;
+      }
+
+      throw new BadRequestException('Erro ao remover unidade');
     }
   }
 

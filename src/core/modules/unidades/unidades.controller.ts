@@ -401,15 +401,11 @@ export class UnidadesController {
     description: 'Não é possível remover unidade com equipamentos vinculados',
   })
   @UsePlantaScope({ entity: 'unidade' })
-  async remove(
-    @Param('id') id: string,
-    // A instalação compartilhada com o Service só sai com a confirmação da tela (409 sem ela, 10/11/2026)
-    @Query('confirmarCompartilhado') confirmarCompartilhado?: string,
-  ) {
+  async remove(@Param('id') id: string) {
     this.logger.log(`🗑️  [DELETE UNIDADE] Removendo: ${id}`);
 
     try {
-      const result = await this.unidadesService.remove(id, String(confirmarCompartilhado) === 'true');
+      const result = await this.unidadesService.remove(id);
       this.logger.log(`✅ [DELETE UNIDADE] ${result.message}`);
       return result;
     } catch (error) {
