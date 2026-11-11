@@ -385,7 +385,7 @@ export class PivoTonService implements OnModuleInit {
   }
 
   /**
-   * Acompanha a TON até `chegou(estado)`: eventos e o passo do status viram passos; falha → texto; a cada 5 s pergunta
+   * Acompanha a TON até `chegou(estado)`: eventos e o passo do status viram passos; falha → texto; sem notícia há 20 s pergunta
    * o estado pelo ack (o status espontâneo do satélite só sai no POLL). 'ok' | 'cancelado' | erro.
    */
   private async acompanhar(x: ExecutarNaTon, alvo: AlvoTon, t0: number, n0: number, limiteS: number, chegou: (e: number) => boolean, desligando = false): Promise<string> {
@@ -425,7 +425,11 @@ export class PivoTonService implements OnModuleInit {
         if (!desligando && st.s.e === 0 && saiuDoParado && st.s.f) return `Falha na TON: ${TXT_FALHA[st.s.f] ?? st.s.f}`;
         if (!desligando && st.s.e === 0 && st.s.f && Date.now() - t0 > 3000) return `Falha na TON: ${TXT_FALHA[st.s.f] ?? st.s.f}`;
       }
-      if (Date.now() - ultimaPergunta >= 5000) {
+      // Reserva: o gateway já faz um POLL de confirmação ~3 s depois de cada comando (traz o status
+      // do pivô). Perguntar mais vezes satura o LoRa (ack → POLL → ~3 s de resposta) e o próximo
+      // comando — o Desligar — colide. Só pergunta se nada chegou há 20 s.
+      const ultimaNoticia = Math.max(this.status.get(t)?.em ?? 0, ultimaPergunta);
+      if (Date.now() - ultimaNoticia >= 20000) {
         ultimaPergunta = Date.now();
         await this.lerEstadoPeloAck(x.pivoId, t, x.user, x.cliente).catch(() => undefined);
         continue;
