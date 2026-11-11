@@ -5,7 +5,6 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { OutboxService } from './outbox.service';
 import { EventoRecebido, SincronizacaoService } from './sincronizacao.service';
 import { TokenServicoGuard } from './token-servico.guard';
-import { PermissionScopeService, type ScopedUser } from '../auth/permission-scope.service';
 import { Recurso, ehRecurso } from './recursos';
 import { BadRequestException } from '@nestjs/common';
 
@@ -74,7 +73,6 @@ export class VinculosController {
   constructor(
     private readonly outbox: OutboxService,
     private readonly service: SincronizacaoService,
-    private readonly scope: PermissionScopeService,
   ) {}
 
   @Post(':recurso/:id')
@@ -100,31 +98,12 @@ export class VinculosController {
   @ApiOperation({
     summary: 'Para de compartilhar',
     description:
-      'Corta o fluxo sem apagar nada de nenhum lado. Vale para os dois produtos e para o ' +
-      'que fica debaixo (a planta leva as instalações e os equipamentos): o outro lado ' +
-      'recebe o desvínculo e desliga o vínculo dele, sem tocar no dado.',
+      'Corta o fluxo sem apagar nada do outro lado. O que já foi entregue continua ' +
+      'lá: apagar a partir de um botão lido como "parar de compartilhar" seria ' +
+      'destrutivo e irreversível.',
   })
   async desvincular(@Param('recurso') recurso: string, @Param('id') id: string) {
-    const { desligados } = await this.comRecurso(recurso, r => this.outbox.desvincular(r, id));
-    return { ok: true, desligados };
-  }
-
-  @Get(':recurso/:id/cascata')
-  @Permissions('plantas.manage', 'unidades.manage')
-  @ApiOperation({
-    summary: 'O que a exclusão deste registro alcança de compartilhado',
-    description:
-      'A planta ou a instalação e o que fica debaixo dela, só o que está compartilhado ' +
-      'agora. A tela usa antes de excluir: compartilhado pede confirmação forte, e a API ' +
-      'recusa a exclusão sem ela (409). Fora do escopo do usuário, 404.',
-  })
-  async cascata(@Param('recurso') recurso: string, @Param('id') id: string, @CurrentUser() user?: ScopedUser) {
-    if (recurso !== 'plantas' && recurso !== 'unidades') {
-      throw new BadRequestException('A cascata é de planta ou de instalação.');
-    }
-    // Quem gerencia uma planta não descobre o que é compartilhado na de outro dono (nem o nome das instalações)
-    await this.scope.assertEntityInScope(recurso === 'plantas' ? 'planta' : 'unidade', id.trim(), user);
-    return this.service.compartilhadosNaCascata(recurso, id);
+    return { ok: await this.comRecurso(recurso, r => this.outbox.desvincular(r, id)) };
   }
 
   @Get(':recurso/:id/previa')
