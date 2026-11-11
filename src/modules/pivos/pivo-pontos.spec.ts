@@ -256,21 +256,31 @@ describe('saídas mantidas (sequencia.comandos_mantidos)', () => {
     expect(saidas).toEqual(['r1 liga', 'r4 liga', 'r3 desliga', 'r2 liga']);
     saidas.length = 0;
     await m.svc.executar('PIV', 'desligar', { seqId: 'S2', cancelar: false });
-    expect(saidas).toEqual(['r2 desliga', 'r3 desliga', 'r6 desliga', 'r1 desliga', 'r4 desliga']);
+    // a água corta antes: bomba e válvula, e só depois o canhão (a espera dele não segura a bomba)
+    expect(saidas).toEqual(['r2 desliga', 'r3 desliga', 'r1 desliga', 'r4 desliga', 'r6 desliga']);
   });
 
-  it('desligar sem ponto Desligar: baixa os dois sentidos, o canhão e o Ligar', async () => {
+  it('desligar sem ponto Desligar: baixa os dois sentidos, o Ligar e o canhão', async () => {
     const { svc, saidas, acionados } = mantido({ 'T:2': 1, 'T:3': 0 });
     await svc.executar('PIV', 'desligar', { seqId: 'S', cancelar: false });
-    expect(saidas).toEqual(['r2 desliga', 'r3 desliga', 'r6 desliga', 'r1 desliga']);
+    expect(saidas).toEqual(['r2 desliga', 'r3 desliga', 'r1 desliga', 'r6 desliga']);
     expect(acionados).toEqual([]);
+  });
+
+  // PIV-01 (bancada, 11/11/2026): a BI do Canhao_ligado lia 1 o tempo todo. O NexON respondia
+  // "já ligado" sem energizar a saída: a ficha dizia ligado e o canhão nunca ligou.
+  it('canhão com o status já lendo 1: a saída é energizada mesmo assim (o status só confirma)', async () => {
+    const { svc, saidas } = mantido({ 'T:2': 1, 'T:3': 0, 'T:5': 1, 'T:6': 1, 'TON-B:5': 1 });
+    const r = await svc.aplicarCanhao('PIV', await svc.pontos('PIV'), true, undefined, undefined, 1);
+    expect(saidas).toEqual(['r6 liga']);
+    expect(['ok', 'enviado']).toContain(r);
   });
 
   // NEXON-98 — "Salvar e enviar" com o pivô ligado: desliga inteiro e só então liga com as novas opções.
   it('reiniciar: o Desligar inteiro primeiro, depois a partida no novo sentido', async () => {
     const { svc, saidas } = mantido({ 'T:2': 1, 'T:3': 0 });
     await svc.executar('PIV', 'girar_esquerda', { seqId: 'S', cancelar: false }, undefined, undefined, null, { reiniciar: true });
-    expect(saidas).toEqual(['r2 desliga', 'r3 desliga', 'r6 desliga', 'r1 desliga', 'r1 liga', 'r2 desliga', 'r3 liga']);
+    expect(saidas).toEqual(['r2 desliga', 'r3 desliga', 'r1 desliga', 'r6 desliga', 'r1 liga', 'r2 desliga', 'r3 liga']);
     const status = svc.prisma.$executeRaw.mock.calls.map((c: unknown[]) => c[1]);
     expect(status).toContain('concluida');
     expect(status).not.toContain('falhou');

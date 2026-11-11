@@ -970,8 +970,9 @@ export class PivoSequenciaService implements OnModuleInit {
     if (!pts.cmd.canhao) return 'sem_ponto';
     const alvo = ligar ? 1 : 0;
     if (await this.mantido(id)) {
-      // Saída mantida: a BO É o canhão (on = ligado); o status, se houver, só confirma.
-      if (pts.st.canhao && (await this.lerStatus(pts.st.canhao)) === alvo) return 'ja';
+      // Saída mantida: a BO É o canhão (on = ligado). Manda SEMPRE o nível pedido; o status, se
+      // houver, só confirma. Antes um Canhao_ligado lendo 1 (entrada presa, bancada) fazia o NexON
+      // responder "já ligado" sem nunca energizar a saída — a ficha dizia ligado e o canhão não ligava.
       await this.saidaMantida(id, pts.cmd.canhao, ligar, ligar ? 'Canhão ligado' : 'Canhão desligado', user, cliente);
       if (!pts.st.canhao) return 'enviado';
       const okM = await this.esperar(async () => (await this.lerStatus(pts.st.canhao)) === alvo, segundos, ctl);
@@ -1177,7 +1178,8 @@ export class PivoSequenciaService implements OnModuleInit {
           }, cfg.sequencia.confirma_giro_s, ctl);
           await passo('pivo', parou === null ? 'Pivô sem status cadastrado — sem confirmação' : parou ? 'Pivô parado' : 'Pivô não confirmou parada no tempo', parou !== false);
         }
-        if (pts.cmd.canhao && (mant || (pts.st.canhao && (await this.lerStatus(pts.st.canhao)) === 1))) {
+        const desligarCanhao = async () => {
+          if (!(pts.cmd.canhao && (mant || (pts.st.canhao && (await this.lerStatus(pts.st.canhao)) === 1)))) return;
           const r = await this.aplicarCanhao(id, pts, false, user, cliente, cfg.sequencia.confirma_giro_s)
             .catch((x) => { this.logger.warn(`[pivo-seq] ${id} canhão: ${msgErro(x)}`); return 'nao_confirmou' as const; });
           await passo('canhao', MSG_CANHAO[r](false, cfg.sequencia.confirma_giro_s), r === 'ok' || r === 'ja');
@@ -1185,8 +1187,16 @@ export class PivoSequenciaService implements OnModuleInit {
           if (r !== 'ok' && r !== 'ja') {
             await this.trilha(id, `${MSG_CANHAO[r](false, cfg.sequencia.confirma_giro_s)} — confira o canhão no painel`, (user as Autor | undefined)?.id?.trim() || null, origemSeq, 'WARN');
           }
+        };
+        if (mant) {
+          // Saídas mantidas (TON no lugar do painel): a água corta ANTES. A espera do canhão
+          // (até confirma_giro_s) não pode segurar a bomba ligada com o pivô já parado.
+          try { if (b) await this.desligarBomba(id, b, passo, user, cliente, desligarPivoEnviado); }
+          finally { await desligarCanhao(); }
+        } else {
+          await desligarCanhao();
+          if (b) await this.desligarBomba(id, b, passo, user, cliente, desligarPivoEnviado);
         }
-        if (b) await this.desligarBomba(id, b, passo, user, cliente, desligarPivoEnviado);
         return parou;
       };
       if (acao === 'desligar') {
