@@ -1,5 +1,5 @@
 import { agoraEmSaoPaulo, lerData, lerHora, validarAgenda } from './pivo-agenda.util';
-import { programacaoDisparaAgora, type ProgramacaoExec } from './pivo-automacao.util';
+import { irrigacaoDaProgramacao, programacaoDisparaAgora, type ProgramacaoExec } from './pivo-automacao.util';
 
 /** Agenda do pivô por data (planilha, NEXON-98): validação das linhas e disparo só no dia. */
 const AGORA = { data: '2026-11-11', minutos: 12 * 60 };   // 11/11/2026 12:00
@@ -32,7 +32,7 @@ describe('agenda por data: validação da planilha', () => {
   it('linha boa: fim menor que o início vira o dia; o nome diz o dia e o horário', () => {
     const { ok, erros } = validarAgenda([linha()], AGORA);
     expect(erros).toEqual([]);
-    expect(ok).toEqual([{ linha: 2, data: '2026-11-12', hora_inicio: '21:00', duracao_min: 480, sentido: 'horario', velocidade: 60, com_agua: true, nome: '12/11/2026 · 21:00 → 05:00' }]);
+    expect(ok).toEqual([{ linha: 2, data: '2026-11-12', hora_inicio: '21:00', duracao_min: 480, sentido: 'horario', velocidade: 60, com_agua: true, canhao: false, nome: '12/11/2026 · 21:00 → 05:00' }]);
   });
 
   it('aceita sentido e água por extenso, vírgula no percentual e duração em minutos', () => {
@@ -44,6 +44,14 @@ describe('agenda por data: validação da planilha', () => {
   it('seco não leva percentímetro', () => {
     const { ok } = validarAgenda([linha({ com_agua: 'Não', percentual: '' })], AGORA);
     expect(ok[0]).toMatchObject({ com_agua: false, velocidade: null });
+  });
+
+  it('canhão: em branco é Não; Sim liga junto; no seco é recusado', () => {
+    expect(validarAgenda([linha()], AGORA).ok[0].canhao).toBe(false);
+    expect(validarAgenda([linha({ canhao: 'Sim' })], AGORA).ok[0].canhao).toBe(true);
+    expect(validarAgenda([linha({ canhao: 'não' })], AGORA).ok[0].canhao).toBe(false);
+    expect(validarAgenda([linha({ canhao: 'talvez' })], AGORA).erros[0].motivo).toMatch(/Canhão inválido/);
+    expect(validarAgenda([linha({ canhao: 'Sim', com_agua: 'Não', percentual: '' })], AGORA).erros[0].motivo).toMatch(/não liga no seco/);
   });
 
   it('uma linha errada recusa o envio inteiro, com o motivo de cada linha', () => {
@@ -126,6 +134,12 @@ describe('agenda por data: disparo', () => {
     expect(programacaoDisparaAgora(prog({ data: '2026-11-11' }), { minutos: 20 * 60, diaSemana: 3 }, Date.now())).toBe(false);
     // dispara uma vez só, mesmo que a marca seja antiga (virada do dia)
     expect(programacaoDisparaAgora(prog({ data: '2026-11-11', ultima_execucao_em: new Date(Date.now() - 30 * 3600000) }), as21h, Date.now())).toBe(false);
+  });
+
+  it('a programação leva o canhão para a irrigação — nunca no seco, e linha antiga fica sem', () => {
+    expect(irrigacaoDaProgramacao(prog({ canhao: true })).config.canhao).toBe(true);
+    expect(irrigacaoDaProgramacao(prog({ canhao: true, com_agua: false })).config.canhao).toBe(false);
+    expect(irrigacaoDaProgramacao(prog()).config.canhao).toBe(false);
   });
 
   it('semanal continua exigindo o dia da semana', () => {

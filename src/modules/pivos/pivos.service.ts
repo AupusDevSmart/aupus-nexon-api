@@ -28,12 +28,14 @@ interface ProgramacaoRow {
   sentido: string;
   velocidade: unknown;
   com_agua: boolean;
+  canhao: boolean;
   created_at: Date;
   updated_at: Date;
 }
 
 const PROG_COLS = Prisma.sql`TRIM(id) AS id, nome, ativo, hora_inicio, dias, modo, angulo_inicial, angulo_final,
-  duracao_min, sentido, velocidade, com_agua, created_at, updated_at`;
+  duracao_min, sentido, velocidade, com_agua,
+  COALESCE((to_jsonb(pivo_programacoes)->>'canhao')::boolean, false) AS canhao, created_at, updated_at`;
 
 const num = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
 
@@ -229,12 +231,12 @@ export class PivosService {
     await this.escrever(() => this.prisma.$executeRaw`
       INSERT INTO pivo_programacoes
         (id, equipamento_id, nome, ativo, hora_inicio, dias, modo, angulo_inicial, angulo_final, duracao_min,
-         sentido, velocidade, com_agua, created_by, updated_by, created_at, updated_at)
+         sentido, velocidade, com_agua, canhao, created_by, updated_by, created_at, updated_at)
       VALUES
         (${id}, ${eq.id}, ${p.nome}, ${p.ativo}, ${p.hora_inicio}, ${p.dias}::smallint[], ${p.modo},
          ${p.angulo_inicial}, ${p.angulo_final}, ${p.duracao_min}, ${p.sentido}, ${p.velocidade}, ${p.com_agua},
-         ${uid}, ${uid}, now(), now())`);
-    await this.auditarAgenda(eq.id, `Horário programado: ${p.nome}`, user);
+         ${p.canhao}, ${uid}, ${uid}, now(), now())`);
+    await this.auditarAgenda(eq.id, `Horário programado: ${p.nome}${p.canhao ? ' · canhão' : ''}`, user);
     return this.buscarProgramacao(eq.id, id);
   }
 
@@ -247,11 +249,14 @@ export class PivosService {
         nome = ${p.nome}, ativo = ${p.ativo}, hora_inicio = ${p.hora_inicio}, dias = ${p.dias}::smallint[],
         modo = ${p.modo}, angulo_inicial = ${p.angulo_inicial}, angulo_final = ${p.angulo_final},
         duracao_min = ${p.duracao_min}, sentido = ${p.sentido}, velocidade = ${p.velocidade},
-        com_agua = ${p.com_agua}, updated_by = ${user?.id?.trim() ?? null}, updated_at = now()
+        com_agua = ${p.com_agua},
+        canhao = CASE WHEN ${p.com_agua} THEN COALESCE(${dto.canhao ?? null}::boolean, canhao) ELSE false END,
+        updated_by = ${user?.id?.trim() ?? null}, updated_at = now()
       WHERE TRIM(id) = ${progId.trim()} AND equipamento_id = ${eq.id}::bpchar AND deleted_at IS NULL AND data IS NULL`);
     if (!n) throw new NotFoundException('Programação não encontrada');
-    await this.auditarAgenda(eq.id, `Horário programado alterado: ${p.nome}`, user);
-    return this.buscarProgramacao(eq.id, progId.trim());
+    const salvo = await this.buscarProgramacao(eq.id, progId.trim());
+    await this.auditarAgenda(eq.id, `Horário programado alterado: ${p.nome}${salvo.canhao ? ' · canhão' : ''}`, user);
+    return salvo;
   }
 
   async removerProgramacao(equipamentoId: string, progId: string, user?: ScopedUser) {
@@ -290,8 +295,9 @@ export class PivosService {
     const de = lerData(q.de) ?? hoje;   // data impossível (2026-13-45) cai em hoje, não em erro 500
     const ate = lerData(q.ate);
     try {
-      const rows = await this.prisma.$queryRaw<Array<{ id: string; data: string; hora_inicio: string; duracao_min: number | null; sentido: string; velocidade: unknown; com_agua: boolean; lote_id: string | null; executada: boolean }>>`
+      const rows = await this.prisma.$queryRaw<Array<{ id: string; data: string; hora_inicio: string; duracao_min: number | null; sentido: string; velocidade: unknown; com_agua: boolean; canhao: boolean; lote_id: string | null; executada: boolean }>>`
         SELECT TRIM(id) AS id, to_char(data, 'YYYY-MM-DD') AS data, hora_inicio, duracao_min, sentido, velocidade, com_agua,
+               COALESCE((to_jsonb(pivo_programacoes)->>'canhao')::boolean, false) AS canhao,
                TRIM(lote_id) AS lote_id, (ultima_execucao_em IS NOT NULL) AS executada
         FROM pivo_programacoes
         WHERE equipamento_id = ${eq.id}::bpchar AND deleted_at IS NULL AND data IS NOT NULL
@@ -342,10 +348,10 @@ export class PivosService {
       for (let i = 0; i < ok.length; i += 500) {
         const linhas = ok.slice(i, i + 500).map((x) => Prisma.sql`
           (${novoId26()}, ${eq.id}, ${x.nome}, true, ${x.hora_inicio}, '{}'::smallint[], 'tempo', ${x.duracao_min},
-           ${x.sentido}, ${x.velocidade}, ${x.com_agua}, ${x.data}::date, ${lote}, ${uid}, ${uid}, now(), now())`);
+           ${x.sentido}, ${x.velocidade}, ${x.com_agua}, ${x.canhao}, ${x.data}::date, ${lote}, ${uid}, ${uid}, now(), now())`);
         await tx.$executeRaw`
           INSERT INTO pivo_programacoes
-            (id, equipamento_id, nome, ativo, hora_inicio, dias, modo, duracao_min, sentido, velocidade, com_agua, data, lote_id,
+            (id, equipamento_id, nome, ativo, hora_inicio, dias, modo, duracao_min, sentido, velocidade, com_agua, canhao, data, lote_id,
              created_by, updated_by, created_at, updated_at)
           VALUES ${Prisma.join(linhas)}`;
       }
@@ -354,10 +360,12 @@ export class PivosService {
     // não conhece `data` e dispararia a linha TODO dia; com `dias` vazio ela nunca dispara lá.
     const br = (d: string) => `${d.slice(8, 10)}/${d.slice(5, 7)}/${d.slice(0, 4)}`;
     const datas = ok.map((x) => x.data).sort();
+    const comCanhao = ok.filter((x) => x.canhao).length;
     await this.auditarAgenda(eq.id,
       `Agenda por planilha: ${ok.length} ${ok.length === 1 ? 'irrigação' : 'irrigações'} de ${br(datas[0])} a ${br(datas[datas.length - 1])}`
+      + `${comCanhao ? ` · ${comCanhao} com canhão` : ''}`
       + `${substituir ? ` · substituiu ${removidos} que estavam agendadas` : ''} · lote ${lote}`, user);
-    return { ok: true, lote_id: lote, gravados: ok.length, removidos, de: datas[0], ate: datas[datas.length - 1] };
+    return { ok: true, lote_id: lote, gravados: ok.length, com_canhao: comCanhao, removidos, de: datas[0], ate: datas[datas.length - 1] };
   }
 
   /** Apaga a agenda por data de hoje em diante (as semanais ficam). */
@@ -478,6 +486,8 @@ export class PivosService {
       sentido: dto.sentido,
       velocidade: dto.velocidade ?? null,
       com_agua: dto.com_agua ?? true,
+      // sem água o canhão não liga (mesma regra do Ligar)
+      canhao: dto.canhao === true && (dto.com_agua ?? true),
     };
   }
 
@@ -503,6 +513,7 @@ export class PivosService {
       sentido: r.sentido,
       velocidade: num(r.velocidade),
       com_agua: r.com_agua,
+      canhao: r.canhao === true,
       created_at: r.created_at,
       updated_at: r.updated_at,
     };

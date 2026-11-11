@@ -3,7 +3,7 @@ import { dentroDaPonta } from './pivo-automacao.util';
 
 /**
  * Agenda do pivô POR DATA (NEXON-98) — o que a planilha traz: uma linha por irrigação, com dia,
- * início, fim (ou duração), sentido, percentímetro e água. Cada linha vira uma programação com
+ * início, fim (ou duração), sentido, percentímetro, água e canhão. Cada linha vira uma programação com
  * `data` preenchida, que o PivoAutomacaoService dispara só naquele dia. Dá para subir o ano todo.
  *
  * Aqui fica a validação, pura, para a API recusar a planilha inteira com o motivo de cada linha
@@ -29,6 +29,8 @@ export interface ItemAgenda {
   /** percentímetro 1–100; null no seco */
   velocidade: number | null;
   com_agua: boolean;
+  /** liga o canhão final junto; nunca no seco */
+  canhao: boolean;
   nome: string;
 }
 export interface ErroAgenda { linha: number; motivo: string }
@@ -83,6 +85,15 @@ function lerAgua(v: unknown): boolean | null {
   const s = semAcento(v);
   if (['sim', 's', 'molhado', 'comagua', 'true', '1'].includes(s)) return true;
   if (['nao', 'n', 'seco', 'semagua', 'false', '0'].includes(s)) return false;
+  return null;
+}
+/** Canhão final: em branco = Não. */
+function lerCanhao(v: unknown): boolean | null {
+  if (v === undefined || v === null || String(v).trim() === '') return false;
+  if (typeof v === 'boolean') return v;
+  const s = semAcento(v);
+  if (['sim', 's', 'ligado', 'liga', 'true', '1'].includes(s)) return true;
+  if (['nao', 'n', 'desligado', 'desliga', 'false', '0'].includes(s)) return false;
   return null;
 }
 const lerNumero = (v: unknown) => (v === undefined || v === null || String(v).trim() === '' ? null : Number(String(v).replace('%', '').replace(',', '.').trim()));
@@ -140,13 +151,16 @@ export function validarAgenda(
       if (vel === null || !Number.isFinite(vel) || vel < 1 || vel > 100) return erro('Percentímetro inválido (de 1 a 100).');
       vel = Math.round(vel * 10) / 10;
     }
+    const canhao = lerCanhao(it.canhao);
+    if (canhao === null) return erro('Canhão inválido (use Sim ou Não).');
+    if (canhao && !agua) return erro('Canhão não liga no seco: deixe o Canhão em branco ou ponha Água = Sim.');
     // Mesma regra do disparo (dentroDaPonta): início dentro do bloqueio de ponta não liga.
     const dSem = ((new Date(`${data}T00:00:00Z`).getUTCDay() + 6) % 7) + 1;   // 1 = segunda … 7 = domingo
     if (ponta && dentroDaPonta(ponta as JanelaComAtivo, { minutos: ini, diaSemana: dSem })) {
       return erro(`Começa no horário de ponta (${ponta.inicio}–${ponta.fim}), que está bloqueado neste pivô.`);
     }
     ok.push({
-      linha, data, hora_inicio: hhmm(ini), duracao_min: dur, sentido, velocidade: vel, com_agua: agua,
+      linha, data, hora_inicio: hhmm(ini), duracao_min: dur, sentido, velocidade: vel, com_agua: agua, canhao,
       nome: `${brData(data)} · ${hhmm(ini)} → ${hhmm(ini + dur)}`,
     });
   });
