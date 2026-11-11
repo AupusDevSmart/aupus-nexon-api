@@ -74,6 +74,8 @@ export interface AcionarOpts {
   manterParada?: boolean;
 }
 
+/** Tempo que a bomba tem de aparecer desligada para o NexON dar por encerrada uma irrigação parada. */
+const BOMBA_DESLIGADA_SUSTENTADA_MS = 60_000;
 /** Descanso entre a parada confirmada e a nova partida no reinício (bomba e painel assentam). */
 const PAUSA_REINICIO_S = 10;
 
@@ -444,6 +446,13 @@ export class PivoSequenciaService implements OnModuleInit {
       WHERE equipamento_id = ${id}::bpchar AND status = 'cancelada' AND erro LIKE 'Reinício%'
         AND finished_at > now() - interval '6 hours'
       ORDER BY created_at DESC LIMIT 1`;
+    const desligarNaoConcluiu = await this.prisma.$queryRaw<any[]>`
+      SELECT erro, created_at, finished_at FROM pivo_sequencias
+      WHERE equipamento_id = ${id}::bpchar AND status = 'cancelada' AND erro LIKE 'Desligar não concluiu%'
+        AND finished_at > now() - interval '6 hours'
+      ORDER BY created_at DESC LIMIT 1`;
+    const desligarFalhou = desligarNaoConcluiu[0] && (!seq[0] || new Date(desligarNaoConcluiu[0].created_at).getTime() > new Date(seq[0].created_at).getTime())
+      ? { erro: String(desligarNaoConcluiu[0].erro), em: desligarNaoConcluiu[0].finished_at } : null;
     const reinicioFalhou = reinicio[0] && (!seq[0] || new Date(reinicio[0].created_at).getTime() > new Date(seq[0].created_at).getTime())
       ? { erro: String(reinicio[0].erro), em: reinicio[0].finished_at } : null;
     // Pausada pela ponta: última sequência é o desligar da ponta com algo a retomar.
@@ -453,7 +462,9 @@ export class PivoSequenciaService implements OnModuleInit {
     return {
       pivo: {
         // Saídas mantidas: desligar = baixar as BOs de giro (não precisa do ponto Desligar)
-        comandos: { direita: !!pts.cmd.direita, esquerda: !!pts.cmd.esquerda, desligar: !!pts.cmd.desligar || (cfg.sequencia.comandos_mantidos && !!(pts.cmd.direita || pts.cmd.esquerda)), percentimetro: !!pts.cmd.percentimetro },
+        comandos: { direita: !!pts.cmd.direita, esquerda: !!pts.cmd.esquerda, desligar: !!pts.cmd.desligar || (cfg.sequencia.comandos_mantidos && !!(pts.cmd.direita || pts.cmd.esquerda)), percentimetro: !!pts.cmd.percentimetro,
+          // Dá para ligar PARADO (água sem girar): pelo percentímetro em 0 % ou, sem o ponto, só com a bomba (NEXON-98)
+          parado: !!(await this.boDoPonto(pts.cmd.percentimetro)) || (!!cfg.bombeamento && !!cfg.bombeamento.bi_confirma) },
         comandos_mantidos: cfg.sequencia.comandos_mantidos,
         // Canhão: comandável só com o ponto Canhao (BO) e o status Canhao_ligado (BI)
         canhao: { comando: !!pts.cmd.canhao, tem_status: !!pts.st.canhao, ligado: await this.lerStatus(pts.st.canhao) },
@@ -467,6 +478,8 @@ export class PivoSequenciaService implements OnModuleInit {
       sequencia_cfg: cfg.sequencia,
       sequencia: seq[0] ?? null,
       reinicio_falhou: reinicioFalhou,
+      // Desligar de irrigação parada que não desligou a bomba (a irrigação segue em curso)
+      desligar_falhou: desligarFalhou,
       irrigacao: {
         ativa: !!ativa,
         atual: ativa?.irrigacao ?? null,
@@ -528,6 +541,24 @@ export class PivoSequenciaService implements OnModuleInit {
       const pct = percentualDaLamina(irrigacao.config.lamina, lamina100);
       if (pct === null) throw new BadRequestException(`Lâmina mínima deste pivô: ${String(lamina100).replace('.', ',')} mm (100 %).`);
       irrigacao.config.percentual = pct;
+    }
+
+    // "Parado" (0 %, com água): liga a água e o pivô não gira — irriga no lugar. Não percorre
+    // ângulo nem volta. Com o ponto Percentímetro, vai pelo caminho normal (gira com 0 %).
+    // SEM o ponto (NEXON-98), o servidor liga só a bomba e não manda girar (`semGiro`): precisa
+    // de uma bomba configurada, senão não há o que ligar.
+    if (irrigacao && !irrigacao.config.semAgua && !(irrigacao.config.percentual > 0)) {
+      if (irrigacao.parada.tipo === 'porAngulo' || irrigacao.parada.tipo === 'porVoltas') {
+        throw new BadRequestException('Parado não percorre ângulo nem volta: use parada por tempo ou sem parada.');
+      }
+      // "Tem percentímetro" = o ponto ligado a uma BO de verdade (o ponto sozinho não segura o pivô).
+      if (!(await this.boDoPonto(pts.cmd.percentimetro))) {
+        if (!cfg.bombeamento) throw new BadRequestException('Este pivô não tem bomba configurada no NexON: não há o que ligar com o pivô parado.');
+        // Sem girar, só a bomba diz se a irrigação segue ligada: sem a confirmação dela (BI) o
+        // NexON não saberia quando acabou.
+        if (!cfg.bombeamento.bi_confirma) throw new BadRequestException('A bomba deste pivô não tem confirmação de ligada (BI): não dá para irrigar parado pelo NexON.');
+        irrigacao = { ...irrigacao, config: { ...irrigacao.config, semGiro: true, canhao: false, faixasCanhao: [] } };
+      }
     }
 
     if (acao === 'desligar') {
@@ -592,9 +623,22 @@ export class PivoSequenciaService implements OnModuleInit {
             else if (vAntes > 0) restanteParadaMs = vNovo > 0 ? Math.max(60000, Math.round(resta * (vAntes / vNovo))) : null;
           }
           // por ângulo: a partida recalcula do ângulo atual, no sentido novo
+          // Parado não alcança ângulo nem volta: a parada herdada cai (fica sem parada).
+          if (!irrigacao.config.semAgua && !(irrigacao.config.percentual > 0) && (pa.tipo === 'porAngulo' || pa.tipo === 'porVoltas')) {
+            irrigacao = { ...irrigacao, parada: { tipo: 'semParar' } };
+            restanteParadaMs = undefined;
+          }
         }
       }
     }
+
+    // O que este Desligar (ou reinício) vai parar é uma irrigação PARADA (só a bomba)? As regras
+    // novas de parada — Desligar do pivô como melhor esforço, bomba presa não conclui, nova
+    // tentativa — valem SÓ para ela. Pivô girando para exatamente como sempre parou.
+    // (Lido AQUI, antes da conferência da trava em memória: entre ela e a reserva não pode haver await.)
+    const paraSemGiro = (acao === 'desligar' || reiniciar)
+      ? (await this.irrigacaoAtiva(id).catch(() => null))?.irrigacao?.config?.semGiro === true
+      : false;
 
     // Sequência anterior já concluída, só limpando o percentímetro: espera o ack em vez de recusar.
     for (let i = 0; i < 60 && this.rodando.get(id)?.finalizando; i++) await this.sleep(250);
@@ -605,6 +649,7 @@ export class PivoSequenciaService implements OnModuleInit {
       for (let i = 0; i < 40 && this.rodando.has(id); i++) await this.sleep(250);
     }
 
+    this.bombaZeroDesde.delete(id);   // sequência nova: a contagem de "bomba desligada" recomeça
     // Reserva a trava ANTES de gravar (sem await entre conferir e reservar): dois pedidos
     // juntos (duplo clique, dois operadores) não rodam duas sequências no mesmo pivô.
     const seqId = novoId26();
@@ -618,7 +663,8 @@ export class PivoSequenciaService implements OnModuleInit {
         INSERT INTO pivo_sequencias (id, equipamento_id, acao, status, usuario_id, origem, irrigacao, retomar, parar_em)
         VALUES (${seqId}, ${id}::bpchar, ${acao}, 'executando', ${autorId}, ${origem},
           ${irrigacao ? JSON.stringify(irrigacao) : null}::jsonb, ${opts.retomar ? JSON.stringify(opts.retomar) : null}::jsonb, ${pararEmProvisorio})`;
-      await this.trilha(id, acao === 'desligar'
+      // Nova tentativa de um Desligar que não desligou a bomba: sem repetir a linha na trilha a cada vez.
+      if (!(acao === 'desligar' && this.bombaPresa.has(id))) await this.trilha(id, acao === 'desligar'
         ? `Desligar${opts.motivo ? ` · ${opts.motivo}` : ''}`
         : reiniciar
           // Trilha do reinício: o que estava girando → o que passa a valer (busca por "Reiniciar").
@@ -628,7 +674,7 @@ export class PivoSequenciaService implements OnModuleInit {
       if (this.rodando.get(id) === ctl) this.rodando.delete(id);
       throw e;
     }
-    void this.executar(id, acao, ctl, user, cliente, irrigacao, { reiniciar, restanteParadaMs }).finally(() => {
+    void this.executar(id, acao, ctl, user, cliente, irrigacao, { reiniciar, restanteParadaMs, paraSemGiro, origem }).finally(() => {
       if (this.rodando.get(id) === ctl) this.rodando.delete(id);
     });
     return { sequencia_id: seqId, status: 'executando' };
@@ -659,6 +705,10 @@ export class PivoSequenciaService implements OnModuleInit {
     if (t.estado === 'desconhecido') return 'Sem leitura do status do pivô (entradas da TON): não dá para confirmar que está parado.';
     // Sem entradas de status: vale o que o NexON comandou.
     if (t.estado === 'sem_status' && (await this.irrigacaoAtiva(id))) return 'O pivô já está ligado. Desligue antes de ligar de novo ou inverter o sentido.';
+    // Irrigando PARADO (só a bomba, sem giro): o status diz "parado", mas o pivô está ligado.
+    if (t.estado === 'parado' && (await this.irrigacaoAtiva(id))?.irrigacao?.config?.semGiro) {
+      return 'O pivô já está ligado, irrigando parado. Desligue antes, ou mude as opções em "Desligar ou modificar".';
+    }
     return null;
   }
 
@@ -671,7 +721,11 @@ export class PivoSequenciaService implements OnModuleInit {
     const t = await this.estadoTrava(pts);
     if (t.erro === 1) return 'Pivô sinalizando ERRO — verifique no painel antes de reiniciar.';
     if (t.estado === 'desconhecido') return 'Sem leitura do status do pivô (entradas da TON): não dá para confirmar que está ligado.';
-    if (t.estado === 'parado' || (t.estado === 'sem_status' && !(await this.irrigacaoAtiva(id)))) return 'O pivô não está ligado. Use Ligar.';
+    if (t.estado === 'parado' || t.estado === 'sem_status') {
+      const at = await this.irrigacaoAtiva(id);
+      // parado pelo status só conta como ligado se estiver irrigando parado (só a bomba)
+      if (t.estado === 'parado' ? !at?.irrigacao?.config?.semGiro : !at) return 'O pivô não está ligado. Use Ligar.';
+    }
     return null;
   }
 
@@ -687,6 +741,8 @@ export class PivoSequenciaService implements OnModuleInit {
     if ((ag[0]?.n ?? 0) > 0) return null;
     const b = cfg.bombeamento;
     if (b && (await this.bombaLigada(b)) === 1) return null;
+    // Irrigando parado sem BI da bomba: o status diz "parado", mas a irrigação está em curso.
+    if (await this.irrigacaoAtiva(id)) return null;
     const t = await this.estadoTrava(pts);
     return t.estado === 'parado' ? 'O pivô já está desligado.' : null;
   }
@@ -703,9 +759,84 @@ export class PivoSequenciaService implements OnModuleInit {
       ORDER BY created_at DESC LIMIT 1`;
     const r = rows[0];
     if (!r || r.acao === 'desligar' || !['executando', 'concluida'].includes(r.status)) return null;
-    const st = await this.statusPivo(await this.pontos(id));
-    if (r.status === 'concluida' && (st.desligado === 1 || (st.direita === 0 && st.esquerda === 0))) return null;
+    if (r.irrigacao?.config?.semGiro === true) {
+      // Irrigando PARADO (só a bomba): o status do pivô diz "parado" de propósito. Quem diz se
+      // segue em curso é a bomba — desligada (leitura 0), a irrigação acabou fora do NexON e a
+      // linha é encerrada, para não "voltar" quando outro pivô ligar a mesma bomba. Sem BI da
+      // bomba (leitura nula), vale o que o NexON comandou.
+      if (r.status === 'concluida') {
+        const b = (await this.lerConfig(id)).bombeamento;
+        const lida = b ? await this.bombaLigada(b) : null;
+        if (lida === 0) {
+          // Uma leitura só não fecha (ruído, BI atrasada): a bomba tem de aparecer desligada por
+          // 1 min seguido. Até lá a irrigação segue contando como em curso.
+          // A contagem é DESTA linha: sobra de uma irrigação anterior não vale.
+          const antes = this.bombaZeroDesde.get(id);
+          const desde = antes && antes.linhaId === r.id ? antes.desde : Date.now();
+          this.bombaZeroDesde.set(id, { linhaId: r.id, desde });
+          if (Date.now() - desde >= BOMBA_DESLIGADA_SUSTENTADA_MS) {
+            this.bombaZeroDesde.delete(id);
+            await this.encerrarSemGiro(id, r.id);
+            return null;
+          }
+        } else this.bombaZeroDesde.delete(id);
+      }
+    } else {
+      const st = await this.statusPivo(await this.pontos(id));
+      if (r.status === 'concluida' && (st.desligado === 1 || (st.direita === 0 && st.esquerda === 0))) return null;
+    }
     return { id: r.id, acao: r.acao, irrigacao: r.irrigacao ?? null, parar_em: r.parar_em ?? null, usuario_id: r.usuario_id ?? null, created_at: r.created_at };
+  }
+
+  /** Tentativas seguidas de Desligar em que a bomba não confirmou desligada (por pivô), para não encher a trilha. */
+  private readonly bombaPresa = new Map<string, { vezes: number; ultima: number }>();
+
+  /**
+   * Um Desligar automático (parada por tempo, ponta) de irrigação parada não desligou a bomba:
+   * dá para tentar de novo agora? Três tentativas seguidas e depois uma a cada 5 min — sem isso
+   * seria um comando na bomba a cada 30 s, para sempre.
+   */
+  podeTentarDesligar(id: string): boolean {
+    const p = this.bombaPresa.get(id.trim());
+    if (!p) return true;
+    if (Date.now() - p.ultima > 30 * 60000) { this.bombaPresa.delete(id.trim()); return true; }   // incidente antigo
+    return p.vezes < 3 || Date.now() - p.ultima >= 5 * 60000;
+  }
+
+  /** Desligar de irrigação parada que não desligou a bomba: conta, e avisa na trilha na 1ª vez e a cada 10. */
+  private async bombaNaoDesligou(id: string, motivo: string, autor: string | null, origem: OrigemSequencia) {
+    const antes = this.bombaPresa.get(id);
+    const vezes = (antes && Date.now() - antes.ultima <= 30 * 60000 ? antes.vezes : 0) + 1;
+    this.bombaPresa.set(id, { vezes, ultima: Date.now() });
+    if (vezes === 1 || vezes % 10 === 0) {
+      await this.trilha(id, `Desligar NÃO concluiu: ${motivo}${vezes > 1 ? ` (${vezes} tentativas)` : ''} — confira a bomba no painel`, autor, origem, 'ALTA');
+    }
+    this.logger.warn(`[pivo-seq] ${id} desligar: ${motivo} (tentativa ${vezes})`);
+  }
+  private readonly encerrando = new Set<string>();
+  /** Desde quando a bomba de uma irrigação parada aparece desligada (por pivô). */
+  private readonly bombaZeroDesde = new Map<string, { linhaId: string; desde: number }>();
+  /**
+   * A bomba de uma irrigação parada (só a bomba) ficou desligada: registra o fim. Só grava se a
+   * linha lida AINDA é a última do pivô — dois leitores juntos, ou um Ligar novo no meio, não
+   * criam um "desligar" a mais que esconderia a irrigação nova.
+   */
+  private async encerrarSemGiro(id: string, linhaId: string) {
+    if (this.encerrando.has(id)) return;
+    this.encerrando.add(id);
+    try {
+      const passos: Passo[] = [{ t: new Date().toISOString(), etapa: 'bomba', msg: 'Bomba desligada fora do NexON — irrigação parada encerrada', ok: true }];
+      const n = await this.prisma.$executeRaw`
+        INSERT INTO pivo_sequencias (id, equipamento_id, acao, status, origem, passos, finished_at)
+        SELECT ${novoId26()}, ${id}::bpchar, 'desligar', 'concluida', 'parada', ${JSON.stringify(passos)}::jsonb, now()
+        WHERE (SELECT TRIM(u.id) FROM pivo_sequencias u WHERE u.equipamento_id = ${id}::bpchar AND u.status NOT IN ('agendada', 'cancelada')
+               ORDER BY u.created_at DESC LIMIT 1) = ${linhaId}`;
+      if (n) await this.trilha(id, 'Irrigação parada encerrada: a bomba foi desligada fora do NexON', null, 'parada', 'WARN');
+    } catch (e: any) {
+      this.logger.warn(`[pivo-seq] ${id} encerrar irrigação parada: ${e?.message}`);
+    } finally {
+      this.encerrando.delete(id);
+    }
   }
 
   /** Nome do outro pivô da mesma bomba que está irrigando (com água), ou null. */
@@ -961,7 +1092,9 @@ export class PivoSequenciaService implements OnModuleInit {
 
   // ------------------------------------------------------------------ execução
   private async executar(id: string, acao: AcaoPivo, ctl: { seqId: string; cancelar: boolean; finalizando?: boolean }, user?: Autor, cliente?: ClienteInfo, irr: Irrigacao | null = null,
-    extra: { reiniciar?: boolean; restanteParadaMs?: number | null } = {}) {
+    extra: { reiniciar?: boolean; restanteParadaMs?: number | null; paraSemGiro?: boolean; origem?: OrigemSequencia } = {}) {
+    const paraSemGiro = extra.paraSemGiro === true;
+    const origemSeq: OrigemSequencia = extra.origem ?? 'manual';
     const reiniciar = extra.reiniciar === true;
     const passos: Passo[] = [];
     const passo = async (etapa: string, msg: string, ok: boolean | null) => {
@@ -976,6 +1109,7 @@ export class PivoSequenciaService implements OnModuleInit {
     const msgErro = (e: any) => e?.response?.message || e?.message || String(e);
     let percEnviado = false;   // percentímetro já configurado na TON nesta partida
     let desligarEnviado = false;   // Desligar do pivô já mandado (a bomba de pontos para junto)
+    let desligarPivoEnviado = false;   // idem, dentro do parar(): só vale se o comando foi aceito
     // Reinício: em que ponto a sequência está, para o catch saber o que desfazer/completar.
     let faseReinicio: 'antes' | 'parando' | 'depois' = 'antes';
     // Comando de parada que PODE ter chegado ao pivô: vale desde o envio — um timeout (504)
@@ -1012,8 +1146,19 @@ export class PivoSequenciaService implements OnModuleInit {
             return t.estado === 'sem_status' ? null : t.estado === 'parado';
           }, cfg.sequencia.confirma_giro_s, ctl);
           await passo('pivo', parou === null ? 'Pivô sem status cadastrado — sem confirmação' : parou ? 'Pivô parado' : 'Pivô não confirmou parada no tempo', parou !== false);
+        } else if (paraSemGiro && pts.cmd.desligar && b && b.origem !== 'pontos') {
+          // Parando uma irrigação PARADA (só a bomba; o pivô nunca recebeu giro) com bomba de
+          // saída própria: o Desligar do pivô é melhor esforço — se a TON dele não responder, a
+          // bomba desliga do mesmo jeito. Só neste caso: num pivô que pode estar girando, um
+          // Desligar sem resposta continua abortando (desligar a bomba o deixaria a seco).
+          paradaEnviada = true;
+          const foi = await this.cmd.acionarPonto(id, pts.cmd.desligar, user, false, undefined, cliente).then(() => true).catch(() => false);
+          desligarPivoEnviado = foi;
+          await passo('pivo', foi ? 'Comando Desligar enviado ao pivô (já estava parado)' : 'Pivô já parado — o Desligar dele ficou sem resposta; seguindo para a bomba', foi ? true : null);
+          parou = true;
         } else if (pts.cmd.desligar) {
           await mandarParada(() => this.cmd.acionarPonto(id, pts.cmd.desligar!, user, false, undefined, cliente));
+          desligarPivoEnviado = true;
           await passo('pivo', 'Comando Desligar enviado ao pivô', true);
           // Mesma regra das travas: parado = Desligado = 1 ou todos os Girando LIGADOS em 0
           // (pivô com só um Girando cadastrado também confirma).
@@ -1028,11 +1173,22 @@ export class PivoSequenciaService implements OnModuleInit {
             .catch((x) => { this.logger.warn(`[pivo-seq] ${id} canhão: ${msgErro(x)}`); return 'nao_confirmou' as const; });
           await passo('canhao', MSG_CANHAO[r](false, cfg.sequencia.confirma_giro_s), r === 'ok' || r === 'ja');
         }
-        if (b) await this.desligarBomba(id, b, passo, user, cliente, !!pts.cmd.desligar);
+        if (b) await this.desligarBomba(id, b, passo, user, cliente, desligarPivoEnviado);
         return parou;
       };
       if (acao === 'desligar') {
         await parar();
+        // Irrigação PARADA cuja bomba segue ligada depois do Desligar (e nenhum outro pivô a usa):
+        // o Desligar NÃO concluiu. A linha sai de cena ('cancelada') para a irrigação voltar a
+        // contar como em curso — o operador vê, pode desligar de novo, e a parada automática
+        // tenta outra vez — em vez de o NexON dizer "desligado" com a água correndo no mesmo
+        // lugar. Pivô girando segue como sempre: conclui, com o passo "não confirmou".
+        if (paraSemGiro && b && b.bi_confirma && (await this.bombaLigada(b)) === 1 && !(await this.bombaEmUsoPor(id, b))) {
+          await fim('cancelada', 'Desligar não concluiu: a bomba não confirmou desligada');
+          await this.bombaNaoDesligou(id, 'a bomba não confirmou desligada', (user as Autor | undefined)?.id?.trim() || null, origemSeq);
+          return;
+        }
+        this.bombaPresa.delete(id);
         await fim('concluida');
         ctl.finalizando = true;
         // `perc off` depois de concluir: com o Girando em 0 a TON já cortou a BO sozinha, o
@@ -1126,61 +1282,70 @@ export class PivoSequenciaService implements OnModuleInit {
         await passo('pressao', 'Pressão confirmada (pressostato)', true);
       }
 
-      // Permissivo para ligar (com ou sem água): o painel diz que pode partir — espera como o pressostato.
-      if (pts.st.permissivo) {
-        const pm = pts.st.permissivo;
-        const limite = cfg.sequencia.pressurizacao_s > 0 ? cfg.sequencia.pressurizacao_s : 60;
-        await passo('permissivo', `Aguardando permissivo para ligar (até ${limite}s)`, null);
-        const ok = await this.esperar(async () => (await this.lerStatus(pm)) === 1, limite, ctl);
+      // Irrigando PARADO sem o ponto Percentímetro (`semGiro`): a bomba já está ligada e a água
+      // chegou — o pivô não recebe comando de giro, então não há permissivo, percentímetro,
+      // confirmação de giro nem canhão. A confirmação é a da bomba, acima.
+      const semGiro = irr?.config.semGiro === true;
+      if (semGiro) {
         if (ctl.cancelar) return await this.interrompida(passo, fim);
-        if (!ok) throw new FalhaPartida(`Sem permissivo para ligar em ${limite}s (bomba, tensão, pressão no painel).`, liguei);
-        await passo('permissivo', 'Permissivo para ligar confirmado', true);
-      }
-
-      // Percentímetro na TON ANTES de girar (a TON começa o ciclo quando o pivô ligar).
-      // Sem água: 100 % (anda direto). Sem ponto Percentímetro: o ajuste fica no painel.
-      const pctAlvo = irr?.config.semAgua ? 100 : irr?.config.percentual ?? 100;
-      let pc: { bo: number; cicloS: number } | false = false;
-      if (pts.cmd.percentimetro) {
-        try {
-          pc = await this.percentimetro(id, pts, pctAlvo * 10, user, cliente);
-          percEnviado = !!pc;
-        } catch (x) {
-          throw new FalhaPartida(`Percentímetro: ${msgErro(x)}`, liguei);
-        }
-      }
-      if (pc) {
-        await passo('percentimetro', `Percentímetro ${fmtPercentual(pctAlvo)}%${irr?.config.lamina && !irr.config.semAgua ? ` (lâmina ${irr.config.lamina.toFixed(2).replace('.', ',')} mm)` : ''} aplicado na TON · ciclo ${pc.cicloS}s`, true);
-      } else if (irr && !irr.config.semAgua) {
-        await passo('pivo', `Percentímetro ${fmtPercentual(pctAlvo)}% (ajuste do painel do pivô)`, null);
-      }
-
-      if (ctl.cancelar) return await this.interrompida(passo, fim);
-      if (mant) {
-        // Saídas mantidas: o outro sentido em baixo ANTES (nunca os dois em alto), depois este em alto.
-        const outro = sentido === 'direita' ? 'esquerda' : 'direita';
-        if (pts.cmd[outro]) await this.saidaMantida(id, pts.cmd[outro], false, `Girar ${outro} desligado`, user, cliente);
-        await this.saidaMantida(id, pts.cmd[sentido], true, `Girar ${sentido}`, user, cliente);
-        await passo('pivo', `Girar ${sentido} ligado (saída mantida)`, true);
+        await passo('pivo', 'Irrigando parado: a bomba está ligada e o pivô não gira', true);
       } else {
-        await this.cmd.acionarPonto(id, pts.cmd[sentido]!, user, false, undefined, cliente);
-        await passo('pivo', `Comando Girar ${sentido} enviado ao pivô`, true);
-      }
-      const girou = await this.esperar(async () => {
-        const s = await this.statusPivo(pts);
-        return s[sentido] === null ? null : s[sentido] === 1;
-      }, cfg.sequencia.confirma_giro_s, ctl);
-      if (ctl.cancelar) return await this.interrompida(passo, fim);
-      if (girou === false) {
-        throw new FalhaGiro(`Pivô não confirmou "girando ${sentido}" em ${cfg.sequencia.confirma_giro_s}s.`, liguei);
-      }
-      await passo('pivo', girou === null ? `Sem status de giro cadastrado — comando enviado` : `Pivô girando ${sentido}`, girou === null ? null : true);
-      // Canhão no início (só com água — normalizarIrrigacao já zera no seco). Não derruba a
-      // irrigação: o pivô já está girando com água; falha fica registrada no passo.
-      if (irr?.config.canhao && !irr.config.semAgua) {
-        const r = await this.aplicarCanhao(id, pts, true, user, cliente, cfg.sequencia.confirma_giro_s, ctl)
-          .catch((x) => { this.logger.warn(`[pivo-seq] ${id} canhão: ${msgErro(x)}`); return 'nao_confirmou' as const; });
-        await passo('canhao', MSG_CANHAO[r](true, cfg.sequencia.confirma_giro_s), r === 'ok' || r === 'ja' ? true : r === 'nao_confirmou' ? false : null);
+        // Permissivo para ligar (com ou sem água): o painel diz que pode partir — espera como o pressostato.
+        if (pts.st.permissivo) {
+          const pm = pts.st.permissivo;
+          const limite = cfg.sequencia.pressurizacao_s > 0 ? cfg.sequencia.pressurizacao_s : 60;
+          await passo('permissivo', `Aguardando permissivo para ligar (até ${limite}s)`, null);
+          const ok = await this.esperar(async () => (await this.lerStatus(pm)) === 1, limite, ctl);
+          if (ctl.cancelar) return await this.interrompida(passo, fim);
+          if (!ok) throw new FalhaPartida(`Sem permissivo para ligar em ${limite}s (bomba, tensão, pressão no painel).`, liguei);
+          await passo('permissivo', 'Permissivo para ligar confirmado', true);
+        }
+
+        // Percentímetro na TON ANTES de girar (a TON começa o ciclo quando o pivô ligar).
+        // Sem água: 100 % (anda direto). Sem ponto Percentímetro: o ajuste fica no painel.
+        const pctAlvo = irr?.config.semAgua ? 100 : irr?.config.percentual ?? 100;
+        let pc: { bo: number; cicloS: number } | false = false;
+        if (pts.cmd.percentimetro) {
+          try {
+            pc = await this.percentimetro(id, pts, pctAlvo * 10, user, cliente);
+            percEnviado = !!pc;
+          } catch (x) {
+            throw new FalhaPartida(`Percentímetro: ${msgErro(x)}`, liguei);
+          }
+        }
+        if (pc) {
+          await passo('percentimetro', `Percentímetro ${fmtPercentual(pctAlvo)}%${irr?.config.lamina && !irr.config.semAgua ? ` (lâmina ${irr.config.lamina.toFixed(2).replace('.', ',')} mm)` : ''} aplicado na TON · ciclo ${pc.cicloS}s`, true);
+        } else if (irr && !irr.config.semAgua) {
+          await passo('pivo', `Percentímetro ${fmtPercentual(pctAlvo)}% (ajuste do painel do pivô)`, null);
+        }
+
+        if (ctl.cancelar) return await this.interrompida(passo, fim);
+        if (mant) {
+          // Saídas mantidas: o outro sentido em baixo ANTES (nunca os dois em alto), depois este em alto.
+          const outro = sentido === 'direita' ? 'esquerda' : 'direita';
+          if (pts.cmd[outro]) await this.saidaMantida(id, pts.cmd[outro], false, `Girar ${outro} desligado`, user, cliente);
+          await this.saidaMantida(id, pts.cmd[sentido], true, `Girar ${sentido}`, user, cliente);
+          await passo('pivo', `Girar ${sentido} ligado (saída mantida)`, true);
+        } else {
+          await this.cmd.acionarPonto(id, pts.cmd[sentido]!, user, false, undefined, cliente);
+          await passo('pivo', `Comando Girar ${sentido} enviado ao pivô`, true);
+        }
+        const girou = await this.esperar(async () => {
+          const s = await this.statusPivo(pts);
+          return s[sentido] === null ? null : s[sentido] === 1;
+        }, cfg.sequencia.confirma_giro_s, ctl);
+        if (ctl.cancelar) return await this.interrompida(passo, fim);
+        if (girou === false) {
+          throw new FalhaGiro(`Pivô não confirmou "girando ${sentido}" em ${cfg.sequencia.confirma_giro_s}s.`, liguei);
+        }
+        await passo('pivo', girou === null ? `Sem status de giro cadastrado — comando enviado` : `Pivô girando ${sentido}`, girou === null ? null : true);
+        // Canhão no início (só com água — normalizarIrrigacao já zera no seco). Não derruba a
+        // irrigação: o pivô já está girando com água; falha fica registrada no passo.
+        if (irr?.config.canhao && !irr.config.semAgua) {
+          const r = await this.aplicarCanhao(id, pts, true, user, cliente, cfg.sequencia.confirma_giro_s, ctl)
+            .catch((x) => { this.logger.warn(`[pivo-seq] ${id} canhão: ${msgErro(x)}`); return 'nao_confirmou' as const; });
+          await passo('canhao', MSG_CANHAO[r](true, cfg.sequencia.confirma_giro_s), r === 'ok' || r === 'ja' ? true : r === 'nao_confirmou' ? false : null);
+        }
       }
       // Parada automática (voltas/tempo/ângulo): o PivoAutomacaoService desliga em parar_em.
       if (irr && irr.parada.tipo !== 'semParar') {
@@ -1200,6 +1365,14 @@ export class PivoSequenciaService implements OnModuleInit {
     } catch (e: any) {
       await passo('erro', msgErro(e), false).catch(() => undefined);
       const autorTrilha = (user as Autor | undefined)?.id?.trim() || null;
+      // Desligar de irrigação PARADA que estourou (TON da bomba sem resposta): a parada por tempo
+      // é a única proteção dela. A linha sai de cena para a irrigação seguir contando como em
+      // curso (nova tentativa no próximo tick) e o aviso vai para a trilha.
+      if (acao === 'desligar' && paraSemGiro) {
+        await fim('cancelada', `Desligar não concluiu: ${msgErro(e)}`).catch(() => undefined);
+        await this.bombaNaoDesligou(id, msgErro(e), autorTrilha, origemSeq);
+        return;
+      }
       // Reinício que falhou ANTES de qualquer comando chegar ao pivô: ele segue girando com a
       // irrigação anterior. A linha nova sai de cena ('cancelada') para a anterior voltar a
       // valer — com a parada automática e a pausa de ponta dela.
@@ -1295,7 +1468,8 @@ export class PivoSequenciaService implements OnModuleInit {
     const girando: string[] = [];
     for (const c of comp) {
       const s = await this.statusPivo(await this.pontos(c.id));
-      if (s.direita === 1 || s.esquerda === 1 || (this.rodando.has(c.id))) girando.push(c.nome);
+      // irrigando parado (só a bomba) também usa a água, mesmo sem girar
+      if (s.direita === 1 || s.esquerda === 1 || (this.rodando.has(c.id)) || (await this.irrigacaoAtiva(c.id))?.irrigacao?.config?.semGiro) girando.push(c.nome);
     }
     if (girando.length) {
       await passo('bomba', `Bomba mantida ligada: ${girando.join(', ')} ainda usando`, true);

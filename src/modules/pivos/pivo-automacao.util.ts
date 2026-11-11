@@ -15,7 +15,15 @@ export interface FaixaCanhao { id?: string; liga: number; desliga: number }
  * movimento fica ligado (0 = parado irrigando). lamina (mm) = o que o operador pediu;
  * quando vem, o servidor recalcula o percentual (percentualDaLamina) — docs/IOT-PIVO-PERCENTIMETRO-LAMINA.md.
  */
-export interface ConfigIrrigacao { direcao: Direcao; percentual: number; lamina?: number | null; semAgua: boolean; canhao: boolean; faixasCanhao?: FaixaCanhao[] }
+export interface ConfigIrrigacao {
+  direcao: Direcao; percentual: number; lamina?: number | null; semAgua: boolean; canhao: boolean; faixasCanhao?: FaixaCanhao[];
+  /**
+   * "Parado" (0 %, com água) em pivô SEM o ponto Percentímetro (NEXON-98): o servidor liga só a
+   * bomba e NÃO manda girar. Quem marca é o servidor, no acionar — o que vem do cliente é ignorado.
+   * Com o ponto, 0 % segue pelo caminho normal (gira com o percentímetro em 0).
+   */
+  semGiro?: boolean;
+}
 export type Parada = { tipo: 'semParar' } | { tipo: 'porAngulo'; angulo: number } | { tipo: 'porVoltas'; voltas: number } | { tipo: 'porTempo'; minutos: number };
 export interface Irrigacao {
   modo: 'simples' | 'angulo' | 'segmentos' | 'programacao';
@@ -97,7 +105,9 @@ export const DIRECAO_LABEL: Record<Direcao, string> = { 'Avanço': 'Direita', 'R
 export function resumoIrrigacao(i: Irrigacao | null | undefined): string {
   if (!i) return 'última configuração';
   const c = i.config;
-  const partes = [DIRECAO_LABEL[c.direcao] ?? c.direcao, c.semAgua ? 'Seco' : `${fmtPercentual(c.percentual)}%${c.lamina ? ` (${c.lamina.toFixed(2).replace('.', ',')} mm)` : ''} · Molhado`];
+  // 0 % com água = parado, irrigando no lugar: a direção não diz nada.
+  const partes = !c.semAgua && !(c.percentual > 0) ? ['Parado · Molhado']
+    : [DIRECAO_LABEL[c.direcao] ?? c.direcao, c.semAgua ? 'Seco' : `${fmtPercentual(c.percentual)}%${c.lamina ? ` (${c.lamina.toFixed(2).replace('.', ',')} mm)` : ''} · Molhado`];
   if (c.canhao) partes.push('canhão');
   const p = i.parada;
   partes.push(
@@ -146,6 +156,8 @@ export interface ProgramacaoExec {
   modo: 'percurso' | 'tempo'; angulo_inicial: number | null; angulo_final: number | null; duracao_min: number | null;
   sentido: 'horario' | 'anti_horario'; velocidade: number | null; com_agua: boolean;
   ultima_execucao_em: Date | null;
+  /** Agenda por data (NEXON-98): a linha vale só neste dia — quem filtra o dia é a consulta do tick. */
+  data?: string | null;
 }
 
 /**
@@ -156,9 +168,12 @@ export function programacaoDisparaAgora(p: ProgramacaoExec, agora: MomentoLocal,
   if (!p.ativo) return false;
   const ini = parseHHMM(p.hora_inicio);
   if (ini === null) return false;
-  if (!(p.dias ?? []).map(Number).includes(agora.diaSemana)) return false;
+  // Linha com data: o dia já foi conferido na consulta (data = hoje); os dias da semana não valem.
+  if (!p.data && !(p.dias ?? []).map(Number).includes(agora.diaSemana)) return false;
   const passou = agora.minutos - ini;
   if (passou < 0 || passou > folgaMin) return false;
+  // linha por data dispara UMA vez, e pronto (na virada do dia as 20 h abaixo já teriam passado)
+  if (p.data && p.ultima_execucao_em) return false;
   // já rodou hoje (últimas 20 h)?
   if (p.ultima_execucao_em && agoraMs - new Date(p.ultima_execucao_em).getTime() < 20 * 3600000) return false;
   return true;
