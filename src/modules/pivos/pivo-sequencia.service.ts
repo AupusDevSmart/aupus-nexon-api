@@ -174,7 +174,13 @@ export class PivoSequenciaService implements OnModuleInit {
       const ctl = this.rodando.get(id);
       if (!ctl || ctl.finalizando) return;
       const pts = await this.pontos(id);
-      if (pts.cmd.desligar !== String(pontoId).trim()) return;
+      const ponto = String(pontoId).trim();
+      // Ligar / girar direto no ponto no meio da sequência (ex.: o pivô parado na pausa do
+      // reinício e a lista do app oferecendo "Ligar"): recusa — cruzaria com a partida do servidor.
+      if (ponto === pts.cmd.direita || ponto === pts.cmd.esquerda || ponto === pts.cmd.ligar) {
+        throw new ConflictException('Sequência do pivô em andamento — aguarde terminar ou use Desligar para interromper.');
+      }
+      if (pts.cmd.desligar !== ponto) return;
       ctl.cancelar = true;
       this.desligarExterno.add(id);
       return;

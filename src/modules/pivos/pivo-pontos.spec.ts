@@ -333,6 +333,9 @@ describe('saídas mantidas (sequencia.comandos_mantidos)', () => {
     expect(ctl.cancelar).toBe(true);
     await svc.pontoExterno('depois', 'PIV', 'p-desl', { id: 'U1' });
     expect(svc.acionar).toHaveBeenCalledWith('PIV', 'desligar', { id: 'U1' }, undefined, expect.objectContaining({ motivo: expect.stringMatching(/direto no ponto/) }));
+    // Ligar direto no ponto com a sequência rodando é recusado (cruzaria com a partida do servidor)
+    svc.rodando.set('PIV', { seqId: 'S2', cancelar: false });
+    await expect(svc.pontoExterno('antes', 'PIV', 'p-ligar')).rejects.toThrow(/Sequência do pivô em andamento/);
     // sem sequência em andamento, o Desligar no ponto segue como sempre foi
     svc.rodando.delete('PIV');
     svc.acionar.mockClear();

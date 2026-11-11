@@ -7,6 +7,7 @@ import {
   GatewayTimeoutException,
   ServiceUnavailableException,
   ForbiddenException,
+  HttpException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
@@ -65,10 +66,19 @@ export class EquipamentosCmdService {
   observarPontoExterno(fn: (fase: 'antes' | 'depois', equipamentoId: string, pontoId: string, user?: any, cliente?: ClienteInfo) => Promise<void>) {
     this.observadoresPonto.push(fn);
   }
-  /** Nunca derruba o comando: falha de observador só vai para o log. */
+  /**
+   * Falha de observador só vai para o log e nunca derruba o comando — com uma exceção: no
+   * 'antes', o observador pode RECUSAR o comando lançando uma HttpException (ex.: 409 do pivô
+   * com sequência em andamento), que sobe para quem chamou.
+   */
   async avisarPontoExterno(fase: 'antes' | 'depois', equipamentoId: string, pontoId: string, user?: any, cliente?: ClienteInfo) {
     for (const fn of this.observadoresPonto) {
-      await fn(fase, equipamentoId, pontoId, user, cliente).catch((e) => this.logger.warn(`[ponto-externo] ${equipamentoId}/${pontoId} (${fase}): ${(e as Error)?.message}`));
+      try {
+        await fn(fase, equipamentoId, pontoId, user, cliente);
+      } catch (e) {
+        if (fase === 'antes' && e instanceof HttpException) throw e;
+        this.logger.warn(`[ponto-externo] ${equipamentoId}/${pontoId} (${fase}): ${(e as Error)?.message}`);
+      }
     }
   }
 
