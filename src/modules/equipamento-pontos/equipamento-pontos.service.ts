@@ -46,7 +46,14 @@ export class EquipamentoPontosService {
       where: { equipamento_id: eqId, deleted_at: null },
       orderBy: [{ ordem: 'asc' }, { tipo: 'asc' }, { nome: 'asc' }],
     });
-    return rows.map(this.toResponse);
+    // Comando ligado a uma BO ON/OFF (ton_bo.pulso_ms = 0): a tela oferece Ligar/Desligar em vez do pulso.
+    const onoff = new Set(
+      (await this.prisma.ton_bo.findMany({
+        where: { equipamento_ponto_id: { in: rows.filter((r) => r.tipo === 'comando').map((r) => r.id) }, pulso_ms: 0, ativo: true, deleted_at: null },
+        select: { equipamento_ponto_id: true },
+      })).map((b) => (b.equipamento_ponto_id ?? '').trim()),
+    );
+    return rows.map((r) => ({ ...this.toResponse(r), ...(r.tipo === 'comando' ? { onoff: onoff.has(r.id.trim()) } : {}) }));
   }
 
   async create(

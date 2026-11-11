@@ -296,6 +296,7 @@ export class EquipamentosCmdService {
     sim = false,
     testMac?: string,
     cliente?: ClienteInfo,
+    ligar?: boolean,
   ): Promise<AcionarPontoResultDto> {
     const eqId = equipamentoId.trim();
     const pId = pontoId.trim();
@@ -533,15 +534,23 @@ export class EquipamentosCmdService {
       throw new ServiceUnavailableException('Broker MQTT nao conectado no momento.');
     }
 
-    const cmdOn = `r${bo.bo_numero} pulse ${bo.pulso_ms}`;
-    const comandoSemantico = `${equipamento.nome} · ${ponto.nome}`;
+    // pulso_ms = 0: saída ON/OFF (alto permanente) — liga ou desliga, sem pulso.
+    const onOff = bo.pulso_ms === 0;
+    if (onOff && typeof ligar !== 'boolean') {
+      throw new BadRequestException(`"${ponto.nome}" é uma saída ON/OFF: escolha Ligar ou Desligar.`);
+    }
+    const cmdOn = onOff ? `r${bo.bo_numero} ${ligar ? 'on' : 'off'}` : `r${bo.bo_numero} pulse ${bo.pulso_ms}`;
+    const comandoSemantico = `${equipamento.nome} · ${ponto.nome}${onOff ? (ligar ? ' ON' : ' OFF') : ''}`;
     const startedAt = Date.now();
 
-    // 5. Pulso com ack — na TON (rN pulse) ou, firmware antigo, on/off pelo backend
+    // 5. Pulso com ack — na TON (rN pulse) ou, firmware antigo, on/off pelo backend.
+    //    ON/OFF: um comando só (rN on | rN off), com ack.
     let ack;
     let tecnico = cmdOn;
     try {
-      const pr = await this.pulsoRele(topico, bo.bo_numero, bo.pulso_ms);
+      const pr = onOff
+        ? { ack: await this.mqtt.publishCommand(topico, cmdOn), tecnico: cmdOn }
+        : await this.pulsoRele(topico, bo.bo_numero, bo.pulso_ms);
       ack = pr.ack;
       tecnico = pr.tecnico;
     } catch (err) {

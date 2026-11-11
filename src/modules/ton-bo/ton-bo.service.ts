@@ -15,6 +15,7 @@ import {
   UpdateTonBoDto,
   TonBoResponseDto,
   PULSO_MS_DEFAULT,
+  PULSO_MS_MIN,
 } from './dto/ton-bo.dto';
 
 /**
@@ -99,6 +100,7 @@ export class TonBoService {
     if (dto.equipamento_ponto_id) {
       await this.assertPontoComando(dto.equipamento_ponto_id.trim());
     }
+    this.assertPulso(dto.pulso_ms);
 
     try {
       const row = await this.prisma.ton_bo.create({
@@ -145,6 +147,7 @@ export class TonBoService {
 
     const data: Prisma.ton_boUpdateInput = {};
     if (dto.bo_numero !== undefined) data.bo_numero = dto.bo_numero;
+    this.assertPulso(dto.pulso_ms);
     if (dto.pulso_ms !== undefined) data.pulso_ms = dto.pulso_ms;
     if (dto.ativo !== undefined) data.ativo = dto.ativo;
     if (dto.equipamento_ponto_id !== undefined) {
@@ -302,5 +305,11 @@ export class TonBoService {
       updated_at: new Date(0),
       ponto: null,
     };
+  }
+
+  /** pulso_ms: 0 = ON/OFF (alto permanente) ou um pulso de PULSO_MS_MIN ms para cima. */
+  private assertPulso(ms: number | undefined) {
+    if (ms === undefined || ms === 0 || ms >= PULSO_MS_MIN) return;
+    throw new BadRequestException(`Pulso de ${ms} ms inválido: use 0 (saída ON/OFF) ou de ${PULSO_MS_MIN} ms para cima.`);
   }
 }

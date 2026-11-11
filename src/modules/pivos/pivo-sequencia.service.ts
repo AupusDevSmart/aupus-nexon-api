@@ -225,7 +225,8 @@ export class PivoSequenciaService implements OnModuleInit {
         pressurizacao_s: Number.isFinite(Number(s.pressurizacao_s)) ? Number(s.pressurizacao_s) : SEQ_PADRAO.pressurizacao_s,
         confirma_giro_s: Number(s.confirma_giro_s) || SEQ_PADRAO.confirma_giro_s,
         confirma_bomba_s: confirmaBomba,
-        comandos_mantidos: s.comandos_mantidos === true,
+        // ON/OFF na BO do Bombeamento (pulso 0 no Configurar I/O) também vale como saídas mantidas.
+        comandos_mantidos: s.comandos_mantidos === true || (bomba?.origem === 'pontos' && bomba.modo === 'mantido'),
       },
     };
   }
@@ -234,7 +235,10 @@ export class PivoSequenciaService implements OnModuleInit {
   private async mantido(pivoId: string): Promise<boolean> {
     const r = await this.prisma.$queryRaw<Array<{ m: boolean | null }>>`
       SELECT (sequencia->>'comandos_mantidos')::boolean AS m FROM pivo_config WHERE equipamento_id = ${pivoId}::bpchar LIMIT 1`.catch(() => []);
-    return r[0]?.m === true;
+    if (r[0]?.m === true) return true;
+    // BO do Bombeamento como saída ON/OFF (pulso_ms = 0 no Configurar I/O da TON) = alto permanente.
+    const liga = await this.boDoPonto((await this.pontos(pivoId)).cmd.ligar);
+    return liga?.pulso_ms === 0;
   }
 
   /**

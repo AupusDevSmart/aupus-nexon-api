@@ -914,8 +914,9 @@ export class IoTService {
           if (d.canal > boMax) continue;
           const row = await tx.ton_bo.findFirst({ where: { ton_id: tonId, bo_numero: d.canal, deleted_at: null }, select: { id: true, equipamento_ponto_id: true } });
           if (row && row.equipamento_ponto_id) continue;   // ocupada por outro ponto
-          if (row) await tx.ton_bo.update({ where: { id: row.id }, data: { equipamento_ponto_id: pt.id, ativo: true } });
-          else await tx.ton_bo.create({ data: { ton_id: tonId, bo_numero: d.canal, equipamento_ponto_id: pt.id, pulso_ms: 500, ativo: true } });
+          // pulso_ms 0 = saída ON/OFF (alto permanente): o pivô mantém as saídas enquanto a função está ligada
+          if (row) await tx.ton_bo.update({ where: { id: row.id }, data: { equipamento_ponto_id: pt.id, ativo: true, pulso_ms: 0 } });
+          else await tx.ton_bo.create({ data: { ton_id: tonId, bo_numero: d.canal, equipamento_ponto_id: pt.id, pulso_ms: 0, ativo: true } });
         } else {
           if (d.canal > biMax) continue;
           const rows = await tx.$queryRaw<Array<{ id: string; ponto: string | null }>>`

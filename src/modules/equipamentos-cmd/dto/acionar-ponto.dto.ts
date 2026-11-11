@@ -12,6 +12,13 @@ import { IsOptional, IsBoolean, IsString, Matches } from 'class-validator';
  */
 export class AcionarPontoDto {
   @ApiPropertyOptional({
+    description: 'Saída ON/OFF (BO com pulso 0 = alto permanente): true liga, false desliga. Obrigatório nesse caso; ignorado no pulso.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  ligar?: boolean;
+
+  @ApiPropertyOptional({
     description:
       'Modo SIMULAÇÃO/LAB: executa o pulso em TESTE/<topico>/cmd (firmware de ' +
       'simulação) em vez do tópico real. Default false (operação real).',

@@ -14,6 +14,8 @@ export const BO_MIN = 1;
 // (v1=6, ton3v2/ton4v2=8, ton1v2/ton2v2=0) e validado no service via tonBoMax.
 export const BO_MAX = 8;
 export const PULSO_MS_MIN = 50;
+/** pulso_ms = 0: saída ON/OFF (alto permanente) — o comando liga ou desliga, sem pulso. */
+export const PULSO_MS_ONOFF = 0;
 export const PULSO_MS_MAX = 60_000;
 export const PULSO_MS_DEFAULT = 500;
 
@@ -45,7 +47,7 @@ export class CreateTonBoDto {
   equipamento_ponto_id?: string | null;
 
   @ApiPropertyOptional({
-    description: `Duracao do pulso em ms (r_N on -> wait -> r_N off). Range [${PULSO_MS_MIN}, ${PULSO_MS_MAX}].`,
+    description: `Duracao do pulso em ms (r_N on -> wait -> r_N off). Range [${PULSO_MS_MIN}, ${PULSO_MS_MAX}]; 0 = saida ON/OFF (alto permanente).`,
     minimum: PULSO_MS_MIN,
     maximum: PULSO_MS_MAX,
     default: PULSO_MS_DEFAULT,
@@ -53,7 +55,7 @@ export class CreateTonBoDto {
   })
   @IsOptional()
   @IsInt()
-  @Min(PULSO_MS_MIN)
+  @Min(PULSO_MS_ONOFF)
   @Max(PULSO_MS_MAX)
   pulso_ms?: number;
 

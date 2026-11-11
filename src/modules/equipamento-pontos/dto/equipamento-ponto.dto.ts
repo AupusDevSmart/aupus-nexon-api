@@ -80,4 +80,5 @@ export class EquipamentoPontoResponseDto {
   @ApiProperty() ativo!: boolean;
   @ApiProperty() created_at!: Date;
   @ApiProperty() updated_at!: Date;
+  @ApiProperty({ required: false, description: 'Comando em BO ON/OFF (alto permanente): acionar pede ligar true/false' }) onoff?: boolean;
 }

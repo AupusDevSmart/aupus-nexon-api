@@ -75,7 +75,7 @@ export class EquipamentosAcionarPontoController {
     // do pulso (para não seguir religando) e depois dele (para completar o desligamento).
     if (!sim) await this.cmdService.avisarPontoExterno('antes', id, pontoId, user, cliente);
     try {
-      return await this.cmdService.acionarPonto(id, pontoId, user, sim, sim ? dto?.testMac : undefined, cliente);
+      return await this.cmdService.acionarPonto(id, pontoId, user, sim, sim ? dto?.testMac : undefined, cliente, dto?.ligar);
     } finally {
       if (!sim) void this.cmdService.avisarPontoExterno('depois', id, pontoId, user, cliente);
     }
