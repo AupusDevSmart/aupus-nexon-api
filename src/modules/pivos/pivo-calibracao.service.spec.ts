@@ -223,6 +223,13 @@ describe('calibração do ângulo do pivô (serviço)', () => {
       expect(cmds).toEqual(['pivo encler']);
     });
 
+    it('sinal de menos esquecido (ponta a milhares de km): "pontos muito distantes"', async () => {
+      const { svc, cmds } = montar();
+      await svc.lerEncoder('pivo-11', ADMIN);
+      await expect(svc.salvar('pivo-11', { ...DTO, ponta_lat: 15.997 }, ADMIN)).rejects.toThrow(/Pontos muito distantes/);
+      expect(cmds).toEqual(['pivo encler']);
+    });
+
     it('pivô em movimento: não salva', async () => {
       const { svc } = montar({ status: { direita: 1, esquerda: 0 } });
       await svc.lerEncoder('pivo-11', ADMIN);

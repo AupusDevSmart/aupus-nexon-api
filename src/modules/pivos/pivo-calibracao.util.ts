@@ -32,6 +32,11 @@ export interface Calibracao {
 
 /** Centro e ponta mais perto que isto: o azimute fica na mão do erro do GPS. */
 export const DISTANCIA_MIN_M = 50;
+/**
+ * Nenhum lance de pivô chega perto disto. Centro e ponta mais longe = coordenada errada (sinal de
+ * menos esquecido, latitude e longitude trocadas) — e o azimute sairia errado sem ninguém notar.
+ */
+export const DISTANCIA_MAX_M = 2000;
 /** "Ler encoder" faz este tanto de leituras seguidas… */
 export const LEITURAS_CALIBRACAO = 5;
 /** …e elas podem variar no máximo isto (em contagens), já contando a virada da volta. */

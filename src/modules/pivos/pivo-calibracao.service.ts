@@ -22,6 +22,7 @@ import {
   avaliarLeituras,
   azimute,
   coordenadaValida,
+  DISTANCIA_MAX_M,
   DISTANCIA_MIN_M,
   distanciaM,
   LEITURAS_CALIBRACAO,
@@ -93,6 +94,7 @@ export class PivoCalibracaoService {
       leitura: { bruto: pos.bruto, lido_em: pos.lido_em, angulo: pos.angulo, motivo: pos.motivo },
       ultima_leitura_valida: lida ? { valor: lida.valor, leituras: lida.leituras, em: new Date(lida.em) } : null,
       distancia_min_m: DISTANCIA_MIN_M,
+      distancia_max_m: DISTANCIA_MAX_M,
       leituras_exigidas: LEITURAS_CALIBRACAO,
     };
   }
@@ -149,7 +151,10 @@ export class PivoCalibracaoService {
     if (!coordenadaValida(centro) || !coordenadaValida(ponta)) throw new BadRequestException('Informe a posição do centro e da ponta em graus decimais');
     const dist = distanciaM(centro, ponta);
     if (!(dist > DISTANCIA_MIN_M)) {
-      throw new BadRequestException(`Pontos muito próximos: centro e ponta estão a ${Math.round(dist)} m (mínimo ${DISTANCIA_MIN_M} m)`);
+      throw new BadRequestException(`Pontos muito próximos: centro e ponta estão a ${Math.floor(dist)} m (mínimo ${DISTANCIA_MIN_M} m)`);
+    }
+    if (dist > DISTANCIA_MAX_M) {
+      throw new BadRequestException(`Pontos muito distantes: centro e ponta estão a ${Math.round(dist).toLocaleString('pt-BR')} m (máximo ${DISTANCIA_MAX_M.toLocaleString('pt-BR')} m) — confira o sinal de menos e se latitude e longitude não estão trocadas`);
     }
     const sentido: Sentido = Number(dto.sentido) === -1 ? -1 : 1;
 
