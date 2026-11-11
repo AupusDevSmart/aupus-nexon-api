@@ -4,6 +4,7 @@ import { novoId26 } from '../../core/common/cliente-info';
 import { colunaTrilhaAusente } from '../logs-mqtt/logs-mqtt-filtros';
 import { PivoConfigDto, ProgramacaoPivoDto } from './dto/pivos.dto';
 import { brutoDoEncoder } from './pivo-posicao.util';
+import { agoraEmSaoPaulo, lerData, validarAgenda, type Ocupado } from './pivo-agenda.util';
 import { capacidades, isGlobal, MSG_SOMENTE_LEITURA, papelCanonico } from '../../core/modules/auth/papeis';
 import {
   agruparConjugados,
@@ -210,8 +211,8 @@ export class PivosService {
       const rows = await this.prisma.$queryRaw<ProgramacaoRow[]>`
         SELECT ${PROG_COLS}
         FROM pivo_programacoes
-        WHERE equipamento_id = ${eq.id}::bpchar AND deleted_at IS NULL
-        ORDER BY hora_inicio, nome`;
+        WHERE equipamento_id = ${eq.id}::bpchar AND deleted_at IS NULL AND data IS NULL
+        ORDER BY hora_inicio, nome`;   // só as semanais: a agenda por data tem a rota dela (/agenda)
       return rows.map((r) => this.formatarProgramacao(r));
     } catch (e) {
       if (colunaTrilhaAusente(e)) return [];
@@ -233,6 +234,7 @@ export class PivosService {
         (${id}, ${eq.id}, ${p.nome}, ${p.ativo}, ${p.hora_inicio}, ${p.dias}::smallint[], ${p.modo},
          ${p.angulo_inicial}, ${p.angulo_final}, ${p.duracao_min}, ${p.sentido}, ${p.velocidade}, ${p.com_agua},
          ${uid}, ${uid}, now(), now())`);
+    await this.auditarAgenda(eq.id, `Horário programado: ${p.nome}`, user);
     return this.buscarProgramacao(eq.id, id);
   }
 
@@ -246,19 +248,128 @@ export class PivosService {
         modo = ${p.modo}, angulo_inicial = ${p.angulo_inicial}, angulo_final = ${p.angulo_final},
         duracao_min = ${p.duracao_min}, sentido = ${p.sentido}, velocidade = ${p.velocidade},
         com_agua = ${p.com_agua}, updated_by = ${user?.id?.trim() ?? null}, updated_at = now()
-      WHERE TRIM(id) = ${progId.trim()} AND equipamento_id = ${eq.id}::bpchar AND deleted_at IS NULL`);
+      WHERE TRIM(id) = ${progId.trim()} AND equipamento_id = ${eq.id}::bpchar AND deleted_at IS NULL AND data IS NULL`);
     if (!n) throw new NotFoundException('Programação não encontrada');
+    await this.auditarAgenda(eq.id, `Horário programado alterado: ${p.nome}`, user);
     return this.buscarProgramacao(eq.id, progId.trim());
   }
 
   async removerProgramacao(equipamentoId: string, progId: string, user?: ScopedUser) {
     const eq = await this.carregarEquipamento(equipamentoId, user);
     await this.exigirComandoNaUnidade(eq.unidade_id, user);
+    const antes = await this.prisma.$queryRaw<Array<{ nome: string }>>`
+      SELECT nome FROM pivo_programacoes WHERE TRIM(id) = ${progId.trim()} AND equipamento_id = ${eq.id}::bpchar AND deleted_at IS NULL`.catch(() => []);
     const n = await this.escrever(() => this.prisma.$executeRaw`
       UPDATE pivo_programacoes SET deleted_at = now(), updated_by = ${user?.id?.trim() ?? null}, updated_at = now()
       WHERE TRIM(id) = ${progId.trim()} AND equipamento_id = ${eq.id}::bpchar AND deleted_at IS NULL`);
     if (!n) throw new NotFoundException('Programação não encontrada');
+    await this.auditarAgenda(eq.id, `Horário programado removido: ${antes[0]?.nome ?? progId.trim()}`, user);
     return { ok: true, id: progId.trim() };
+  }
+
+  // ==========================================================================
+  // Agenda por data — a planilha (NEXON-98). Cada linha é uma programação com `data`.
+  // ==========================================================================
+
+  /** Trilha da agenda em logs_mqtt (comando_semantico 'pivo.agenda'): quem programou o quê. Nunca derruba a gravação. */
+  private async auditarAgenda(equipamentoId: string, mensagem: string, user?: ScopedUser) {
+    try {
+      await this.prisma.logs_mqtt.create({
+        data: {
+          tipo: 'comando', equipamento_id: equipamentoId, severidade: 'INFO', status: 'gravado',
+          mensagem: mensagem.slice(0, 500), usuario_id: user?.id?.trim() || null, comando_semantico: 'pivo.agenda',
+        },
+      });
+    } catch { /* trilha nunca derruba a gravação */ }
+  }
+
+  /** O que está agendado por data, de hoje em diante (ou no intervalo pedido). */
+  async listarAgenda(equipamentoId: string, q: { de?: string; ate?: string } = {}, user?: ScopedUser) {
+    const eq = await this.carregarEquipamento(equipamentoId, user);
+    const hoje = agoraEmSaoPaulo().data;
+    const de = lerData(q.de) ?? hoje;   // data impossível (2026-13-45) cai em hoje, não em erro 500
+    const ate = lerData(q.ate);
+    try {
+      const rows = await this.prisma.$queryRaw<Array<{ id: string; data: string; hora_inicio: string; duracao_min: number | null; sentido: string; velocidade: unknown; com_agua: boolean; lote_id: string | null; executada: boolean }>>`
+        SELECT TRIM(id) AS id, to_char(data, 'YYYY-MM-DD') AS data, hora_inicio, duracao_min, sentido, velocidade, com_agua,
+               TRIM(lote_id) AS lote_id, (ultima_execucao_em IS NOT NULL) AS executada
+        FROM pivo_programacoes
+        WHERE equipamento_id = ${eq.id}::bpchar AND deleted_at IS NULL AND data IS NOT NULL
+          AND data >= ${de}::date AND (${ate}::date IS NULL OR data <= ${ate}::date)
+        ORDER BY data, hora_inicio
+        LIMIT 2000`;
+      return {
+        de, ate, total: rows.length,
+        itens: rows.map((r) => ({ ...r, duracao_min: r.duracao_min === null ? null : Number(r.duracao_min), velocidade: num(r.velocidade) })),
+      };
+    } catch (e) {
+      if (colunaTrilhaAusente(e)) return { de, ate, total: 0, itens: [] };
+      throw e;
+    }
+  }
+
+  /**
+   * Sobe a planilha. Confere TODAS as linhas antes de gravar: uma linha errada recusa o envio
+   * inteiro, com o motivo de cada uma — agenda pela metade é pior que nenhuma. `substituir`
+   * apaga o que estava agendado por data de hoje em diante antes de gravar o novo.
+   */
+  async importarAgenda(equipamentoId: string, body: { itens?: unknown; substituir?: boolean }, user?: ScopedUser) {
+    const eq = await this.carregarEquipamento(equipamentoId, user);
+    await this.exigirComandoNaUnidade(eq.unidade_id, user);
+    const agora = agoraEmSaoPaulo();
+    const substituir = body?.substituir === true;
+    const cfg = await this.prisma.$queryRaw<Array<{ bloqueio_ponta: unknown }>>`
+      SELECT bloqueio_ponta FROM pivo_config WHERE equipamento_id = ${eq.id}::bpchar LIMIT 1`.catch(() => []);
+    const ponta = janelaOuPadrao(cfg[0]?.bloqueio_ponta, PONTA_PADRAO);
+    // O que fica no pivô e não pode ser sobreposto: sem `substituir`, a agenda por data que já existe.
+    const ocupados = substituir ? [] : await this.escrever(() => this.prisma.$queryRaw<Ocupado[]>`
+      SELECT to_char(data, 'YYYY-MM-DD') AS data, hora_inicio, duracao_min FROM pivo_programacoes
+      WHERE equipamento_id = ${eq.id}::bpchar AND deleted_at IS NULL AND ativo AND data IS NOT NULL AND data >= ${agora.data}::date - 7`);
+    const { ok, erros } = validarAgenda(body?.itens, agora, ponta, ocupados);
+    if (erros.length) {
+      const amostra = erros.slice(0, 15).map((e) => (e.linha ? `Linha ${e.linha}: ${e.motivo}` : e.motivo)).join(' ');
+      throw new BadRequestException(`Planilha recusada, nada foi gravado. ${erros.length} ${erros.length === 1 ? 'problema' : 'problemas'}: ${amostra}${erros.length > 15 ? ' …' : ''}`);
+    }
+    const lote = novoId26();
+    const uid = user?.id?.trim() ?? null;
+    let removidos = 0;
+    await this.escrever(() => this.prisma.$transaction(async (tx) => {
+      if (substituir) {
+        removidos = await tx.$executeRaw`
+          UPDATE pivo_programacoes SET deleted_at = now(), updated_by = ${uid}, updated_at = now()
+          WHERE equipamento_id = ${eq.id}::bpchar AND deleted_at IS NULL AND data IS NOT NULL AND data >= ${agora.data}::date`;
+      }
+      for (let i = 0; i < ok.length; i += 500) {
+        const linhas = ok.slice(i, i + 500).map((x) => Prisma.sql`
+          (${novoId26()}, ${eq.id}, ${x.nome}, true, ${x.hora_inicio}, '{}'::smallint[], 'tempo', ${x.duracao_min},
+           ${x.sentido}, ${x.velocidade}, ${x.com_agua}, ${x.data}::date, ${lote}, ${uid}, ${uid}, now(), now())`);
+        await tx.$executeRaw`
+          INSERT INTO pivo_programacoes
+            (id, equipamento_id, nome, ativo, hora_inicio, dias, modo, duracao_min, sentido, velocidade, com_agua, data, lote_id,
+             created_by, updated_by, created_at, updated_at)
+          VALUES ${Prisma.join(linhas)}`;
+      }
+    }));
+    // `dias` vazio de propósito: uma versão antiga do servidor (rollback, staging no mesmo banco)
+    // não conhece `data` e dispararia a linha TODO dia; com `dias` vazio ela nunca dispara lá.
+    const br = (d: string) => `${d.slice(8, 10)}/${d.slice(5, 7)}/${d.slice(0, 4)}`;
+    const datas = ok.map((x) => x.data).sort();
+    await this.auditarAgenda(eq.id,
+      `Agenda por planilha: ${ok.length} ${ok.length === 1 ? 'irrigação' : 'irrigações'} de ${br(datas[0])} a ${br(datas[datas.length - 1])}`
+      + `${substituir ? ` · substituiu ${removidos} que estavam agendadas` : ''} · lote ${lote}`, user);
+    return { ok: true, lote_id: lote, gravados: ok.length, removidos, de: datas[0], ate: datas[datas.length - 1] };
+  }
+
+  /** Apaga a agenda por data de hoje em diante (as semanais ficam). */
+  async limparAgenda(equipamentoId: string, user?: ScopedUser) {
+    const eq = await this.carregarEquipamento(equipamentoId, user);
+    await this.exigirComandoNaUnidade(eq.unidade_id, user);
+    const hoje = agoraEmSaoPaulo().data;
+    const n = await this.escrever(() => this.prisma.$executeRaw`
+      UPDATE pivo_programacoes SET deleted_at = now(), updated_by = ${user?.id?.trim() ?? null}, updated_at = now()
+      WHERE equipamento_id = ${eq.id}::bpchar AND deleted_at IS NULL AND data IS NOT NULL AND data >= ${hoje}::date`);
+    if (n) await this.auditarAgenda(eq.id, `Agenda por data apagada: ${n} ${n === 1 ? 'irrigação' : 'irrigações'} de hoje em diante`, user);
+    return { ok: true, removidos: n };
   }
 
   // ==========================================================================

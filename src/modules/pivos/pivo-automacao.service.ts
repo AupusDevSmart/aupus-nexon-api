@@ -6,6 +6,11 @@ import { AcaoPivo, PivoSequenciaService } from './pivo-sequencia.service';
 import {
   chegouNoAngulo, dentroDaPonta, Irrigacao, irrigacaoDaProgramacao, programacaoDisparaAgora, ProgramacaoExec, resumoIrrigacao,
 } from './pivo-automacao.util';
+import { agoraEmSaoPaulo } from './pivo-agenda.util';
+import { colunaTrilhaAusente } from '../logs-mqtt/logs-mqtt-filtros';
+
+/** Folga para a programação ligar depois da hora marcada (a mesma do programacaoDisparaAgora). */
+const FOLGA_PROGRAMACAO_MIN = 5;
 
 /**
  * Automação do pivô — o servidor executando sozinho o que a ficha configurou:
@@ -45,10 +50,11 @@ export class PivoAutomacaoService {
       const lock = await this.prisma.$queryRaw<Array<{ ok: boolean }>>`SELECT pg_try_advisory_lock(${LOCK_KEY}) AS ok`;
       if (!lock[0]?.ok) return;
       try {
-        await this.agendadas();
-        await this.programacoes();
-        await this.ponta();
-        await this.paradas();
+        // Cada etapa por si: uma que falha (coluna do SQL ausente, um pivô com erro) não pode
+        // tirar das outras a vez — sem `paradas()` nenhuma irrigação para sozinha.
+        for (const [nome, etapa] of [['agendadas', () => this.agendadas()], ['programacoes', () => this.programacoes()], ['ponta', () => this.ponta()], ['paradas', () => this.paradas()]] as const) {
+          try { await etapa(); } catch (e: any) { this.logger.warn(`[pivo-automacao] ${nome}: ${e?.message}`); }
+        }
       } finally {
         await this.prisma.$queryRaw`SELECT pg_advisory_unlock(${LOCK_KEY})`;
       }
@@ -79,22 +85,48 @@ export class PivoAutomacaoService {
 
   // 2 ------------------------------------------------------------- programações
   private async programacoes() {
-    const progs = await this.prisma.$queryRaw<Array<ProgramacaoExec & { pivo: string; created_by: string | null }>>`
-      SELECT TRIM(p.id) AS id, TRIM(p.equipamento_id) AS pivo, p.nome, p.ativo, p.hora_inicio, p.dias, p.modo,
-             p.angulo_inicial::float AS angulo_inicial, p.angulo_final::float AS angulo_final, p.duracao_min, p.sentido,
-             p.velocidade::float AS velocidade, p.com_agua, p.ultima_execucao_em, TRIM(COALESCE(p.updated_by, p.created_by)) AS created_by
-      FROM pivo_programacoes p JOIN equipamentos e ON e.id = p.equipamento_id AND e.deleted_at IS NULL
-      WHERE p.deleted_at IS NULL AND p.ativo`;
-    const agora = momentoEmSaoPaulo();
+    type Linha = ProgramacaoExec & { pivo: string; created_by: string | null };
+    const instante = new Date();
+    const agora = momentoEmSaoPaulo(instante);
+    const hoje = agoraEmSaoPaulo(instante).data;   // o dia e o minuto saem do MESMO instante (virada do dia)
+    let progs: Linha[];
+    try {
+      progs = await this.prisma.$queryRaw<Linha[]>`
+        SELECT TRIM(p.id) AS id, TRIM(p.equipamento_id) AS pivo, p.nome, p.ativo, p.hora_inicio, p.dias, p.modo,
+               p.angulo_inicial::float AS angulo_inicial, p.angulo_final::float AS angulo_final, p.duracao_min, p.sentido,
+               p.velocidade::float AS velocidade, p.com_agua, p.ultima_execucao_em, TRIM(COALESCE(p.updated_by, p.created_by)) AS created_by,
+               to_char(p.data, 'YYYY-MM-DD') AS data
+        FROM pivo_programacoes p JOIN equipamentos e ON e.id = p.equipamento_id AND e.deleted_at IS NULL
+        WHERE p.deleted_at IS NULL AND p.ativo
+          -- agenda por data (planilha): só as linhas de HOJE entram; as semanais (data nula) sempre
+          AND (p.data IS NULL OR p.data = ${hoje}::date)`;
+    } catch (e) {
+      if (!colunaTrilhaAusente(e)) throw e;
+      // SQL 2026-11-11 (coluna `data`) ainda não aplicado: as semanais seguem disparando.
+      progs = await this.prisma.$queryRaw<Linha[]>`
+        SELECT TRIM(p.id) AS id, TRIM(p.equipamento_id) AS pivo, p.nome, p.ativo, p.hora_inicio, p.dias, p.modo,
+               p.angulo_inicial::float AS angulo_inicial, p.angulo_final::float AS angulo_final, p.duracao_min, p.sentido,
+               p.velocidade::float AS velocidade, p.com_agua, p.ultima_execucao_em, TRIM(COALESCE(p.updated_by, p.created_by)) AS created_by
+        FROM pivo_programacoes p JOIN equipamentos e ON e.id = p.equipamento_id AND e.deleted_at IS NULL
+        WHERE p.deleted_at IS NULL AND p.ativo`;
+    }
     for (const p of progs) {
-      if (!programacaoDisparaAgora({ ...p, dias: (p.dias ?? []).map(Number) }, agora, Date.now())) continue;
-      await this.prisma.$executeRaw`UPDATE pivo_programacoes SET ultima_execucao_em = now() WHERE TRIM(id) = ${p.id}`;
+      if (!programacaoDisparaAgora({ ...p, dias: (p.dias ?? []).map(Number) }, agora, instante.getTime())) continue;
+      // Dentro da folga (5 min) a programação TENTA de novo a cada tick: se o pivô ainda está
+      // terminando a irrigação anterior, ela liga logo depois. Só marca como executada quando
+      // ligou ou quando a folga acabou — aí sim fica o aviso na trilha.
+      const [h, m] = p.hora_inicio.split(':').map(Number);
+      const ultimaChance = agora.minutos - (h * 60 + m) >= FOLGA_PROGRAMACAO_MIN;
+      const marcar = () => this.prisma.$executeRaw`UPDATE pivo_programacoes SET ultima_execucao_em = now() WHERE TRIM(id) = ${p.id}`;
       if (await this.seq.irrigacaoAtiva(p.pivo)) {
+        if (!ultimaChance) continue;
+        await marcar();
         await this.seq.trilha(p.pivo, `"${p.nome}" não ligou: o pivô já está irrigando`, p.created_by, 'programacao', 'WARN');
         continue;
       }
       const irr = irrigacaoDaProgramacao(p);
-      await this.ligar(p.pivo, irr.config.direcao === 'Avanço' ? 'girar_direita' : 'girar_esquerda', irr, p.created_by, 'programacao', `"${p.nome}"`);
+      const ligou = await this.ligar(p.pivo, irr.config.direcao === 'Avanço' ? 'girar_direita' : 'girar_esquerda', irr, p.created_by, 'programacao', `"${p.nome}"`, !ultimaChance);
+      if (ligou || ultimaChance) await marcar();
     }
   }
 
@@ -110,6 +142,8 @@ export class PivoAutomacaoService {
       if (!at?.irrigacao) continue;
       const irr = at.irrigacao;
       if (at.parar_em && new Date(at.parar_em).getTime() <= Date.now()) {
+        // Desligar que já não desligou a bomba: espaça as novas tentativas (3 seguidas, depois 5 em 5 min).
+        if (!this.seq.podeTentarDesligar(pivo)) continue;
         await this.desligar(pivo, at.usuario_id, 'parada', `fim previsto (${this.paradaTxt(irr)})`);
         continue;
       }
@@ -162,12 +196,16 @@ export class PivoAutomacaoService {
   }
 
   // ------------------------------------------------------------------ apoio
-  private async ligar(pivo: string, acao: AcaoPivo, irr: Irrigacao | null, responsavel: string | null, origem: 'agendada' | 'programacao' | 'ponta_retomada', motivo: string) {
+  /** true = a sequência de ligar começou. `calado`: a falha não vai para a trilha (vai tentar de novo). */
+  private async ligar(pivo: string, acao: AcaoPivo, irr: Irrigacao | null, responsavel: string | null, origem: 'agendada' | 'programacao' | 'ponta_retomada', motivo: string, calado = false): Promise<boolean> {
     try {
       await this.seq.acionar(pivo, acao, undefined, undefined, { irrigacao: irr, origem, responsavelId: responsavel, motivo });
       this.logger.log(`[pivo-automacao] ${pivo} ${origem}: ligar · ${resumoIrrigacao(irr)}`);
-    } catch (e) {
-      await this.falhou(pivo, `Ligar (${motivo})`, e, responsavel, origem);
+      return true;
+    } catch (e: any) {
+      if (calado) this.logger.warn(`[pivo-automacao] ${pivo} Ligar (${motivo}): ${e?.response?.message || e?.message} — tenta de novo no próximo tick`);
+      else await this.falhou(pivo, `Ligar (${motivo})`, e, responsavel, origem);
+      return false;
     }
   }
 

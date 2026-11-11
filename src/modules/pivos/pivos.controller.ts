@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Post, Put } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Post, Put, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser, Permissions, Cliente, ClienteInfo } from '@/core';
 import { PivosService } from './pivos.service';
@@ -138,8 +138,31 @@ export class PivosController {
   @Delete(':id/programacoes/:progId')
   @HttpCode(HttpStatus.OK)
   @Permissions('equipamentos.acionar_ponto', 'equipamentos.manage')
-  @ApiOperation({ summary: 'Remove programação' })
+  @ApiOperation({ summary: 'Remove programação (semanal ou uma linha da agenda por data)' })
   remover(@Param('id') id: string, @Param('progId') progId: string, @CurrentUser() user?: any) {
     return this.service.removerProgramacao(id, progId, user);
+  }
+
+  // ---- Agenda por data (planilha, NEXON-98)
+  @Get(':id/agenda')
+  @ApiOperation({ summary: 'Agenda por data do pivô, de hoje em diante (ou ?de=AAAA-MM-DD&ate=AAAA-MM-DD)' })
+  agenda(@Param('id') id: string, @Query('de') de?: string, @Query('ate') ate?: string, @CurrentUser() user?: any) {
+    return this.service.listarAgenda(id, { de, ate }, user);
+  }
+
+  @Post(':id/agenda/importar')
+  @HttpCode(HttpStatus.OK)
+  @Permissions('equipamentos.acionar_ponto', 'equipamentos.manage')
+  @ApiOperation({ summary: 'Sobe a agenda por planilha: `itens` [{data, hora_inicio, hora_fim | duracao_min, sentido, percentual, com_agua}] e `substituir`. Uma linha errada recusa o envio inteiro.' })
+  importarAgenda(@Param('id') id: string, @Body() body: { itens?: unknown; substituir?: boolean }, @CurrentUser() user?: any) {
+    return this.service.importarAgenda(id, body, user);
+  }
+
+  @Delete(':id/agenda')
+  @HttpCode(HttpStatus.OK)
+  @Permissions('equipamentos.acionar_ponto', 'equipamentos.manage')
+  @ApiOperation({ summary: 'Apaga a agenda por data de hoje em diante (as programações semanais ficam)' })
+  limparAgenda(@Param('id') id: string, @CurrentUser() user?: any) {
+    return this.service.limparAgenda(id, user);
   }
 }

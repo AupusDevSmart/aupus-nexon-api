@@ -281,7 +281,8 @@ export class IrrigacaoRelatorioService {
       const rows = await this.prisma.$queryRaw<Array<ProgramacaoPivo & { id: string }>>`
         SELECT TRIM(equipamento_id) AS id, ativo, dias, modo, angulo_inicial::float8 AS angulo_inicial,
                angulo_final::float8 AS angulo_final, duracao_min, sentido, velocidade::float8 AS velocidade, com_agua
-        FROM pivo_programacoes WHERE equipamento_id = ANY(${ids}::bpchar[]) AND deleted_at IS NULL`;
+        FROM pivo_programacoes WHERE equipamento_id = ANY(${ids}::bpchar[]) AND deleted_at IS NULL
+          AND data IS NULL`;   // a lâmina programada conta as semanais; a agenda por data não repete todo dia
       for (const r of rows) out.set(r.id, [...(out.get(r.id) ?? []), { ...r, dias: (r.dias ?? []).map(Number) }]);
     } catch (e) {
       this.logger.warn(`[irrigacao] pivo_programacoes: ${(e as Error)?.message}`);
