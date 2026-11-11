@@ -252,7 +252,9 @@ export class PivoTonService implements OnModuleInit {
       clamp(s.confirma_giro_s || 30, 5, 600),
       clamp(s.confirma_giro_s || 30, 5, 600),
       clamp(s.confirma_bomba_s || 30, 5, 600),
-      60, 3, 300, 600,
+      60,
+      0,   // tolerância de queda (pressão/tensão/lado): 0 = desliga na hora (decidido 11/11)
+      300, 600,
       clamp(x.cicloPercS || 60, 5, 600),
     ];
     const enc = await this.encoderNaTon(x.pivoId, alvo.tonId);
@@ -264,11 +266,22 @@ export class PivoTonService implements OnModuleInit {
     const hash = cmds.map((c) => c.cmd).join('|');
     const st = this.statusDaTon(alvo.tonId);
     if (this.cfgEnviada.get(alvo.tonId) === hash && (!st || st.c === 1)) return;
+    // (se a TON só aceitar a tolerância de 1 s, o hash não bate e na próxima partida tenta 0 de novo — após regravar, vale 0)
     await x.passo('ton', 'Enviando a configuração do pivô para a TON', null);
     for (const c of cmds) {
-      await this.cmd.comandoTon({ equipamentoId: x.pivoId, tonId: alvo.tonId, cmd: c.cmd, rotulo: c.rotulo, ackOk: c.ok }, x.user, x.cliente);
+      try {
+        await this.cmd.comandoTon({ equipamentoId: x.pivoId, tonId: alvo.tonId, cmd: c.cmd, rotulo: c.rotulo, ackOk: c.ok }, x.user, x.cliente);
+      } catch (e) {
+        // Firmware anterior a 11/11 só aceita tolerância de 1 s pra cima: manda 1 s (o mínimo dele) até regravar.
+        const m = e instanceof Error ? e.message : String((e as any)?.response?.message ?? e);
+        if (!c.cmd.startsWith('pivo tempos') || !/pivo_tempos_faixa/.test(m + JSON.stringify((e as any)?.response ?? ''))) throw e;
+        const t1 = tempos.map((v, i) => (i === 6 ? 1 : v));
+        const c1 = `pivo tempos ${t1.join(' ')}`;
+        await this.cmd.comandoTon({ equipamentoId: x.pivoId, tonId: alvo.tonId, cmd: c1, rotulo: `${c.rotulo} (firmware antigo: tolerância 1 s)`, ackOk: c.ok }, x.user, x.cliente);
+        cmds[1].cmd = c1;
+      }
     }
-    this.cfgEnviada.set(alvo.tonId, hash);
+    this.cfgEnviada.set(alvo.tonId, cmds.map((c) => c.cmd).join('|'));   // o que a TON aceitou de fato
     await x.passo('ton', 'Configuração aplicada na TON', true);
   }
 
