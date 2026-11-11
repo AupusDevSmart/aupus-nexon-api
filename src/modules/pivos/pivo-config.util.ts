@@ -75,6 +75,7 @@ export const PARAMETROS_TECNICOS_PIVO = [
   'encoder_equipamento_id',
   'encoder_resolucao',
   'encoder_invertido',
+  'travado_min',
   'direcionamento',
   'valvula_ton_id',
   'valvula_bo',

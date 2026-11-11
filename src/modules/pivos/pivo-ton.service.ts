@@ -4,6 +4,7 @@ import { EquipamentosCmdService } from '../equipamentos-cmd/equipamentos-cmd.ser
 import { MqttService } from '../../shared/mqtt/mqtt.service';
 import { Irrigacao, duracaoParadaMs } from './pivo-automacao.util';
 import { parametrosEncoder } from './pivo-posicao.util';
+import { calibracaoVigente } from './pivo-calibracao.repo';
 
 /**
  * Pivô com a SEQUÊNCIA NA TON (docs/IOT-PIVO-TON-LOCAL.md, Fase 3).
@@ -106,6 +107,11 @@ const TXT_RECUSA: Record<string, string> = {
   pivo_io_incompleto: 'Falta BO de giro, percentímetro ou bombeamento ligada nesta TON',
   pivo_sem_encoder: 'Parada por voltas/ângulo precisa do encoder na mesma TON',
 };
+
+/** `pivo enc <resolução> <inv 0/1> <zero°>` — o encoder como a TON guarda (zero com duas casas). */
+export function comandoEnc(enc: { resolucao: number | null; invertido: boolean; zero: number }): string {
+  return `pivo enc ${enc.resolucao} ${enc.invertido ? 1 : 0} ${Math.round(enc.zero * 100) / 100}`;
+}
 
 const norm = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -273,7 +279,7 @@ export class PivoTonService implements OnModuleInit {
     const cmds = [
       { cmd: `pivo io ${alvo.bo.join(' ')} ${alvo.bi.join(' ')} ${alvo.inv}`, ok: /^pivo_io_ok$/, rotulo: 'Configuração de I/O do pivô na TON' },
       { cmd: `pivo tempos ${tempos.join(' ')}`, ok: /^pivo_tempos_ok$/, rotulo: 'Tempos de confirmação do pivô na TON' },
-      { cmd: enc ? `pivo enc ${enc.resolucao} ${enc.invertido ? 1 : 0} ${Math.round(enc.zero * 10) / 10}` : 'pivo enc 0 0 0', ok: /^pivo_enc_ok$/, rotulo: 'Encoder do pivô na TON' },
+      { cmd: enc ? comandoEnc(enc) : 'pivo enc 0 0 0', ok: /^pivo_enc_ok$/, rotulo: 'Encoder do pivô na TON' },
     ];
     const hash = cmds.map((c) => c.cmd).join('|');
     const st = this.statusDaTon(alvo.tonId);
@@ -297,11 +303,24 @@ export class PivoTonService implements OnModuleInit {
     await x.passo('ton', 'Configuração aplicada na TON', true);
   }
 
-  /** Encoder do pivô lido NA MESMA TON (tópico do encoder debaixo do tópico da TON) — senão null. */
-  private async encoderNaTon(pivoId: string, tonId: string) {
+  /**
+   * A calibração do ângulo (NEXON-103) acabou de gravar `pivo enc` nesta TON: o que estava
+   * guardado como "já enviado" deixa de valer e a próxima partida confere a configuração inteira.
+   */
+  esquecerConfig(tonId: string) {
+    this.cfgEnviada.delete(tonId.trim());
+  }
+
+  /**
+   * Encoder do pivô lido NA MESMA TON (tópico do encoder debaixo do tópico da TON) — senão null.
+   * `exigirCalibracao` (padrão): sem calibração ativa a contagem não vira ângulo, e a TON fica
+   * sem encoder (`pivo enc 0 0 0`) até calibrar — parada por ângulo não pode usar posição sem norte.
+   */
+  async encoderNaTon(pivoId: string, tonId: string, exigirCalibracao = true) {
     const r = await this.prisma.$queryRaw<Array<{ parametros: any }>>`SELECT parametros FROM pivo_config WHERE equipamento_id = ${pivoId}::bpchar LIMIT 1`.catch(() => []);
     const enc = parametrosEncoder(r[0]?.parametros);
     if (!enc.equipamentoId || !enc.resolucao) return null;
+    if (exigirCalibracao && !(await calibracaoVigente(this.prisma, pivoId).catch(() => null))) return null;
     const t = await this.prisma.$queryRaw<Array<{ ton: string | null; enc: string | null }>>`
       SELECT (SELECT TRIM(topico_mqtt) FROM equipamentos WHERE id = ${tonId}::bpchar) AS ton,
              (SELECT TRIM(topico_mqtt) FROM equipamentos WHERE id = ${enc.equipamentoId}::bpchar) AS enc`.catch(() => []);

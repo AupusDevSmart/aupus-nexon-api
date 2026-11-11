@@ -1,0 +1,417 @@
+import {
+  BadGatewayException,
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
+import { ClienteInfo, PrismaService, ScopedUser } from '@/core';
+import { AuditoriaAcessosService } from '@/core/modules/usuarios/auditoria-acessos.service';
+import { novoId26 } from '../../core/common/cliente-info';
+import { capacidades, MSG_SOMENTE_LEITURA, papelCanonico } from '../../core/modules/auth/papeis';
+import { EquipamentosCmdService } from '../equipamentos-cmd/equipamentos-cmd.service';
+import { colunaTrilhaAusente } from '../logs-mqtt/logs-mqtt-filtros';
+import { CalibracaoAnguloDto } from './dto/pivos.dto';
+import { PivoSequenciaService } from './pivo-sequencia.service';
+import { comandoEnc, PivoTonService } from './pivo-ton.service';
+import { anguloDoEncoder } from './pivo-posicao.util';
+import { calibracaoAnterior, calibracaoVigente, LinhaCalibracao } from './pivo-calibracao.repo';
+import {
+  avaliarLeituras,
+  azimute,
+  coordenadaValida,
+  DISTANCIA_MIN_M,
+  distanciaM,
+  LEITURAS_CALIBRACAO,
+  lerAckEncoder,
+  Sentido,
+  zeroDaCalibracao,
+} from './pivo-calibracao.util';
+
+type Autor = ScopedUser & { nome?: string };
+
+/** A leitura do "Ler encoder" vale por este tempo para o "Salvar calibração". */
+const LEITURA_VALE_MS = 10 * 60_000;
+
+const TXT_TON: Array<[RegExp, string]> = [
+  [/pivo_cmd_desconhecido|unknown/i, 'A TON deste pivô ainda não tem a leitura do encoder para calibração: regrave o firmware da placa'],
+  [/pivo_sem_encoder/, 'A TON não tem encoder no RS485: confira o nó Encoder na Topologia e regrave o firmware'],
+  [/pivo_ligado/, 'A TON está com o pivô ligado: a calibração só é feita com o pivô parado'],
+  [/pivo_enc_invalido/, 'A TON recusou os valores da calibração'],
+  [/lora_no_ack/, 'A TON não respondeu pelo rádio LoRa'],
+  [/nao respondeu|timeout/i, 'A TON não respondeu (sem comunicação)'],
+];
+
+const sentidoLegivel = (s: Sentido) => (s === 1 ? 'Horário' : 'Anti-horário');
+const grausTxt = (v: number) => `${v.toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}°`;
+
+/**
+ * Calibração do ângulo do pivô (NEXON-103).
+ *
+ * A calibração associa uma leitura do encoder ao azimute real do braço (centro → ponta,
+ * medido em campo). Aqui ela é validada, enviada para a TON — que confirma a gravação na
+ * memória da placa e passa a calcular o ângulo sozinha, sem internet — e só então gravada
+ * em `calibracao_angulo` (uma linha por calibração; a anterior é desativada, nunca apagada).
+ *
+ * Quem edita: Admin e analistas (config técnica — o "técnico" da spec). Proprietário e
+ * operador só leem. Toda gravação vai para a trilha do pivô e para a auditoria.
+ */
+@Injectable()
+export class PivoCalibracaoService {
+  private readonly logger = new Logger('PivoCalibracao');
+  /** Última leitura VÁLIDA do "Ler encoder" por pivô (o Salvar só aceita o valor que a TON leu). */
+  private readonly leituras = new Map<string, { valor: number; leituras: number[]; em: number; usuarioId: string | null }>();
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly seq: PivoSequenciaService,
+    private readonly ton: PivoTonService,
+    private readonly cmd: EquipamentosCmdService,
+    private readonly auditoria: AuditoriaAcessosService,
+  ) {}
+
+  // ------------------------------------------------------------------ leitura
+  async ver(pivoId: string, user?: Autor) {
+    const estado = await this.seq.estado(pivoId, user);   // confere escopo e que é pivô
+    const id = String(pivoId).trim();
+    const pos = estado.posicao;
+    const enc = pos.encoder;
+    const encNome = enc
+      ? (await this.prisma.equipamentos.findFirst({ where: { id: enc.equipamento_id }, select: { nome: true } }))?.nome?.trim() ?? null
+      : null;
+    const lida = this.leituraValida(id);
+    return {
+      pode_editar: this.podeEditar(user),
+      encoder: enc ? { equipamento_id: enc.equipamento_id, nome: encNome, resolucao: enc.resolucao } : null,
+      vigente: this.paraTela(await calibracaoVigente(this.prisma, id)),
+      anterior: this.paraTela(await calibracaoAnterior(this.prisma, id)),
+      precondicoes: this.precondicoes(estado),
+      leitura: { bruto: pos.bruto, lido_em: pos.lido_em, angulo: pos.angulo, motivo: pos.motivo },
+      ultima_leitura_valida: lida ? { valor: lida.valor, leituras: lida.leituras, em: new Date(lida.em) } : null,
+      distancia_min_m: DISTANCIA_MIN_M,
+      leituras_exigidas: LEITURAS_CALIBRACAO,
+    };
+  }
+
+  // ------------------------------------------------------------------ ler encoder
+  /**
+   * "Ler encoder": a TON faz 5 leituras Modbus seguidas (`pivo encler`). Só vale se vieram
+   * todas, sem erro, iguais ou variando no máximo ±1.
+   */
+  async lerEncoder(pivoId: string, user?: Autor, cliente?: ClienteInfo) {
+    this.exigirEdicao(user);
+    const estado = await this.seq.estado(pivoId, user);
+    const id = String(pivoId).trim();
+    const enc = this.exigirEncoder(estado);
+    const tonId = await this.tonDoEncoder(id, user, cliente);
+    let msg: string;
+    try {
+      msg = (await this.cmd.comandoTon(
+        { equipamentoId: id, tonId, cmd: 'pivo encler', rotulo: 'Leitura do encoder para calibração', ackOk: /^pivo_el/ }, user, cliente,
+      )).msg;
+    } catch (e) {
+      throw this.erroDaTon(e, 'A TON não leu o encoder');
+    }
+    const ack = lerAckEncoder(msg);
+    if (!ack) throw new BadGatewayException(`Resposta inesperada da TON ao ler o encoder: ${msg}`);
+    const r = avaliarLeituras(ack.leituras, enc.resolucao, ack.erros);
+    if (r.valida && r.valor != null) {
+      this.leituras.set(id, { valor: r.valor, leituras: r.leituras, em: Date.now(), usuarioId: user?.id?.trim() ?? null });
+    } else {
+      this.leituras.delete(id);
+    }
+    await this.trilha(id, r.valida
+      ? `Encoder lido para calibração: ${r.valor} (${r.leituras.join(', ')})`
+      : `Leitura do encoder para calibração recusada: ${r.motivo}${r.leituras.length ? ` (${r.leituras.join(', ')})` : ''}`,
+    user, cliente, r.valida ? 'INFO' : 'WARN');
+    return { valida: r.valida, valor: r.valor, leituras: r.leituras, motivo: r.motivo, lido_em: new Date() };
+  }
+
+  // ------------------------------------------------------------------ salvar
+  async salvar(pivoId: string, dto: CalibracaoAnguloDto, user?: Autor, cliente?: ClienteInfo) {
+    this.exigirEdicao(user);
+    const estado = await this.seq.estado(pivoId, user);
+    const id = String(pivoId).trim();
+    const enc = this.exigirEncoder(estado);
+    const resolucao = enc.resolucao as number;
+
+    const centro = { lat: Number(dto.centro_lat), lon: Number(dto.centro_lon) };
+    const ponta = { lat: Number(dto.ponta_lat), lon: Number(dto.ponta_lon) };
+    if (!coordenadaValida(centro) || !coordenadaValida(ponta)) throw new BadRequestException('Informe a posição do centro e da ponta em graus decimais');
+    const dist = distanciaM(centro, ponta);
+    if (!(dist > DISTANCIA_MIN_M)) {
+      throw new BadRequestException(`Pontos muito próximos: centro e ponta estão a ${Math.round(dist)} m (mínimo ${DISTANCIA_MIN_M} m)`);
+    }
+    const sentido: Sentido = Number(dto.sentido) === -1 ? -1 : 1;
+
+    // Leitura válida: só o valor que a TON acabou de ler (5 leituras) — nada digitado.
+    const lida = this.leituraValida(id);
+    if (!lida) throw new ConflictException('Leia o encoder antes de salvar (a leitura vale por 10 minutos)');
+    if (Number(dto.bruto_cal) !== lida.valor) throw new ConflictException(`A leitura do encoder mudou (${lida.valor}): leia de novo e confira antes de salvar`);
+
+    const pre = this.precondicoes(estado);
+    if (pre.pendencias.length) throw new ConflictException(pre.pendencias[0]);
+
+    const az = azimute(centro, ponta);
+    const cal = { az_cal: az, bruto_cal: lida.valor, sentido };
+    const { zero, invertido } = zeroDaCalibracao(cal, resolucao);
+    const anterior = await calibracaoVigente(this.prisma, id);
+    const tonId = await this.tonDoEncoder(id, user, cliente);
+
+    // 1) TON primeiro: sem a confirmação da placa nada é gravado.
+    await this.gravarNaTon(id, tonId, { resolucao, invertido, zero }, user, cliente);
+
+    // 2) Banco: desativa a anterior, grava a nova e espelha zero + sentido na Configuração.
+    const novoId = novoId26();
+    const usuarioId = user?.id?.trim() ?? null;
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`
+          UPDATE calibracao_angulo SET ativa = false, desativada_em = now(), desativada_por = ${usuarioId}, motivo_desativacao = 'Nova calibração'
+          WHERE equipamento_id = ${id}::bpchar AND ativa`;
+        await tx.$executeRaw`
+          INSERT INTO calibracao_angulo
+            (id, equipamento_id, bruto_cal, sentido, centro_lat, centro_lon, ponta_lat, ponta_lon, az_cal,
+             resolucao, zero, encoder_equipamento_id, leituras, origem, usuario_id, criado_em, ativa)
+          VALUES
+            (${novoId}, ${id}, ${lida.valor}, ${sentido}, ${centro.lat}, ${centro.lon}, ${ponta.lat}, ${ponta.lon}, ${az},
+             ${resolucao}, ${zero}, ${enc.equipamento_id}, ${JSON.stringify(lida.leituras)}::jsonb, 'calibracao', ${usuarioId}, now(), true)`;
+        await this.espelharNaConfig(tx, id, zero, invertido, usuarioId);
+      });
+    } catch (e) {
+      // A placa já está com a calibração nova e o banco não: volta a placa para o que valia.
+      await this.gravarNaTon(id, tonId, { resolucao, invertido: enc.invertido, zero: enc.zero }, user, cliente).catch((r) =>
+        this.logger.error(`[calibracao] ${id}: banco falhou e a TON não voltou à calibração anterior: ${r?.message ?? r}`));
+      if (colunaTrilhaAusente(e)) throw new NotFoundException('Calibração indisponível neste servidor (SQL 2026-11-11c não aplicado)');
+      throw e;
+    }
+    this.leituras.delete(id);
+    this.ton.esquecerConfig(tonId);
+    await this.resolverSentidoInvertido(id, 'Recalibrado');
+
+    const resumo = `azimute ${grausTxt(az)}, leitura ${lida.valor}, sentido ${sentidoLegivel(sentido)}`;
+    await this.trilha(id, `Calibração do ângulo gravada na TON: ${resumo}${anterior ? ` (anterior: azimute ${grausTxt(anterior.az_cal)}, leitura ${anterior.bruto_cal}, ${sentidoLegivel(anterior.sentido)})` : ''}`, user, cliente);
+    await this.auditar('pivo_calibracao', id, `Calibração do ângulo do pivô: ${resumo}`, user, cliente, {
+      calibracao_id: novoId, ton_id: tonId, encoder_equipamento_id: enc.equipamento_id, resolucao,
+      depois: { az_cal: az, bruto_cal: lida.valor, sentido, zero, centro, ponta, distancia_m: Math.round(dist), leituras: lida.leituras },
+      antes: anterior ? this.paraTela(anterior) : null,
+    });
+    return this.ver(id, user);
+  }
+
+  // ------------------------------------------------------------------ restaurar
+  /** "Restaurar calibração anterior": reativa a última inativa, na TON e no NexON. */
+  async restaurar(pivoId: string, user?: Autor, cliente?: ClienteInfo) {
+    this.exigirEdicao(user);
+    const estado = await this.seq.estado(pivoId, user);
+    const id = String(pivoId).trim();
+    const enc = this.exigirEncoder(estado);
+    const anterior = await calibracaoAnterior(this.prisma, id);
+    if (!anterior) throw new NotFoundException('Este pivô não tem calibração anterior para restaurar');
+    if (anterior.resolucao !== enc.resolucao || (anterior.encoder_equipamento_id && anterior.encoder_equipamento_id !== enc.equipamento_id)) {
+      throw new ConflictException('A calibração anterior é de outro encoder ou de outra resolução: faça uma calibração nova');
+    }
+    const pre = this.precondicoes(estado);
+    if (pre.pendencias.length) throw new ConflictException(pre.pendencias[0]);
+
+    const atual = await calibracaoVigente(this.prisma, id);
+    const { zero, invertido } = zeroDaCalibracao(anterior, anterior.resolucao);
+    const tonId = await this.tonDoEncoder(id, user, cliente);
+    await this.gravarNaTon(id, tonId, { resolucao: anterior.resolucao, invertido, zero }, user, cliente);
+
+    const usuarioId = user?.id?.trim() ?? null;
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`
+          UPDATE calibracao_angulo SET ativa = false, desativada_em = now(), desativada_por = ${usuarioId}, motivo_desativacao = 'Calibração anterior restaurada'
+          WHERE equipamento_id = ${id}::bpchar AND ativa`;
+        await tx.$executeRaw`
+          UPDATE calibracao_angulo SET ativa = true, desativada_em = NULL, desativada_por = NULL, motivo_desativacao = NULL, origem = 'restauracao'
+          WHERE id = ${anterior.id}::bpchar`;
+        await this.espelharNaConfig(tx, id, zero, invertido, usuarioId);
+      });
+    } catch (e) {
+      await this.gravarNaTon(id, tonId, { resolucao: enc.resolucao as number, invertido: enc.invertido, zero: enc.zero }, user, cliente).catch((r) =>
+        this.logger.error(`[calibracao] ${id}: banco falhou e a TON não voltou à calibração vigente: ${r?.message ?? r}`));
+      if (colunaTrilhaAusente(e)) throw new NotFoundException('Calibração indisponível neste servidor (SQL 2026-11-11c não aplicado)');
+      throw e;
+    }
+    this.leituras.delete(id);
+    this.ton.esquecerConfig(tonId);
+    await this.resolverSentidoInvertido(id, 'Calibração anterior restaurada');
+
+    const resumo = `azimute ${grausTxt(anterior.az_cal)}, leitura ${anterior.bruto_cal}, sentido ${sentidoLegivel(anterior.sentido)}`;
+    await this.trilha(id, `Calibração anterior restaurada na TON: ${resumo}${atual ? ` (substitui: azimute ${grausTxt(atual.az_cal)}, leitura ${atual.bruto_cal}, ${sentidoLegivel(atual.sentido)})` : ''}`, user, cliente);
+    await this.auditar('pivo_calibracao_restaurada', id, `Calibração anterior do pivô restaurada: ${resumo}`, user, cliente, {
+      calibracao_id: anterior.id, ton_id: tonId, resolucao: anterior.resolucao,
+      depois: this.paraTela(anterior), antes: atual ? this.paraTela(atual) : null,
+    });
+    return this.ver(id, user);
+  }
+
+  // ------------------------------------------------------------------ internos
+  private podeEditar(user?: Autor): boolean {
+    return !user || capacidades(papelCanonico(user.role)).configTecnica;
+  }
+
+  private exigirEdicao(user?: Autor) {
+    if (!this.podeEditar(user)) throw new ForbiddenException(MSG_SOMENTE_LEITURA);
+  }
+
+  private exigirEncoder(estado: Awaited<ReturnType<PivoSequenciaService['estado']>>) {
+    const enc = estado.posicao.encoder;
+    if (!enc || !enc.resolucao) {
+      throw new BadRequestException('Pivô sem encoder: escolha o encoder e a resolução em Configuração → Posição do pivô');
+    }
+    return enc;
+  }
+
+  private leituraValida(id: string) {
+    const l = this.leituras.get(id);
+    if (!l) return null;
+    if (Date.now() - l.em > LEITURA_VALE_MS) { this.leituras.delete(id); return null; }
+    return l;
+  }
+
+  /**
+   * Pré-condições da seção 3.2: pivô parado e chave seletora em modo TON. `pendencias`
+   * vazia = pode salvar; cada texto é o motivo que a tela mostra ao lado do botão.
+   */
+  precondicoes(estado: Awaited<ReturnType<PivoSequenciaService['estado']>>) {
+    const st = estado.pivo.status;
+    const ton = estado.pivo.ton_local;
+    const girando = st.direita === 1 || st.esquerda === 1;
+    const executando = estado.sequencia?.status === 'executando';
+    const semLeitura = st.direita === null && st.esquerda === null && !ton;
+    const parado: boolean | null = girando || (!!ton && ton.e !== 0) || executando ? false : semLeitura ? null : true;
+    const modoTon: boolean | null = !estado.pivo.tem_modo_ton ? true : estado.pivo.modo_ton === 1 ? true : estado.pivo.modo_ton === 0 ? false : null;
+    const pendencias: string[] = [];
+    if (parado === false) pendencias.push('Pivô em movimento: a calibração só é feita com o pivô parado');
+    if (parado === null) pendencias.push('Sem leitura do estado do pivô: não dá para saber se ele está parado');
+    if (modoTon === false) pendencias.push('Chave seletora em modo CLP: passe para o modo TON');
+    if (modoTon === null) pendencias.push('Sem leitura da chave seletora (modo TON)');
+    return { parado, modo_ton: modoTon, tem_modo_ton: estado.pivo.tem_modo_ton, pendencias };
+  }
+
+  /** TON que executa o pivô, com o encoder no RS485 dela (é quem lê e quem guarda a calibração). */
+  private async tonDoEncoder(id: string, user?: Autor, cliente?: ClienteInfo): Promise<string> {
+    const alvo = await this.ton.alvo(id, user, cliente);
+    if (!alvo) {
+      throw new ConflictException('Este pivô não está numa TON com a sequência local: ligue giro e percentímetro na mesma TON (Topologia) e grave o firmware');
+    }
+    if (!(await this.ton.encoderNaTon(id, alvo.tonId, false))) {
+      throw new ConflictException('O encoder escolhido não está no RS485 da TON deste pivô');
+    }
+    return alvo.tonId;
+  }
+
+  private async gravarNaTon(id: string, tonId: string, enc: { resolucao: number; invertido: boolean; zero: number }, user?: Autor, cliente?: ClienteInfo) {
+    try {
+      await this.cmd.comandoTon(
+        { equipamentoId: id, tonId, cmd: comandoEnc(enc), rotulo: 'Calibração do ângulo do pivô na TON', ackOk: /^pivo_enc_ok$/ }, user, cliente,
+      );
+    } catch (e) {
+      throw this.erroDaTon(e, 'A TON não confirmou a gravação da calibração');
+    }
+  }
+
+  private erroDaTon(e: unknown, prefixo: string) {
+    const bruto = String((e as any)?.response?.message ?? (e as Error)?.message ?? e);
+    const txt = TXT_TON.find(([re]) => re.test(bruto))?.[1];
+    return new BadGatewayException(`${prefixo}: ${txt ?? bruto}`);
+  }
+
+  /** Zero e sentido da calibração na Configuração do pivô — é o que a tela e a parada por ângulo usam. */
+  private async espelharNaConfig(tx: { $executeRaw: PrismaService['$executeRaw'] }, id: string, zero: number, invertido: boolean, usuarioId: string | null) {
+    const patch = JSON.stringify({ correcao_angulo_zero: zero, encoder_invertido: invertido });
+    await tx.$executeRaw`
+      UPDATE pivo_config SET parametros = COALESCE(parametros, '{}'::jsonb) || ${patch}::jsonb, updated_at = now(), updated_by = ${usuarioId}
+      WHERE equipamento_id = ${id}::bpchar`;
+  }
+
+  private paraTela(c: LinhaCalibracao | null) {
+    if (!c) return null;
+    return {
+      id: c.id, bruto_cal: c.bruto_cal, sentido: c.sentido, az_cal: c.az_cal,
+      centro_lat: c.centro_lat, centro_lon: c.centro_lon, ponta_lat: c.ponta_lat, ponta_lon: c.ponta_lon,
+      resolucao: c.resolucao, zero: c.zero, origem: c.origem, ativa: c.ativa,
+      usuario_id: c.usuario_id, usuario_nome: c.usuario_nome, criado_em: c.criado_em, desativada_em: c.desativada_em,
+      // O que a calibração dá para a leitura de referência (confere com o que a TON calcula)
+      angulo_na_leitura: anguloDoEncoder(c.bruto_cal, { resolucao: c.resolucao, invertido: c.sentido === -1, zero: c.zero })?.angulo ?? null,
+    };
+  }
+
+  /** Alarme "Sentido invertido — recalibrar" aberto deste pivô: recalibrou, resolve. */
+  private async resolverSentidoInvertido(id: string, motivo: string) {
+    try {
+      await this.prisma.$executeRaw`
+        UPDATE logs_mqtt SET resolvido_em = now(),
+          dados_snapshot = COALESCE(dados_snapshot, '{}'::jsonb) || ${JSON.stringify({ normalizado_em: new Date().toISOString(), normalizado_por: motivo })}::jsonb
+        WHERE tipo = 'alerta' AND resolvido_em IS NULL AND equipamento_id = ${id}::bpchar
+          AND dados_snapshot->>'kind' = 'pivo_angulo' AND dados_snapshot->>'codigo' = 'sentido_invertido'`;
+    } catch (e) {
+      if (!colunaTrilhaAusente(e)) this.logger.warn(`[calibracao] ${id}: alarme de sentido não resolvido: ${(e as Error).message}`);
+    }
+  }
+
+  /** Trilha do pivô (logs_mqtt tipo 'comando', comando_semantico 'pivo.calibracao'). Nunca lança. */
+  private async trilha(id: string, mensagem: string, user?: Autor, cliente?: ClienteInfo, severidade = 'INFO') {
+    try {
+      const log = await this.prisma.logs_mqtt.create({
+        data: {
+          tipo: 'comando', equipamento_id: id, severidade, status: 'gravado',
+          mensagem: mensagem.slice(0, 500), usuario_id: user?.id?.trim() || null, comando_semantico: 'pivo.calibracao',
+        },
+      });
+      if (cliente?.dispositivo && log?.id != null) {
+        await this.prisma.$executeRaw`UPDATE logs_mqtt SET dispositivo = ${cliente.dispositivo} WHERE id = ${log.id}::bpchar`.catch(() => undefined);
+      }
+    } catch (e) {
+      this.logger.warn(`[calibracao] trilha de ${id}: ${(e as Error)?.message}`);
+    }
+  }
+
+  /** Auditoria (auditoria_acessos): quem calibrou, em que pivô, antes → depois. Nunca lança. */
+  private async auditar(
+    acao: 'pivo_calibracao' | 'pivo_calibracao_restaurada', id: string, mensagem: string,
+    user: Autor | undefined, cliente: ClienteInfo | undefined, detalhes: Record<string, unknown>,
+  ) {
+    try {
+      const ctx = await this.prisma.$queryRaw<Array<{ nome: string; unidade_id: string | null; unidade_nome: string | null; planta_id: string | null; planta_nome: string | null }>>`
+        SELECT e.nome, TRIM(un.id) AS unidade_id, un.nome AS unidade_nome, TRIM(pl.id) AS planta_id, pl.nome AS planta_nome
+        FROM equipamentos e
+        LEFT JOIN equipamentos pai ON pai.id = e.equipamento_pai_id
+        LEFT JOIN unidades un ON un.id = COALESCE(e.unidade_id, pai.unidade_id)
+        LEFT JOIN plantas pl ON pl.id = un.planta_id
+        WHERE e.id = ${id}::bpchar LIMIT 1`.catch(() => []);
+      const c = ctx[0];
+      const autor = user?.id
+        ? await this.prisma.usuarios.findFirst({ where: { id: user.id.trim() }, select: { nome: true } }).catch(() => null)
+        : null;
+      const nome = c?.nome?.trim() ?? id;
+      await this.auditoria.registrar({
+        autorId: user?.id ?? null,
+        alvoUsuarioId: null,
+        acao,
+        mensagem: `${mensagem} — ${nome}${c?.unidade_nome ? ` (${c.unidade_nome.trim()})` : ''}`,
+        plantaIds: c?.planta_id ? [c.planta_id] : [],
+        unidadeIds: c?.unidade_id ? [c.unidade_id] : [],
+        dispositivo: cliente?.dispositivo ?? null,
+        objetoTipo: 'equipamento',
+        objetoId: id,
+        resultado: 'ok',
+        autorNome: autor?.nome?.trim() ?? user?.nome ?? null,
+        rota: `/pivos/${id}/calibracao`,
+        detalhes: {
+          usuario: user ? { id: user.id?.trim() ?? null, nome: autor?.nome?.trim() ?? null, papel: papelCanonico(user.role) } : null,
+          pivo: { id, nome, unidade: c?.unidade_nome?.trim() ?? null, planta: c?.planta_nome?.trim() ?? null },
+          ...detalhes,
+        },
+      });
+    } catch (e) {
+      this.logger.warn(`[calibracao] auditoria de ${id}: ${(e as Error)?.message}`);
+    }
+  }
+}

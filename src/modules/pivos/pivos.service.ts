@@ -4,6 +4,7 @@ import { novoId26 } from '../../core/common/cliente-info';
 import { colunaTrilhaAusente } from '../logs-mqtt/logs-mqtt-filtros';
 import { PivoConfigDto, ProgramacaoPivoDto } from './dto/pivos.dto';
 import { brutoDoEncoder } from './pivo-posicao.util';
+import { calibracaoVigente, desativarCalibracao } from './pivo-calibracao.repo';
 import { agoraEmSaoPaulo, lerData, validarAgenda, type Ocupado } from './pivo-agenda.util';
 import { capacidades, isGlobal, MSG_SOMENTE_LEITURA, papelCanonico } from '../../core/modules/auth/papeis';
 import {
@@ -97,6 +98,7 @@ export class PivosService {
           ? parametros.encoder_equipamento_id.trim() : null,
         encoder_resolucao: num(parametros.encoder_resolucao),
         encoder_invertido: parametros.encoder_invertido === true,
+        travado_min: num(parametros.travado_min),
         direcionamento: parametros.direcionamento === 'fisico' ? 'fisico' : 'valvula',
         valvula_ton_id: typeof parametros.valvula_ton_id === 'string' ? parametros.valvula_ton_id : null,
         valvula_bo: num(parametros.valvula_bo),
@@ -138,6 +140,21 @@ export class PivosService {
       if (enc.unidade_id !== eq.unidade_id) throw new BadRequestException('O encoder tem de ser da mesma instalação do pivô');
       if (dto.parametros) dto.parametros.encoder_equipamento_id = enc.id;
     }
+    // NEXON-103 — com calibração ativa, zero e sentido do encoder vêm DELA (e estão gravados na
+    // TON): mudar aqui deixaria a tela e a placa com contas diferentes. Trocar o encoder ou a
+    // resolução invalida a calibração: ela é desativada e o pivô volta a "sem calibração".
+    let calibracaoDesativada = false;
+    const mexeu = camposTecnicosAlterados(dto, atual);
+    if (mexeu.some((k) => k === 'correcao_angulo_zero' || k === 'encoder_invertido' || k === 'encoder_equipamento_id' || k === 'encoder_resolucao')) {
+      const cal = await calibracaoVigente(this.prisma, eq.id);
+      if (cal) {
+        const trocouEncoder = mexeu.includes('encoder_equipamento_id') || mexeu.includes('encoder_resolucao');
+        if (!trocouEncoder) {
+          throw new BadRequestException('O zero e o sentido do encoder vêm da Calibração deste pivô: refaça a calibração para mudar');
+        }
+        calibracaoDesativada = (await desativarCalibracao(this.prisma, eq.id, user?.id?.trim() ?? null, 'Encoder ou resolução alterados na Configuração')) > 0;
+      }
+    }
     const bloqueio = dto.bloqueio_ponta ? janelaOuPadrao(dto.bloqueio_ponta, PONTA_PADRAO) : atual.bloqueio_ponta;
     const reservado = dto.reservado ? janelaOuPadrao(dto.reservado, RESERVADO_PADRAO) : atual.reservado;
 
@@ -168,6 +185,7 @@ export class PivosService {
         if (v !== undefined && v !== antes) mudou.push(`${k} ${antes ?? '—'} → ${v ?? '—'}`);
       }
     }
+    if (calibracaoDesativada) mudou.push('calibração do ângulo desativada (encoder ou resolução mudou — calibrar de novo)');
     if (mudou.length) {
       try {
         await this.prisma.logs_mqtt.create({

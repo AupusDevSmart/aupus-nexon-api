@@ -42,7 +42,10 @@ export type AcaoAuditoria =
   | 'camera_config'
   | 'camera_agente'
   | 'camera_agente_token'
-  | 'camera_evento_lido';
+  | 'camera_evento_lido'
+  // NEXON-103 (calibração do ângulo do pivô): gravada na TON e restaurada
+  | 'pivo_calibracao'
+  | 'pivo_calibracao_restaurada';
 
 export interface RegistroAcesso {
   autorId: string | null;

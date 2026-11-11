@@ -3,7 +3,8 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser, Permissions, Cliente, ClienteInfo } from '@/core';
 import { PivosService } from './pivos.service';
 import { AcaoPivo, PivoSequenciaService } from './pivo-sequencia.service';
-import { PivoConfigDto, ProgramacaoPivoDto } from './dto/pivos.dto';
+import { CalibracaoAnguloDto, PivoConfigDto, ProgramacaoPivoDto } from './dto/pivos.dto';
+import { PivoCalibracaoService } from './pivo-calibracao.service';
 
 /**
  * Pivô (apps NexON v2). Leitura: escopo do equipamento/unidade (operador: só o
@@ -22,6 +23,7 @@ export class PivosController {
   constructor(
     private readonly service: PivosService,
     private readonly sequencia: PivoSequenciaService,
+    private readonly calibracao: PivoCalibracaoService,
   ) {}
 
   // ---------------------------------------------------- bombeamento + sequência
@@ -74,6 +76,39 @@ export class PivosController {
   @ApiOperation({ summary: 'Encoders da instalação do pivô (criados pelo diagrama IoT) com a última leitura' })
   opcoesEncoder(@Param('id') id: string, @CurrentUser() user?: any) {
     return this.service.opcoesEncoder(id, user);
+  }
+
+  // ---------------------------------------------------- calibração do ângulo (NEXON-103)
+  // Ver: quem tem o pivô no escopo. Ler encoder, salvar e restaurar: só Admin e analistas
+  // (config técnica — conferido no serviço, e o 403 vai sozinho para a auditoria).
+  @Get(':id/calibracao')
+  @ApiOperation({ summary: 'Calibração do ângulo: vigente, anterior, pré-condições (parado, modo TON) e a leitura do encoder' })
+  verCalibracao(@Param('id') id: string, @CurrentUser() user?: any) {
+    return this.calibracao.ver(id, user);
+  }
+
+  @Post(':id/calibracao/ler-encoder')
+  @HttpCode(HttpStatus.OK)
+  @Permissions('equipamentos.acionar_ponto', 'equipamentos.manage')
+  @ApiOperation({ summary: 'Ler encoder: 5 leituras Modbus seguidas na TON; válida se iguais ou variando no máximo ±1' })
+  lerEncoder(@Param('id') id: string, @CurrentUser() user?: any, @Cliente() cliente?: ClienteInfo) {
+    return this.calibracao.lerEncoder(id, user, cliente);
+  }
+
+  @Post(':id/calibracao/restaurar')
+  @HttpCode(HttpStatus.OK)
+  @Permissions('equipamentos.acionar_ponto', 'equipamentos.manage')
+  @ApiOperation({ summary: 'Restaurar calibração anterior: reativa a última inativa, na TON e no NexON' })
+  restaurarCalibracao(@Param('id') id: string, @CurrentUser() user?: any, @Cliente() cliente?: ClienteInfo) {
+    return this.calibracao.restaurar(id, user, cliente);
+  }
+
+  @Post(':id/calibracao')
+  @HttpCode(HttpStatus.OK)
+  @Permissions('equipamentos.acionar_ponto', 'equipamentos.manage')
+  @ApiOperation({ summary: 'Salvar calibração: envia para a TON, espera a confirmação da placa e desativa a anterior' })
+  salvarCalibracao(@Param('id') id: string, @Body() dto: CalibracaoAnguloDto, @CurrentUser() user?: any, @Cliente() cliente?: ClienteInfo) {
+    return this.calibracao.salvar(id, dto, user, cliente);
   }
 
   @Get(':id/bombeamento/opcoes')
