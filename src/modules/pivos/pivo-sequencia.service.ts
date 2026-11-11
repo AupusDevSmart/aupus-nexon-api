@@ -97,7 +97,8 @@ type ResCanhao = 'ok' | 'ja' | 'sem_ponto' | 'sem_status' | 'sem_leitura' | 'nao
  */
 const PAPEIS_COMANDO: Record<PapelComando, RegExp> = {
   // Ligar: o painel liga a bomba e fecha a solenoide (só na partida com água)
-  ligar: /^(?!.*deslig).*(ligar|bomba)/,
+  // "Bombeamento" (padrão) não contém "bomba" — casa por "bomb".
+  ligar: /^(?!.*deslig).*(ligar|bomb)/,
   // Válvula ON/OFF do pivô (BO02 do padrão): saída mantida, abre com a bomba e fecha depois dela
   valvula: /valvul|solenoid/,
   // Canhão final: botão do painel que ALTERNA (pulso); o estado vem do Canhao_ligado

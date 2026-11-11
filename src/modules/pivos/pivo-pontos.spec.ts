@@ -57,6 +57,19 @@ describe('pivô: Ligar (bomba), canhão e permissivo como pontos', () => {
     expect(pts.st.permissivo).toEqual({ ton_id: 'TON-B', bi: 4, inv: false });
   });
 
+  it('pontos do padrão: Bombeamento = ligar, Valvula = valvula, Pressao_ok = pressão', async () => {
+    const { svc } = montar([
+      { id: 'b', tipo: 'comando', nome: 'Bombeamento' },
+      { id: 'v', tipo: 'comando', nome: 'Valvula' },
+      { id: 'c', tipo: 'comando', nome: 'Canhao' },
+      { id: 'p', tipo: 'status', nome: 'Pressao_ok', ton_id: 'T', bi: 1 },
+      { id: 's', tipo: 'status', nome: 'Seguranca', ton_id: 'T', bi: 5 },
+    ], {}, {});
+    const pts = await svc.pontos('PIV');
+    expect(pts.cmd).toEqual({ ligar: 'b', valvula: 'v', canhao: 'c' });
+    expect(pts.st.pressao).toEqual({ ton_id: 'T', bi: 1, inv: false });
+  });
+
   it('nomes antigos ainda valem: Ligar_bomba = Ligar, Bomba_ligada = Ligado', async () => {
     const { svc } = montar([
       { id: 'a', tipo: 'comando', nome: 'Ligar_bomba' },
