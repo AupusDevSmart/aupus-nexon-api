@@ -1096,6 +1096,8 @@ export class PivoSequenciaService implements OnModuleInit {
     const paraSemGiro = extra.paraSemGiro === true;
     const origemSeq: OrigemSequencia = extra.origem ?? 'manual';
     const reiniciar = extra.reiniciar === true;
+    /** Passo do canhão no Ligar: definido lá dentro, executado depois de gravar a parada automática. */
+    let canhaoNoInicio: (() => Promise<void>) | null = null;
     const passos: Passo[] = [];
     const passo = async (etapa: string, msg: string, ok: boolean | null) => {
       passos.push({ t: new Date().toISOString(), etapa, msg, ok });
@@ -1172,6 +1174,10 @@ export class PivoSequenciaService implements OnModuleInit {
           const r = await this.aplicarCanhao(id, pts, false, user, cliente, cfg.sequencia.confirma_giro_s)
             .catch((x) => { this.logger.warn(`[pivo-seq] ${id} canhão: ${msgErro(x)}`); return 'nao_confirmou' as const; });
           await passo('canhao', MSG_CANHAO[r](false, cfg.sequencia.confirma_giro_s), r === 'ok' || r === 'ja');
+          // Canhão que não desligou fica aberto para a próxima irrigação: avisa na trilha.
+          if (r !== 'ok' && r !== 'ja') {
+            await this.trilha(id, `${MSG_CANHAO[r](false, cfg.sequencia.confirma_giro_s)} — confira o canhão no painel`, (user as Autor | undefined)?.id?.trim() || null, origemSeq, 'WARN');
+          }
         }
         if (b) await this.desligarBomba(id, b, passo, user, cliente, desligarPivoEnviado);
         return parou;
@@ -1340,11 +1346,24 @@ export class PivoSequenciaService implements OnModuleInit {
         }
         await passo('pivo', girou === null ? `Sem status de giro cadastrado — comando enviado` : `Pivô girando ${sentido}`, girou === null ? null : true);
         // Canhão no início (só com água — normalizarIrrigacao já zera no seco). Não derruba a
-        // irrigação: o pivô já está girando com água; falha fica registrada no passo.
-        if (irr?.config.canhao && !irr.config.semAgua) {
-          const r = await this.aplicarCanhao(id, pts, true, user, cliente, cfg.sequencia.confirma_giro_s, ctl)
-            .catch((x) => { this.logger.warn(`[pivo-seq] ${id} canhão: ${msgErro(x)}`); return 'nao_confirmou' as const; });
-          await passo('canhao', MSG_CANHAO[r](true, cfg.sequencia.confirma_giro_s), r === 'ok' || r === 'ja' ? true : r === 'nao_confirmou' ? false : null);
+        // irrigação: o pivô já está girando com água; a falha fica no passo E na trilha (o Ligar
+        // diz "· canhão", então quem lê precisa saber que ele não ligou). Roda DEPOIS de gravar a
+        // parada automática, abaixo: a espera do canhão leva até confirma_giro_s, e um reinício do
+        // processo nessa janela deixaria o pivô girando sem parada marcada.
+        if (irr && !irr.config.semAgua) {
+          const ligarCanhao = irr.config.canhao === true;
+          canhaoNoInicio = async () => {
+            // Programação/agenda SEM canhão: ninguém está na tela para ver. Se ele ficou ligado de
+            // uma irrigação anterior (status lendo 1), desliga para irrigar como foi agendado.
+            // No Ligar manual nada muda: sem canhão pedido, o NexON não mexe nele.
+            if (!ligarCanhao && !(origemSeq === 'programacao' && pts.cmd.canhao && pts.st.canhao && (await this.lerStatus(pts.st.canhao)) === 1)) return;
+            const r = await this.aplicarCanhao(id, pts, ligarCanhao, user, cliente, cfg.sequencia.confirma_giro_s, ctl)
+              .catch((x) => { this.logger.warn(`[pivo-seq] ${id} canhão: ${msgErro(x)}`); return 'nao_confirmou' as const; });
+            const certo = r === 'ok' || r === 'ja';
+            const msg = MSG_CANHAO[r](ligarCanhao, cfg.sequencia.confirma_giro_s);
+            await passo('canhao', msg, certo ? true : r === 'nao_confirmou' ? false : null);
+            if (!certo) await this.trilha(id, msg, (user as Autor | undefined)?.id?.trim() || null, origemSeq, 'WARN');
+          };
         }
       }
       // Parada automática (voltas/tempo/ângulo): o PivoAutomacaoService desliga em parar_em.
@@ -1361,6 +1380,7 @@ export class PivoSequenciaService implements OnModuleInit {
           await passo('parada', 'Parada por ângulo sem leitura de ângulo do pivô — o servidor para quando o ângulo for lido', null);
         }
       }
+      if (canhaoNoInicio && !ctl.cancelar) await canhaoNoInicio();
       await fim('concluida');
     } catch (e: any) {
       await passo('erro', msgErro(e), false).catch(() => undefined);

@@ -42,6 +42,8 @@ export class PivoAutomacaoService {
     private readonly seq: PivoSequenciaService,
   ) {}
 
+  private avisouSemData = false;
+
   @Interval(30_000)
   async tick() {
     if (this.rodando || process.env.PIVO_AUTOMACAO === 'off') return;
@@ -95,7 +97,9 @@ export class PivoAutomacaoService {
         SELECT TRIM(p.id) AS id, TRIM(p.equipamento_id) AS pivo, p.nome, p.ativo, p.hora_inicio, p.dias, p.modo,
                p.angulo_inicial::float AS angulo_inicial, p.angulo_final::float AS angulo_final, p.duracao_min, p.sentido,
                p.velocidade::float AS velocidade, p.com_agua, p.ultima_execucao_em, TRIM(COALESCE(p.updated_by, p.created_by)) AS created_by,
-               to_char(p.data, 'YYYY-MM-DD') AS data
+               to_char(p.data, 'YYYY-MM-DD') AS data,
+               -- lida pelo jsonb: sem a coluna (SQL 2026-11-11b não aplicado) vale false, sem cair na reserva
+               COALESCE((to_jsonb(p)->>'canhao')::boolean, false) AS canhao
         FROM pivo_programacoes p JOIN equipamentos e ON e.id = p.equipamento_id AND e.deleted_at IS NULL
         WHERE p.deleted_at IS NULL AND p.ativo
           -- agenda por data (planilha): só as linhas de HOJE entram; as semanais (data nula) sempre
@@ -103,6 +107,10 @@ export class PivoAutomacaoService {
     } catch (e) {
       if (!colunaTrilhaAusente(e)) throw e;
       // SQL 2026-11-11 (coluna `data`) ainda não aplicado: as semanais seguem disparando.
+      if (!this.avisouSemData) {
+        this.avisouSemData = true;   // uma vez por processo: o tick roda a cada 30 s
+        this.logger.warn('[pivo-automacao] pivo_programacoes sem a coluna `data`: a agenda por data não dispara (aplique db/manual-migrations/2026-11-11_pivo_agenda_por_data.sql)');
+      }
       progs = await this.prisma.$queryRaw<Linha[]>`
         SELECT TRIM(p.id) AS id, TRIM(p.equipamento_id) AS pivo, p.nome, p.ativo, p.hora_inicio, p.dias, p.modo,
                p.angulo_inicial::float AS angulo_inicial, p.angulo_final::float AS angulo_final, p.duracao_min, p.sentido,

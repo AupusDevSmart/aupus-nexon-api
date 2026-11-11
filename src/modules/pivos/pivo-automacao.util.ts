@@ -155,6 +155,8 @@ export interface ProgramacaoExec {
   id: string; nome: string; ativo: boolean; hora_inicio: string; dias: number[];
   modo: 'percurso' | 'tempo'; angulo_inicial: number | null; angulo_final: number | null; duracao_min: number | null;
   sentido: 'horario' | 'anti_horario'; velocidade: number | null; com_agua: boolean;
+  /** Liga o canhão final junto (NEXON-98). Ausente em linha antiga = desligado. */
+  canhao?: boolean | null;
   ultima_execucao_em: Date | null;
   /** Agenda por data (NEXON-98): a linha vale só neste dia — quem filtra o dia é a consulta do tick. */
   data?: string | null;
@@ -185,7 +187,7 @@ export function irrigacaoDaProgramacao(p: ProgramacaoExec): Irrigacao {
     direcao: p.sentido === 'horario' ? 'Avanço' : 'Reverso',
     percentual: Number(p.velocidade) > 0 ? normalizarPercentual(p.velocidade) : 100,   // vazio/0 sempre foi 100 %
     semAgua: p.com_agua === false,
-    canhao: false,
+    canhao: p.canhao === true && p.com_agua !== false,   // sem água o canhão não liga
     faixasCanhao: [],
   };
   let parada: Parada = { tipo: 'semParar' };

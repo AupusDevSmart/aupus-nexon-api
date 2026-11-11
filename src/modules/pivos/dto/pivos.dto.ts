@@ -188,4 +188,9 @@ export class ProgramacaoPivoDto {
   @IsOptional()
   @IsBoolean()
   com_agua?: boolean;
+
+  @ApiPropertyOptional({ default: false, description: 'Liga o canhão final junto com o pivô (só vale com água)' })
+  @IsOptional()
+  @IsBoolean()
+  canhao?: boolean;
 }
