@@ -18,6 +18,11 @@ export function ehRecurso(v: string): v is Recurso {
  */
 const NUNCA_VIAJAM: Record<Recurso, string[]> = {
   usuarios: [
+    // A exclusao NUNCA viaja no upsert (10/11/2026): o editado e apagado antes da entrega
+    // mandava `deleted_at` no upsert, o outro lado apagava pela versao, e o aviso que vinha
+    // depois achava o registro "ja apagado" — a exclusao atravessava calada, como em 26/10.
+    // Exclusao e o evento `delete`, que vira aviso. Barrado na saida e na entrada.
+    'deleted_at',
     // Credencial nao se replica. Nunca.
     'senha',
     'remember_token',
@@ -35,10 +40,10 @@ const NUNCA_VIAJAM: Record<Recurso, string[]> = {
     'created_by',
     'deleted_by',
   ],
-  plantas: [],
-  unidades: [],
-  // O NexOn nao tem as colunas de posicao: nao ha o que excluir aqui.
-  equipamentos: [],
+  plantas: ['deleted_at'],
+  unidades: ['deleted_at'],
+  // O NexOn nao tem as colunas de posicao; a exclusao, como nos outros, nao viaja no upsert
+  equipamentos: ['deleted_at'],
 };
 
 /**

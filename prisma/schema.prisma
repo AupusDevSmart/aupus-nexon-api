@@ -3492,6 +3492,24 @@ model sincronizacao_outbox {
   @@index([proxima_em, id], map: "sincronizacao_outbox_pendentes_idx")
 }
 
+/// A exclusao feita no outro produto, esperando alguem decidir aqui (10/11/2026).
+/// A exclusao nao atravessa sozinha: chega como aviso, e "apagar tambem" ou
+/// "manter so aqui" e decisao registrada. O indice unico (uma pendente por
+/// registro) e PARCIAL e vive no SQL (prisma/sql/2026-11-10-...).
+model sincronizacao_exclusoes_pendentes {
+  id           BigInt    @id @default(autoincrement())
+  recurso      String    @db.VarChar(30)
+  registro_id  String    @db.VarChar(26)
+  origem       String    @db.VarChar(20)
+  apagado_em   DateTime? @db.Timestamp(3)
+  apagado_por  String?   @db.VarChar(255)
+  recebido_em  DateTime  @default(now()) @db.Timestamp(3)
+  /// 'apagar' ou 'manter'; nulo = pendente
+  decisao      String?   @db.VarChar(10)
+  decidido_em  DateTime? @db.Timestamp(3)
+  decidido_por String?   @db.VarChar(26)
+}
+
 /// Sem isto ninguem responde "por que o NexOn tem essa planta" nem "quem
 /// sobrescreveu minha edicao". Registra tambem o que foi IGNORADO por versao
 /// menor, que e o unico rastro que sobra de uma edicao perdida.
