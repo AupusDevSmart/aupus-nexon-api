@@ -104,6 +104,26 @@ const igual = (a: unknown, b: unknown): boolean => {
 };
 
 /**
+ * NEXON-103 — PUT de config num pivô COM calibração ativa: zero e sentido do encoder vêm da
+ * calibração (e estão gravados na TON).
+ *  - 'desativar': trocaram o encoder ou a resolução → a calibração deixa de valer;
+ *  - 'recusar': mudança de verdade no zero (mais de 0,5°) ou no sentido → só recalibrando;
+ *  - 'descartar': a tela devolveu o bloco inteiro com o zero arredondado (a calibração grava
+ *    com duas casas) → não é alteração; os dois campos saem do pedido;
+ *  - null: o pedido não toca no encoder.
+ */
+export function pedidoComCalibracaoAtiva(dto: DtoConfigPivo, atual: ConfigPivoAtual): 'desativar' | 'recusar' | 'descartar' | null {
+  const p = (dto.parametros ?? {}) as Record<string, unknown>;
+  if (!['correcao_angulo_zero', 'encoder_invertido', 'encoder_equipamento_id', 'encoder_resolucao'].some((k) => p[k] !== undefined)) return null;
+  const mexeu = camposTecnicosAlterados(dto, atual);
+  if (mexeu.includes('encoder_equipamento_id') || mexeu.includes('encoder_resolucao')) return 'desativar';
+  const zero = p.correcao_angulo_zero;
+  const mudouZero = zero !== undefined && (zero === null || !(Math.abs(Number(zero) - Number(atual.parametros?.correcao_angulo_zero ?? 0)) <= 0.5));
+  const mudouSentido = p.encoder_invertido !== undefined && (p.encoder_invertido === true) !== (atual.parametros?.encoder_invertido === true);
+  return mudouZero || mudouSentido ? 'recusar' : 'descartar';
+}
+
+/**
  * Campos técnicos que o PUT de config MUDA de fato. O app manda o bloco
  * `parametros` inteiro ao salvar a lâmina: valor técnico igual ao gravado não
  * conta (o proprietário salva a lâmina sem esbarrar na pressão que nem mexeu).

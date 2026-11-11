@@ -77,7 +77,6 @@ export class PivoAnguloAlarmeService {
       FROM pivo_config c
       JOIN equipamentos e ON e.id = c.equipamento_id AND e.deleted_at IS NULL
       WHERE COALESCE(c.parametros->>'encoder_equipamento_id', '') <> ''`;
-    if (!pivos.length) return;
     const abertos = await this.abertos();
     for (const p of pivos) {
       try {
@@ -85,6 +84,15 @@ export class PivoAnguloAlarmeService {
       } catch (e: any) {
         this.logger.warn(`[pivo-angulo] ${p.id}: ${e?.message ?? e}`);
       }
+    }
+    // Tiraram o encoder da Configuração (ou apagaram o pivô): o alarme aberto não tem mais quem o feche.
+    const comEncoder = new Set(pivos.map((p) => p.id));
+    for (const [chave, a] of abertos) {
+      const id = chave.split('|')[0];
+      if (comEncoder.has(id)) continue;
+      await this.resolver(a, { normalizado_por: 'Pivô sem encoder na Configuração' }).catch(() => undefined);
+      this.sentido.delete(id);
+      this.travado.delete(id);
     }
   }
 
@@ -109,17 +117,20 @@ export class PivoAnguloAlarmeService {
       await this.resolver(abertoEnc, { normalizado_por: 'Encoder voltou a responder' });
     }
 
-    // Os dois seguintes precisam do ângulo calibrado e do lado lido das entradas.
-    const angulo = pos.fonte === 'encoder' && !pos.sem_calibracao ? pos.angulo : null;
+    // Os dois seguintes precisam do ângulo calibrado, FRESCO e com a TON viva: posição ou
+    // entradas velhas (TON fora do ar com o pivô girando) parecem "ângulo parado" e não são.
+    const fresco = tonViva && !mudo;
+    const angulo = fresco && pos.fonte === 'encoder' && !pos.sem_calibracao ? pos.angulo : null;
+    const dir = fresco ? giro.dir : null;
 
     // ---- Sentido invertido (comando de um lado e o ângulo andando para o outro)
-    const s = passoSentido(this.sentido.get(p.id) ?? null, giro.dir, angulo);
+    const s = passoSentido(this.sentido.get(p.id) ?? null, dir, angulo);
     if (s.estado) this.sentido.set(p.id, s.estado); else this.sentido.delete(p.id);
     if (s.invertido) {
       if (!abertos.get(chave('sentido_invertido'))) {
         await this.abrir(p.id, 'sentido_invertido', `${nome}: Sentido invertido — recalibrar`, 'ALTA', {
-          comando: giro.dir === 'D' ? 'direita' : 'esquerda', graus_no_contrario: s.contrario, angulo,
-          detalhe: `Comando ${giro.dir === 'D' ? 'Direita' : 'Esquerda'} ativo e o ângulo andou ${String(s.contrario).replace('.', ',')}° no sentido contrário`,
+          comando: dir === 'D' ? 'direita' : 'esquerda', graus_no_contrario: s.contrario, angulo,
+          detalhe: `Comando ${dir === 'D' ? 'Direita' : 'Esquerda'} ativo e o ângulo andou ${String(s.contrario).replace('.', ',')}° no sentido contrário`,
         });
       }
       // recomeça a conta: só alarma de novo se andar mais 2° ao contrário depois de resolvido
@@ -127,19 +138,29 @@ export class PivoAnguloAlarmeService {
     }
 
     // ---- Pivô travado (girando com o ângulo parado)
+    // Sem prazo (null) não julga: irrigando parado (0 %) ou velocidade desconhecida (ligado no painel).
     const minutos = Number(p.parametros?.travado_min) > 0 ? Number(p.parametros.travado_min) : TRAVADO_MIN_PADRAO;
-    const volta100 = Number(p.parametros?.tempo_volta_100) >= 1 ? Number(p.parametros.tempo_volta_100) : null;
+    const volta100 = Number(p.parametros?.tempo_volta_100) >= 1 ? Number(p.parametros.tempo_volta_100) : 21;
     const prazo = prazoTravadoMs(minutos, enc.resolucao, volta100, giro.percentual);
-    const t = passoTravado(this.travado.get(p.id) ?? null, giro.dir !== null, angulo, agora, prazo, enc.resolucao);
-    if (t.estado) this.travado.set(p.id, t.estado); else this.travado.delete(p.id);
     const abertoTrav = abertos.get(chave('pivo_travado'));
-    if (t.travado && !abertoTrav) {
+    // A API reiniciou com o alarme aberto: retoma a conta de onde o alarme parou, em vez de
+    // dar o pivô por "voltou a andar" e abrir outro alarme depois.
+    let ant = this.travado.get(p.id) ?? null;
+    if (!ant && abertoTrav && Number.isFinite(Number(abertoTrav.snapshot?.angulo)) && abertoTrav.snapshot?.parado_desde) {
+      ant = { ref: Number(abertoTrav.snapshot.angulo), desde: new Date(abertoTrav.snapshot.parado_desde).getTime() };
+    }
+    const t = passoTravado(ant, dir !== null, angulo, agora, prazo, enc.resolucao);
+    if (t.estado) this.travado.set(p.id, t.estado); else this.travado.delete(p.id);
+    if (t.travado && !abertoTrav && t.estado && prazo != null) {
       await this.abrir(p.id, 'pivo_travado', `${nome}: pivô travado — girando há ${Math.round(t.paradoMs / 60_000)} min sem o ângulo mudar`, 'ALTA', {
-        angulo, prazo_min: Math.round(prazo / 60_000), configurado_min: minutos, percentual: giro.percentual,
+        angulo: t.estado.ref, parado_desde: new Date(t.estado.desde).toISOString(),
+        prazo_min: Math.round(prazo / 60_000), configurado_min: minutos, percentual: giro.percentual,
         detalhe: `Contator de força ligado e ângulo parado em ${angulo}° por ${Math.round(t.paradoMs / 60_000)} min`,
       });
-    } else if (abertoTrav && !t.travado && (giro.dir === null ? giro.lido : t.paradoMs === 0 && angulo != null)) {
-      await this.resolver(abertoTrav, { normalizado_por: giro.dir === null ? 'Pivô parou' : 'Pivô voltou a andar' });
+    } else if (abertoTrav && t.andou) {
+      await this.resolver(abertoTrav, { normalizado_por: 'Pivô voltou a andar' });
+    } else if (abertoTrav && fresco && giro.lido && giro.dir === null) {
+      await this.resolver(abertoTrav, { normalizado_por: 'Pivô parou' });
     }
   }
 
@@ -164,6 +185,6 @@ export class PivoAnguloAlarmeService {
   private async resolver(a: Aberto, extra: Record<string, unknown>) {
     const snap = { ...a.snapshot, normalizado_em: new Date().toISOString(), ...extra };
     await this.prisma.$executeRaw`
-      UPDATE logs_mqtt SET resolvido_em = now(), dados_snapshot = ${JSON.stringify(snap)}::jsonb WHERE TRIM(id) = ${a.id}`;
+      UPDATE logs_mqtt SET resolvido_em = now(), dados_snapshot = ${JSON.stringify(snap)}::jsonb WHERE id = ${a.id}::bpchar`;
   }
 }

@@ -19,6 +19,8 @@ interface Cenario {
   vigente?: any;
   anterior?: any;
   ack?: (cmd: string) => string | Error;
+  semTabela?: boolean;
+  bancoFalha?: boolean;
   alvo?: { tonId: string } | null;
   encoderNaTon?: boolean;
 }
@@ -36,10 +38,15 @@ function montar(c: Cenario = {}) {
   const cmds: string[] = [];
   const sql: string[] = [];
   const valores: any[][] = [];
-  const exec = jest.fn(async (s: TemplateStringsArray, ...v: any[]) => { sql.push(s.join('?')); valores.push(v); return 1; });
+  const exec = jest.fn(async (s: TemplateStringsArray, ...v: any[]) => {
+    const q = s.join('?');
+    if (c.bancoFalha && q.includes('INSERT INTO calibracao_angulo')) throw new Error('duplicate key value violates unique constraint');
+    sql.push(q); valores.push(v); return 1;
+  });
   const prisma: any = {
     $queryRaw: jest.fn(async (s: TemplateStringsArray) => {
       const q = s.join('?');
+      if (q.includes('to_regclass')) return [{ ok: !c.semTabela }];
       if (q.includes('FROM calibracao_angulo') && q.includes('NOT c.ativa')) return c.anterior ? [c.anterior] : [];
       if (q.includes('FROM calibracao_angulo')) return c.vigente ? [c.vigente] : [];
       if (q.includes('FROM equipamentos e')) return [{ nome: 'Pivo 11', unidade_id: 'un-1', unidade_nome: 'Pivos 1,2,3,11', planta_id: 'pl-1', planta_nome: 'Chimarrão' }];
@@ -158,6 +165,43 @@ describe('calibração do ângulo do pivô (serviço)', () => {
       await expect(svc.salvar('pivo-11', DTO, ADMIN)).rejects.toThrow(/não confirmou a gravação/);
       expect(sql.some((q) => q.includes('calibracao_angulo') && /INSERT|UPDATE/.test(q))).toBe(false);
       expect(auditoria.registrar).not.toHaveBeenCalled();
+    });
+
+    it('banco recusa depois de a placa aceitar, sem calibração anterior: a placa volta a "sem encoder"', async () => {
+      const { svc, cmds, auditoria } = montar({ bancoFalha: true });
+      await svc.lerEncoder('pivo-11', ADMIN);
+      await expect(svc.salvar('pivo-11', DTO, ADMIN)).rejects.toThrow(/duplicate key/);
+      expect(cmds).toEqual(['pivo encler', 'pivo enc 360 0 -103.13', 'pivo enc 0 0 0']);
+      expect(auditoria.registrar).not.toHaveBeenCalled();
+    });
+
+    it('banco recusa com calibração vigente: a placa volta para ela', async () => {
+      const { svc, cmds } = montar({ bancoFalha: true, vigente: linhaCal({ az_cal: 10, bruto_cal: 100, zero: -90 }) });
+      await svc.lerEncoder('pivo-11', ADMIN);
+      await expect(svc.salvar('pivo-11', DTO, ADMIN)).rejects.toThrow();
+      expect(cmds[2]).toBe('pivo enc 360 0 -90');
+    });
+
+    it('servidor sem a tabela: avisa antes de mexer na placa', async () => {
+      const { svc, cmds } = montar({ semTabela: true });
+      await svc.lerEncoder('pivo-11', ADMIN);
+      await expect(svc.salvar('pivo-11', DTO, ADMIN)).rejects.toBeInstanceOf(NotFoundException);
+      expect(cmds).toEqual(['pivo encler']);
+    });
+
+    it('duas gravações ao mesmo tempo (duplo clique): a segunda é recusada e só uma vai à placa', async () => {
+      const { svc, cmds } = montar();
+      await svc.lerEncoder('pivo-11', ADMIN);
+      const [a, b] = await Promise.allSettled([svc.salvar('pivo-11', DTO, ADMIN), svc.salvar('pivo-11', DTO, ADMIN)]);
+      expect([a.status, b.status].sort()).toEqual(['fulfilled', 'rejected']);
+      expect(cmds.filter((c) => c.startsWith('pivo enc '))).toHaveLength(1);
+    });
+
+    it('a placa aceita mas o ack se perde: a próxima partida reconfere a configuração', async () => {
+      const { svc, ton } = montar({ ack: (c) => (c === 'pivo encler' ? 'pivo_el 147 147 147 147 147' : new Error('lora_no_ack')) });
+      await svc.lerEncoder('pivo-11', ADMIN);
+      await expect(svc.salvar('pivo-11', DTO, ADMIN)).rejects.toBeInstanceOf(BadGatewayException);
+      expect(ton.esquecerConfig).toHaveBeenCalledWith('ton-1');
     });
 
     it('sem ter lido o encoder: não salva', async () => {

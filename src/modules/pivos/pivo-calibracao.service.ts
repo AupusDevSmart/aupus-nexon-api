@@ -17,7 +17,7 @@ import { CalibracaoAnguloDto } from './dto/pivos.dto';
 import { PivoSequenciaService } from './pivo-sequencia.service';
 import { comandoEnc, PivoTonService } from './pivo-ton.service';
 import { anguloDoEncoder } from './pivo-posicao.util';
-import { calibracaoAnterior, calibracaoVigente, LinhaCalibracao } from './pivo-calibracao.repo';
+import { calibracaoAnterior, calibracaoVigente, LinhaCalibracao, tabelaCalibracaoExiste } from './pivo-calibracao.repo';
 import {
   avaliarLeituras,
   azimute,
@@ -63,6 +63,8 @@ export class PivoCalibracaoService {
   private readonly logger = new Logger('PivoCalibracao');
   /** Última leitura VÁLIDA do "Ler encoder" por pivô (o Salvar só aceita o valor que a TON leu). */
   private readonly leituras = new Map<string, { valor: number; leituras: number[]; em: number; usuarioId: string | null }>();
+  /** Pivôs com uma gravação (salvar/restaurar) em andamento: a segunda espera a primeira terminar. */
+  private readonly gravando = new Set<string>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -134,6 +136,11 @@ export class PivoCalibracaoService {
     this.exigirEdicao(user);
     const estado = await this.seq.estado(pivoId, user);
     const id = String(pivoId).trim();
+    return this.umaPorVez(id, () => this.salvarTravado(id, estado, dto, user, cliente));
+  }
+
+  private async salvarTravado(id: string, estado: Awaited<ReturnType<PivoSequenciaService['estado']>>, dto: CalibracaoAnguloDto, user?: Autor, cliente?: ClienteInfo) {
+    await this.exigirTabela();
     const enc = this.exigirEncoder(estado);
     const resolucao = enc.resolucao as number;
 
@@ -160,7 +167,9 @@ export class PivoCalibracaoService {
     const anterior = await calibracaoVigente(this.prisma, id);
     const tonId = await this.tonDoEncoder(id, user, cliente);
 
-    // 1) TON primeiro: sem a confirmação da placa nada é gravado.
+    // 1) TON primeiro: sem a confirmação da placa nada é gravado. Daqui em diante a placa pode
+    // ter mudado (até com o ack perdido): a próxima partida reconfere a configuração inteira.
+    this.ton.esquecerConfig(tonId);
     await this.gravarNaTon(id, tonId, { resolucao, invertido, zero }, user, cliente);
 
     // 2) Banco: desativa a anterior, grava a nova e espelha zero + sentido na Configuração.
@@ -181,14 +190,12 @@ export class PivoCalibracaoService {
         await this.espelharNaConfig(tx, id, zero, invertido, usuarioId);
       });
     } catch (e) {
-      // A placa já está com a calibração nova e o banco não: volta a placa para o que valia.
-      await this.gravarNaTon(id, tonId, { resolucao, invertido: enc.invertido, zero: enc.zero }, user, cliente).catch((r) =>
-        this.logger.error(`[calibracao] ${id}: banco falhou e a TON não voltou à calibração anterior: ${r?.message ?? r}`));
-      if (colunaTrilhaAusente(e)) throw new NotFoundException('Calibração indisponível neste servidor (SQL 2026-11-11c não aplicado)');
+      // A placa já está com a calibração nova e o banco não: volta a placa para o que valia
+      // (sem calibração anterior, "sem encoder" — como estava).
+      await this.desfazerNaTon(id, tonId, anterior, user, cliente);
       throw e;
     }
     this.leituras.delete(id);
-    this.ton.esquecerConfig(tonId);
     await this.resolverSentidoInvertido(id, 'Recalibrado');
 
     const resumo = `azimute ${grausTxt(az)}, leitura ${lida.valor}, sentido ${sentidoLegivel(sentido)}`;
@@ -207,6 +214,11 @@ export class PivoCalibracaoService {
     this.exigirEdicao(user);
     const estado = await this.seq.estado(pivoId, user);
     const id = String(pivoId).trim();
+    return this.umaPorVez(id, () => this.restaurarTravado(id, estado, user, cliente));
+  }
+
+  private async restaurarTravado(id: string, estado: Awaited<ReturnType<PivoSequenciaService['estado']>>, user?: Autor, cliente?: ClienteInfo) {
+    await this.exigirTabela();
     const enc = this.exigirEncoder(estado);
     const anterior = await calibracaoAnterior(this.prisma, id);
     if (!anterior) throw new NotFoundException('Este pivô não tem calibração anterior para restaurar');
@@ -219,6 +231,7 @@ export class PivoCalibracaoService {
     const atual = await calibracaoVigente(this.prisma, id);
     const { zero, invertido } = zeroDaCalibracao(anterior, anterior.resolucao);
     const tonId = await this.tonDoEncoder(id, user, cliente);
+    this.ton.esquecerConfig(tonId);
     await this.gravarNaTon(id, tonId, { resolucao: anterior.resolucao, invertido, zero }, user, cliente);
 
     const usuarioId = user?.id?.trim() ?? null;
@@ -233,13 +246,10 @@ export class PivoCalibracaoService {
         await this.espelharNaConfig(tx, id, zero, invertido, usuarioId);
       });
     } catch (e) {
-      await this.gravarNaTon(id, tonId, { resolucao: enc.resolucao as number, invertido: enc.invertido, zero: enc.zero }, user, cliente).catch((r) =>
-        this.logger.error(`[calibracao] ${id}: banco falhou e a TON não voltou à calibração vigente: ${r?.message ?? r}`));
-      if (colunaTrilhaAusente(e)) throw new NotFoundException('Calibração indisponível neste servidor (SQL 2026-11-11c não aplicado)');
+      await this.desfazerNaTon(id, tonId, atual, user, cliente);
       throw e;
     }
     this.leituras.delete(id);
-    this.ton.esquecerConfig(tonId);
     await this.resolverSentidoInvertido(id, 'Calibração anterior restaurada');
 
     const resumo = `azimute ${grausTxt(anterior.az_cal)}, leitura ${anterior.bruto_cal}, sentido ${sentidoLegivel(anterior.sentido)}`;
@@ -258,6 +268,34 @@ export class PivoCalibracaoService {
 
   private exigirEdicao(user?: Autor) {
     if (!this.podeEditar(user)) throw new ForbiddenException(MSG_SOMENTE_LEITURA);
+  }
+
+  /** Sem a tabela não há onde gravar: avisa ANTES de mexer na placa. */
+  private async exigirTabela() {
+    if (!(await tabelaCalibracaoExiste(this.prisma).catch(() => false))) {
+      throw new NotFoundException('Calibração indisponível neste servidor (SQL 2026-11-11c não aplicado)');
+    }
+  }
+
+  /** Salvar e restaurar do mesmo pivô, um de cada vez (duplo clique enquanto a TON responde). */
+  private async umaPorVez<T>(id: string, fn: () => Promise<T>): Promise<T> {
+    if (this.gravando.has(id)) throw new ConflictException('Já há uma gravação da calibração em andamento neste pivô: aguarde');
+    this.gravando.add(id);
+    try {
+      return await fn();
+    } finally {
+      this.gravando.delete(id);
+    }
+  }
+
+  /**
+   * O banco recusou depois de a placa aceitar: devolve a placa ao que o banco diz — a calibração
+   * que continua vigente, ou "sem encoder" (`pivo enc 0 0 0`) quando não havia nenhuma.
+   */
+  private async desfazerNaTon(id: string, tonId: string, vigente: LinhaCalibracao | null, user?: Autor, cliente?: ClienteInfo) {
+    const cmd = vigente ? comandoEnc({ resolucao: vigente.resolucao, ...zeroDaCalibracao(vigente, vigente.resolucao) }) : 'pivo enc 0 0 0';
+    await this.cmd.comandoTon({ equipamentoId: id, tonId, cmd, rotulo: 'Calibração do ângulo desfeita na TON (o NexON não gravou)', ackOk: /^pivo_enc_ok$/ }, user, cliente)
+      .catch((r) => this.logger.error(`[calibracao] ${id}: banco falhou e a TON não voltou ao que valia (${cmd}): ${r?.message ?? r}`));
   }
 
   private exigirEncoder(estado: Awaited<ReturnType<PivoSequenciaService['estado']>>) {

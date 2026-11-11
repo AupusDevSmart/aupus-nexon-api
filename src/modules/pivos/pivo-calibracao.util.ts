@@ -107,7 +107,8 @@ export function avaliarLeituras(leituras: number[], resolucao: number | null, er
   const ls = leituras.filter((v) => Number.isFinite(v) && v >= 0).map((v) => Math.round(v));
   const base = { valida: false, valor: null, leituras: ls };
   if (erros > 0 || ls.length < LEITURAS_CALIBRACAO) {
-    return { ...base, motivo: ls.length ? `Encoder falhou em ${Math.max(erros, LEITURAS_CALIBRACAO - ls.length)} de ${LEITURAS_CALIBRACAO} leituras` : 'Encoder sem resposta' };
+    const falhas = Math.min(LEITURAS_CALIBRACAO, erros > 0 ? erros : LEITURAS_CALIBRACAO - ls.length);
+    return { ...base, motivo: falhas >= LEITURAS_CALIBRACAO ? 'Encoder sem resposta' : `Encoder falhou em ${falhas} de ${LEITURAS_CALIBRACAO} leituras` };
   }
   let maior = 0;
   for (const a of ls) for (const b of ls) {
@@ -178,21 +179,23 @@ export interface AcompanhaTravado {
 }
 
 /**
- * Menor movimento que conta como "andou": um passo do encoder (360/resolução), com
- * piso de 0,3° — em encoder fino o ruído de uma contagem não pode zerar o relógio.
+ * Menor movimento que conta como "andou": um passo e meio do encoder, com piso de 0,3°.
+ * Uma contagem só não basta: pivô travado na borda de duas posições fica oscilando
+ * (100 ↔ 101) e zeraria o relógio para sempre.
  */
 export function passoMinimoGraus(resolucao: number | null): number {
-  return Math.max(0.3, resolucao ? 360 / resolucao : 1);
+  return Math.max(0.3, 1.5 * (resolucao ? 360 / resolucao : 1));
 }
 
 /**
  * Prazo do "pivô travado" (ms): o configurado, mas nunca menor que o DOBRO do tempo
- * que o pivô leva para andar um passo do encoder na velocidade atual. A 10 % com
- * volta de 21 h, 1° leva 35 min: 10 min fixos alarmariam com o pivô andando.
+ * que o pivô leva para andar o passo mínimo na velocidade atual. A 10 % com volta de
+ * 21 h, 1° leva 35 min: 10 min fixos alarmariam com o pivô andando.
+ * null = não dá para julgar (velocidade desconhecida, ou 0 %: irrigando parado) — sem alarme.
  */
-export function prazoTravadoMs(minutos: number, resolucao: number | null, tempoVolta100h: number | null, percentual: number | null): number {
+export function prazoTravadoMs(minutos: number, resolucao: number | null, tempoVolta100h: number, percentual: number | null): number | null {
   const base = Math.max(TRAVADO_MIN_FAIXA.min, Math.min(TRAVADO_MIN_FAIXA.max, Number.isFinite(minutos) && minutos > 0 ? minutos : TRAVADO_MIN_PADRAO)) * 60_000;
-  if (!tempoVolta100h || !percentual || percentual <= 0) return base;
+  if (percentual == null || !(percentual > 0) || !(tempoVolta100h > 0)) return null;
   const voltaMs = (tempoVolta100h * 3_600_000) / (percentual / 100);
   return Math.max(base, 2 * voltaMs * (passoMinimoGraus(resolucao) / 360));
 }
@@ -203,13 +206,14 @@ export function passoTravado(
   girando: boolean,
   angulo: number | null,
   agora: number,
-  prazoMs: number,
+  prazoMs: number | null,
   resolucao: number | null,
-): { estado: AcompanhaTravado | null; travado: boolean; paradoMs: number } {
-  if (!girando || angulo == null) return { estado: null, travado: false, paradoMs: 0 };
-  if (!ant || Math.abs(deltaCircular(ant.ref, angulo)) >= passoMinimoGraus(resolucao)) {
-    return { estado: { ref: angulo, desde: agora }, travado: false, paradoMs: 0 };
+): { estado: AcompanhaTravado | null; travado: boolean; paradoMs: number; andou: boolean } {
+  if (!girando || angulo == null || prazoMs == null) return { estado: null, travado: false, paradoMs: 0, andou: false };
+  if (!ant) return { estado: { ref: angulo, desde: agora }, travado: false, paradoMs: 0, andou: false };
+  if (Math.abs(deltaCircular(ant.ref, angulo)) >= passoMinimoGraus(resolucao)) {
+    return { estado: { ref: angulo, desde: agora }, travado: false, paradoMs: 0, andou: true };
   }
   const paradoMs = agora - ant.desde;
-  return { estado: ant, travado: paradoMs >= prazoMs, paradoMs };
+  return { estado: ant, travado: paradoMs >= prazoMs, paradoMs, andou: false };
 }

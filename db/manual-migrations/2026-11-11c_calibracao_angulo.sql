@@ -17,7 +17,7 @@
 --
 -- Aplicar ANTES de publicar o código. Sem a tabela a API responde "calibração indisponível" e o
 -- pivô com encoder fica como "sem calibração" (só o valor bruto).
--- Idempotente. ROLLBACK: DROP TABLE IF EXISTS public.calibracao_angulo;
+-- Idempotente. ROLLBACK: DROP TABLE IF EXISTS public.calibracao_angulo; DROP INDEX IF EXISTS public.logs_mqtt_pivo_angulo_aberto_idx;
 
 BEGIN;
 
@@ -57,6 +57,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS calibracao_angulo_ativa_uq
 -- Histórico do pivô, da mais nova para a mais antiga.
 CREATE INDEX IF NOT EXISTS calibracao_angulo_equip_idx
   ON public.calibracao_angulo (equipamento_id, criado_em DESC);
+
+-- Alarmes do ângulo abertos (encoder sem resposta, sentido invertido, pivô travado): o tick consulta a cada 30 s.
+CREATE INDEX IF NOT EXISTS logs_mqtt_pivo_angulo_aberto_idx
+  ON public.logs_mqtt (equipamento_id)
+  WHERE tipo = 'alerta' AND resolvido_em IS NULL AND (dados_snapshot->>'kind') = 'pivo_angulo';
 
 COMMENT ON TABLE public.calibracao_angulo IS 'Calibração do ângulo do pivô (NEXON-103): leitura do encoder × azimute medido em campo. Uma linha por calibração; vigente = ativa.';
 COMMENT ON COLUMN public.calibracao_angulo.sentido IS '+1: a contagem do encoder aumenta com o pivô no sentido horário (visto de cima); −1: diminui.';

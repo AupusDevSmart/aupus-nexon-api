@@ -581,6 +581,11 @@ export class PivoSequenciaService implements OnModuleInit {
     const autorId = user?.id?.trim() || opts.responsavelId?.trim() || null;
     let irrigacao = acao === 'desligar' ? null : normalizarIrrigacao(opts.irrigacao);
     if (irrigacao) irrigacao.config.direcao = acao === 'girar_direita' ? 'Avanço' : 'Reverso';
+    // NEXON-103 — encoder escolhido mas sem calibração: a contagem não diz para onde o braço
+    // aponta, a TON fica sem encoder e a parada por ângulo viraria "sem parada". Recusa aqui.
+    if (irrigacao?.parada?.tipo === 'porAngulo' && (await this.posicao(id)).sem_calibracao) {
+      throw new BadRequestException('Parada por ângulo precisa da calibração do ângulo: calibre o pivô (aba Calibração) ou escolha parada por tempo.');
+    }
     let antesDoReinicio: Irrigacao | null = null;
     let restanteParadaMs: number | null | undefined;   // undefined = calcula do zero na partida
     if (reiniciar) {
@@ -973,11 +978,14 @@ export class PivoSequenciaService implements OnModuleInit {
     const st = await this.statusPivo(pts);
     const ton = await this.tonLocal(pts).catch(() => null);
     const ativa = await this.irrigacaoAtiva(id).catch(() => null);
-    const pct = ton && ton.e !== 0 && Number.isFinite(ton.pm) ? ton.pm / 10 : Number(ativa?.irrigacao?.config?.percentual);
+    // percentual: 0 = irrigando parado (água sem girar); null = não dá para saber (ligado no painel)
+    const cfg = ativa?.irrigacao?.config;
+    const daIrrigacao = cfg ? (cfg.semGiro ? 0 : cfg.semAgua ? 100 : Number(cfg.percentual)) : NaN;
+    const pct = ton && ton.e !== 0 && Number.isFinite(ton.pm) && ton.pm >= 0 ? ton.pm / 10 : daIrrigacao;
     return {
       dir: st.direita === 1 ? 'D' : st.esquerda === 1 ? 'E' : null,
       lido: st.direita !== null && st.esquerda !== null,
-      percentual: Number.isFinite(pct) && pct > 0 ? pct : null,
+      percentual: Number.isFinite(pct) && pct >= 0 ? pct : null,
       ton: ton ? { em: ton.em, e: ton.e } : null,
     };
   }

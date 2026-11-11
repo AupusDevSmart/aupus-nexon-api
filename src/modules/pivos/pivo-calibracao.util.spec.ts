@@ -11,7 +11,6 @@ import {
   prazoTravadoMs,
   zeroDaCalibracao,
   type AcompanhaSentido,
-  type AcompanhaTravado,
   type Sentido,
 } from './pivo-calibracao.util';
 import { anguloDoEncoder } from './pivo-posicao.util';
@@ -142,6 +141,7 @@ describe('calibração do ângulo do pivô', () => {
 
     it('menos de 5 leituras ou erro de comunicação: recusa', () => {
       expect(avaliarLeituras([147, 147, 147], 360).valida).toBe(false);
+      expect(avaliarLeituras([], 360, 2).motivo).toBe('Encoder falhou em 2 de 5 leituras');
       expect(avaliarLeituras([147, 147, 147, 147, 147], 360, 1).valida).toBe(false);
       expect(avaliarLeituras([], 360)).toMatchObject({ valida: false, motivo: 'Encoder sem resposta' });
     });
@@ -204,41 +204,56 @@ describe('calibração do ângulo do pivô', () => {
     const MIN = 60_000;
 
     it('girando com o ângulo parado além do prazo: alarme', () => {
-      let est: AcompanhaTravado | null = null;
-      let r = passoTravado(est, true, 50, 0, 10 * MIN, 360);
-      est = r.estado;
-      r = passoTravado(est, true, 50, 9 * MIN, 10 * MIN, 360);
+      let r = passoTravado(null, true, 50, 0, 10 * MIN, 360);
+      r = passoTravado(r.estado, true, 50, 9 * MIN, 10 * MIN, 360);
       expect(r.travado).toBe(false);
       r = passoTravado(r.estado, true, 50, 10 * MIN, 10 * MIN, 360);
-      expect(r.travado).toBe(true);
+      expect(r).toMatchObject({ travado: true, andou: false });
     });
 
-    it('andou um passo do encoder: zera o relógio', () => {
+    it('andou mais de um passo do encoder: zera o relógio e avisa que andou', () => {
       let r = passoTravado(null, true, 50, 0, 10 * MIN, 360);
-      r = passoTravado(r.estado, true, 51, 9 * MIN, 10 * MIN, 360);
-      r = passoTravado(r.estado, true, 51, 15 * MIN, 10 * MIN, 360);
+      r = passoTravado(r.estado, true, 52, 9 * MIN, 10 * MIN, 360);
+      expect(r.andou).toBe(true);
+      r = passoTravado(r.estado, true, 52, 15 * MIN, 10 * MIN, 360);
       expect(r.travado).toBe(false);
     });
 
-    it('a virada 359 → 0 conta como movimento', () => {
+    it('oscilar entre duas posições vizinhas (100 ↔ 101) não é andar', () => {
+      let r = passoTravado(null, true, 100, 0, 10 * MIN, 360);
+      for (let m = 1; m <= 10; m++) r = passoTravado(r.estado, true, m % 2 ? 101 : 100, m * MIN, 10 * MIN, 360);
+      expect(r).toMatchObject({ travado: true, andou: false });
+    });
+
+    it('a virada 359 → 1 conta como movimento', () => {
       let r = passoTravado(null, true, 359, 0, 10 * MIN, 360);
-      r = passoTravado(r.estado, true, 0, 9 * MIN, 10 * MIN, 360);
-      expect(r.estado?.ref).toBe(0);
-      expect(r.travado).toBe(false);
+      r = passoTravado(r.estado, true, 1, 9 * MIN, 10 * MIN, 360);
+      expect(r.estado?.ref).toBe(1);
+      expect(r).toMatchObject({ travado: false, andou: true });
     });
 
-    it('parado ou sem leitura não acompanha', () => {
+    it('a primeira amostra (API acabou de subir) não é "andou"', () => {
+      expect(passoTravado(null, true, 50, 0, 10 * MIN, 360)).toMatchObject({ andou: false, travado: false });
+    });
+
+    it('parado, sem leitura ou sem prazo não acompanha', () => {
       expect(passoTravado({ ref: 1, desde: 0 }, false, 1, 99 * MIN, 10 * MIN, 360)).toMatchObject({ estado: null, travado: false });
       expect(passoTravado({ ref: 1, desde: 0 }, true, null, 99 * MIN, 10 * MIN, 360)).toMatchObject({ estado: null, travado: false });
+      expect(passoTravado({ ref: 1, desde: 0 }, true, 1, 99 * MIN, null, 360)).toMatchObject({ estado: null, travado: false });
     });
 
-    it('prazo: o configurado, com piso no dobro do tempo de um passo do encoder', () => {
-      expect(prazoTravadoMs(10, 360, 21, 100)).toBe(10 * MIN);
-      // 10 %: volta de 210 h → 1° leva 35 min → prazo de 70 min
-      expect(prazoTravadoMs(10, 360, 21, 10)).toBe(70 * MIN);
-      expect(prazoTravadoMs(10, 360, null, 10)).toBe(10 * MIN);
-      expect(prazoTravadoMs(NaN, 360, 21, 100)).toBe(10 * MIN);
-      expect(prazoTravadoMs(999, 360, 21, 100)).toBe(240 * MIN);
+    it('prazo: o configurado, com piso no dobro do tempo do passo mínimo', () => {
+      expect(prazoTravadoMs(10, 360, 21, 100)).toBe(Math.round(2 * 21 * 60 * MIN * (1.5 / 360)));   // 10,5 min > 10
+      expect(prazoTravadoMs(10, 4096, 21, 100)).toBe(10 * MIN);
+      // 10 %: volta de 210 h → 1,5° leva 52,5 min → prazo de 105 min
+      expect(prazoTravadoMs(10, 360, 21, 10)).toBe(105 * MIN);
+      expect(prazoTravadoMs(999, 4096, 21, 100)).toBe(240 * MIN);
+      expect(prazoTravadoMs(NaN, 4096, 21, 100)).toBe(10 * MIN);
+    });
+
+    it('sem prazo quando não dá para julgar: 0 % (irrigando parado) ou velocidade desconhecida', () => {
+      expect(prazoTravadoMs(10, 360, 21, 0)).toBeNull();
+      expect(prazoTravadoMs(10, 360, 21, null)).toBeNull();
     });
   });
 });

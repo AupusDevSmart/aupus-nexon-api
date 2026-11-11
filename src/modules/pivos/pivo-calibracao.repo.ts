@@ -60,6 +60,12 @@ function linha(r: any): LinhaCalibracao {
   };
 }
 
+/** A tabela existe neste banco? (SQL 2026-11-11c aplicado) — conferido ANTES de falar com a TON. */
+export async function tabelaCalibracaoExiste(prisma: PrismaRaw): Promise<boolean> {
+  const r = await prisma.$queryRaw<Array<{ ok: boolean }>>`SELECT to_regclass('public.calibracao_angulo') IS NOT NULL AS ok`;
+  return r?.[0]?.ok === true;
+}
+
 /** Calibração vigente do pivô (a única ativa), ou null. */
 export async function calibracaoVigente(prisma: PrismaRaw, pivoId: string): Promise<LinhaCalibracao | null> {
   try {

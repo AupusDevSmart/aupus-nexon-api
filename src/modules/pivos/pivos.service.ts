@@ -11,6 +11,7 @@ import {
   agruparConjugados,
   camposTecnicosAlterados,
   janelaOuPadrao,
+  pedidoComCalibracaoAtiva,
   LinhaConjugado,
   PONTA_PADRAO,
   RESERVADO_PADRAO,
@@ -115,6 +116,24 @@ export class PivosService {
     await this.exigirComandoNaUnidade(eq.unidade_id, user);
     const atual = await this.getConfig(eq.id, user);
 
+    // NEXON-103 — com calibração ativa, zero e sentido do encoder vêm DELA (e estão gravados na
+    // TON). Tela que devolve o bloco `parametros` inteiro manda o zero arredondado (a calibração
+    // grava com duas casas): isso não é alteração e sai do pedido antes de qualquer conferência.
+    // Mudança de verdade é recusada; trocar encoder ou resolução desativa a calibração (abaixo).
+    const pp = dto.parametros as Record<string, unknown> | undefined;
+    const pedido = pedidoComCalibracaoAtiva(dto, atual);
+    let desativarCalibracaoVigente = false;
+    if (pp && pedido && (await calibracaoVigente(this.prisma, eq.id))) {
+      if (pedido === 'recusar') {
+        throw new BadRequestException('O zero e o sentido do encoder vêm da Calibração deste pivô: refaça a calibração para mudar');
+      }
+      if (pedido === 'descartar') {
+        delete pp.correcao_angulo_zero;
+        delete pp.encoder_invertido;
+      }
+      desativarCalibracaoVigente = pedido === 'desativar';
+    }
+
     // PER-33a: lâmina, ponta e reservado são operacionais (todos com acesso);
     // pressão, tempo de volta, ângulo zero, válvula e motobomba são técnicos.
     if (user && !capacidades(papelCanonico(user.role)).configTecnica) {
@@ -140,21 +159,10 @@ export class PivosService {
       if (enc.unidade_id !== eq.unidade_id) throw new BadRequestException('O encoder tem de ser da mesma instalação do pivô');
       if (dto.parametros) dto.parametros.encoder_equipamento_id = enc.id;
     }
-    // NEXON-103 — com calibração ativa, zero e sentido do encoder vêm DELA (e estão gravados na
-    // TON): mudar aqui deixaria a tela e a placa com contas diferentes. Trocar o encoder ou a
-    // resolução invalida a calibração: ela é desativada e o pivô volta a "sem calibração".
-    let calibracaoDesativada = false;
-    const mexeu = camposTecnicosAlterados(dto, atual);
-    if (mexeu.some((k) => k === 'correcao_angulo_zero' || k === 'encoder_invertido' || k === 'encoder_equipamento_id' || k === 'encoder_resolucao')) {
-      const cal = await calibracaoVigente(this.prisma, eq.id);
-      if (cal) {
-        const trocouEncoder = mexeu.includes('encoder_equipamento_id') || mexeu.includes('encoder_resolucao');
-        if (!trocouEncoder) {
-          throw new BadRequestException('O zero e o sentido do encoder vêm da Calibração deste pivô: refaça a calibração para mudar');
-        }
-        calibracaoDesativada = (await desativarCalibracao(this.prisma, eq.id, user?.id?.trim() ?? null, 'Encoder ou resolução alterados na Configuração')) > 0;
-      }
-    }
+    // Trocou o encoder ou a resolução (já passou pela permissão técnica e pela validação do
+    // encoder): a calibração deixa de valer e o pivô volta a "sem calibração".
+    const calibracaoDesativada = desativarCalibracaoVigente
+      && (await desativarCalibracao(this.prisma, eq.id, user?.id?.trim() ?? null, 'Encoder ou resolução alterados na Configuração')) > 0;
     const bloqueio = dto.bloqueio_ponta ? janelaOuPadrao(dto.bloqueio_ponta, PONTA_PADRAO) : atual.bloqueio_ponta;
     const reservado = dto.reservado ? janelaOuPadrao(dto.reservado, RESERVADO_PADRAO) : atual.reservado;
 
