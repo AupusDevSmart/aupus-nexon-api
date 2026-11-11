@@ -175,7 +175,18 @@ export class PivoSequenciaService implements OnModuleInit {
       LEFT JOIN tipos_equipamentos te ON te.id = e.tipo_equipamento_id
       WHERE b.ton_id = ${tonId}::bpchar AND b.deleted_at IS NULL AND UPPER(COALESCE(te.codigo, e.tipo_equipamento, '')) LIKE '%PIVO%'`.catch(() => []);
     for (const r of rows) {
-      await this.trilha(r.id, `Pivô parou pela TON: ${TXT_FALHA[motivo] ?? motivo ?? 'parado'}`, null, 'parada', falha ? 'ALTA' : 'INFO').catch(() => undefined);
+      const txt = `Pivô parou pela TON: ${TXT_FALHA[motivo] ?? motivo ?? 'parado'}`;
+      await this.trilha(r.id, txt, null, 'parada', falha ? 'ALTA' : 'INFO').catch(() => undefined);
+      // Encerra a irrigação em curso na hora (a ficha sai de "Irrigando" sem esperar as BIs de giro):
+      // um Desligar concluído, de origem "parada", com o motivo da TON.
+      if (this.rodando.has(r.id)) continue;
+      const ativa = await this.irrigacaoAtiva(r.id).catch(() => null);
+      if (!ativa) continue;
+      const passos = [{ t: new Date().toISOString(), etapa: 'ton', msg: txt, ok: !falha }];
+      await this.prisma.$executeRaw`
+        INSERT INTO pivo_sequencias (id, equipamento_id, acao, status, origem, passos, erro, finished_at)
+        VALUES (${novoId26()}, ${r.id}::bpchar, 'desligar', 'concluida', 'parada', ${JSON.stringify(passos)}::jsonb,
+          ${falha ? txt : null}, now())`.catch((e) => this.logger.warn(`[pivo-ton] encerrar irrigação de ${r.id}: ${e?.message ?? e}`));
     }
   }
 

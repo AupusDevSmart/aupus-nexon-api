@@ -170,7 +170,19 @@ describe('PivoTonService', () => {
     const visto: any[] = [];
     svc.aoPararSozinho = (t, m, f) => visto.push([t, m, f]);
     svc.receberEvento('T', { t: 'parado', x: 'concluido', e: 'parado', id: 'abc' });
-    svc.receberEvento('T', { t: 'falha', x: 'seguranca', e: 'desligando', id: 'abc' });
-    expect(visto).toEqual([['T', 'concluido', false], ['T', 'seguranca', true]]);
+    svc.receberEvento('T', { t: 'parado', x: 'concluido', e: 'parado', id: 'abc' });   // repetido: avisa 1x
+    svc.receberEvento('T2', { t: 'falha', x: 'seguranca', e: 'desligando', id: 'abc' });
+    expect(visto).toEqual([['T', 'concluido', false], ['T2', 'seguranca', true]]);
+  });
+
+  it('satélite: a ida a PARADO pelo status (sem evento) também avisa, com o motivo da falha', () => {
+    const { svc } = montar(LAB, respostaPadrao);
+    const visto: any[] = [];
+    svc.aoPararSozinho = (t, m, f) => visto.push([t, m, f]);
+    const st = (e: number, f = '') => ({ e, p: 0, f, d: 'D', a: 1, pm: 600, an: null, pc: 0, al: -1, sg: -1, bi: 0, bo: 0, c: 1 });
+    svc.receberStatus('T', st(2));
+    svc.receberStatus('T', st(0, 'sem_pressao'));
+    svc.receberStatus('T', st(0, 'sem_pressao'));
+    expect(visto).toEqual([['T', 'sem_pressao', true]]);
   });
 });

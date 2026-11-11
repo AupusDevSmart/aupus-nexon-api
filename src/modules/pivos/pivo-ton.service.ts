@@ -144,8 +144,23 @@ export class PivoTonService implements OnModuleInit {
 
   receberStatus(tonId: string, d: any) {
     if (!d || typeof d !== 'object' || typeof d.e !== 'number') return;
-    this.status.set(tonId.trim(), { s: d as StatusTon, em: Date.now(), n: ++this.n });
-    this.suporte.set(tonId.trim(), { ok: true, em: Date.now() });
+    const t = tonId.trim();
+    const ant = this.status.get(t)?.s;
+    this.status.set(t, { s: d as StatusTon, em: Date.now(), n: ++this.n });
+    this.suporte.set(t, { ok: true, em: Date.now() });
+    // A TON foi a PARADO sozinha (falta de pressão, segurança, parada programada…) sem uma
+    // sequência do NexON acompanhando: o NexON encerra a irrigação na hora (sem esperar as BIs).
+    if (ant && ant.e !== 0 && d.e === 0 && !this.acompanhando.has(t)) this.avisarParada(t, String(d.f ?? ''), '');
+  }
+
+  /** Uma parada sozinha só é avisada uma vez (evento + status podem chegar os dois). */
+  private readonly paradaAvisada = new Map<string, number>();
+  private avisarParada(t: string, motivo: string, id: string) {
+    const ult = this.paradaAvisada.get(t) ?? 0;
+    if (Date.now() - ult < 30_000) return;
+    this.paradaAvisada.set(t, Date.now());
+    const m = motivo || 'concluido';
+    try { this.aoPararSozinho?.(t, m, !['concluido', 'comando', ''].includes(m), id); } catch { /* melhor esforço */ }
   }
 
   receberEvento(tonId: string, d: any) {
@@ -156,10 +171,7 @@ export class PivoTonService implements OnModuleInit {
     while (arr.length > 60) arr.shift();
     this.eventos.set(t, arr);
     this.suporte.set(t, { ok: true, em: Date.now() });
-    if ((d.t === 'parado' || d.t === 'falha') && !this.acompanhando.has(t)) {
-      const motivo = String(d.x ?? '');
-      try { this.aoPararSozinho?.(t, motivo, d.t === 'falha' || !['concluido', 'comando', ''].includes(motivo), String(d.id ?? '')); } catch { /* trilha é melhor esforço */ }
-    }
+    if ((d.t === 'parado' || d.t === 'falha') && !this.acompanhando.has(t)) this.avisarParada(t, String(d.x ?? ''), String(d.id ?? ''));
   }
 
   /** Último status da TON (até 15 min). */
