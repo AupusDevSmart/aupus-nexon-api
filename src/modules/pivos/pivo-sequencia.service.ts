@@ -6,6 +6,7 @@ import { EquipamentosCmdService } from '../equipamentos-cmd/equipamentos-cmd.ser
 import { FUSO_OPERACAO, JanelaComAtivo, janelaValida, momentoEmSaoPaulo } from '../../shared/util/janela-horario';
 import { anguloDoEncoder, brutoDoEncoder, parametrosEncoder } from './pivo-posicao.util';
 import { PivoTonService, TXT_FALHA } from './pivo-ton.service';
+import { calibracaoVigente } from './pivo-calibracao.repo';
 import { dentroDaPonta, duracaoParadaMs, fmtPercentual, Irrigacao, leituraMaisAntiga, mudancasConfig, normalizarIrrigacao, normalizarPercentual, OrigemSequencia, percentualDaLamina, resumoIrrigacao } from './pivo-automacao.util';
 
 /**
@@ -125,6 +126,13 @@ const PAPEIS_STATUS: Record<PapelStatus, RegExp> = {
   erro: /erro|falha/,
 };
 
+/**
+ * Chave seletora do painel em modo TON (NEXON-103): ponto de status "Modo_TON" ligado a uma BI.
+ * No modo CLP a TON não comanda o pivô nem está ligada ao encoder. Fica FORA dos status do pivô
+ * (não entra no `lido_em` nem na trava de comando): só a calibração do ângulo depende dele.
+ */
+const PAPEL_MODO_TON = /modo.?ton|chave.?(seletora|ton)|seletora/;
+
 const MSG_CANHAO: Record<ResCanhao, (ligar: boolean, s: number) => string> = {
   ok: (l) => `Canhão final ${l ? 'ligado' : 'desligado'} (confirmado)`,
   ja: (l) => `Canhão final já estava ${l ? 'ligado' : 'desligado'}`,
@@ -146,6 +154,13 @@ export interface PosicaoPivo {
   lido_em: Date | null;
   motivo: string | null;
   encoder: { equipamento_id: string; resolucao: number | null; invertido: boolean; zero: number } | null;
+  /**
+   * NEXON-103 — pivô com encoder e nenhuma calibração ativa: `angulo` fica null e a tela
+   * mostra só o valor bruto, com aviso. false também para pivô sem encoder.
+   */
+  sem_calibracao: boolean;
+  /** Calibração vigente (calibracao_angulo), para a tela dizer de quando é. */
+  calibracao: { id: string; az_cal: number; bruto_cal: number; sentido: 1 | -1; criado_em: Date } | null;
 }
 
 @Injectable()
@@ -513,6 +528,9 @@ export class PivoSequenciaService implements OnModuleInit {
         permissivo: await this.lerStatus(pts.st.permissivo),
         status: st,
         lido_em: await this.lidoEmPivo(pts),
+        // Chave seletora em modo TON (NEXON-103): null = sem leitura; tem_modo_ton false = pivô sem a chave
+        tem_modo_ton: !!pts.modoTon,
+        modo_ton: await this.lerStatus(pts.modoTon ?? undefined),
         // Sequência na TON (Fase 3): estado/passo/falha/ângulo como a TON reportou (null = TON sem sequência local)
         ton_local: await this.tonLocal(pts).catch(() => null),
       },
@@ -563,6 +581,11 @@ export class PivoSequenciaService implements OnModuleInit {
     const autorId = user?.id?.trim() || opts.responsavelId?.trim() || null;
     let irrigacao = acao === 'desligar' ? null : normalizarIrrigacao(opts.irrigacao);
     if (irrigacao) irrigacao.config.direcao = acao === 'girar_direita' ? 'Avanço' : 'Reverso';
+    // NEXON-103 — encoder escolhido mas sem calibração: a contagem não diz para onde o braço
+    // aponta, a TON fica sem encoder e a parada por ângulo viraria "sem parada". Recusa aqui.
+    if (irrigacao?.parada?.tipo === 'porAngulo' && (await this.posicao(id)).sem_calibracao) {
+      throw new BadRequestException('Parada por ângulo precisa da calibração do ângulo: calibre o pivô (aba Calibração) ou escolha parada por tempo.');
+    }
     let antesDoReinicio: Irrigacao | null = null;
     let restanteParadaMs: number | null | undefined;   // undefined = calcula do zero na partida
     if (reiniciar) {
@@ -929,17 +952,42 @@ export class PivoSequenciaService implements OnModuleInit {
       const d = ult?.dados;
       const v = Number(d?.angulo ?? d?.posicao ?? d?.data?.angulo);
       const ok = !velha && d && Number.isFinite(v);
-      return { fonte: 'telemetria', angulo: ok ? v : null, angulo_sem_zero: null, bruto: null, lido_em: lidoEm, motivo: ok ? null : 'Sem posição na telemetria do pivô', encoder: null };
+      return { fonte: 'telemetria', angulo: ok ? v : null, angulo_sem_zero: null, bruto: null, lido_em: lidoEm, motivo: ok ? null : 'Sem posição na telemetria do pivô', encoder: null, sem_calibracao: false, calibracao: null };
     }
+    const cal = await calibracaoVigente(this.prisma, id);
+    const calibracao = cal ? { id: cal.id, az_cal: cal.az_cal, bruto_cal: cal.bruto_cal, sentido: cal.sentido, criado_em: cal.criado_em } : null;
     const encoder = { equipamento_id: enc.equipamentoId, resolucao: enc.resolucao, invertido: enc.invertido, zero: enc.zero };
     const bruto = brutoDoEncoder(ult?.dados);
-    const semAngulo = (motivo: string) => ({ fonte: 'encoder' as const, angulo: null, angulo_sem_zero: null, bruto, lido_em: lidoEm, motivo, encoder });
+    const semAngulo = (motivo: string) => ({ fonte: 'encoder' as const, angulo: null, angulo_sem_zero: null, bruto, lido_em: lidoEm, motivo, encoder, sem_calibracao: !cal, calibracao });
     if (enc.resolucao == null) return semAngulo('Resolução do encoder não configurada');
     if (!ult) return semAngulo('Encoder ainda sem leitura');
     if (velha) return semAngulo('Encoder sem leitura há mais de 15 min');
     if (bruto == null) return semAngulo('Leitura do encoder sem o campo posicao');
+    // Sem calibração ativa a contagem não diz para onde o braço aponta: só o bruto, com aviso.
+    if (!cal) return semAngulo('Sem calibração: mostrando só a leitura bruta do encoder');
     const a = anguloDoEncoder(bruto, enc)!;
-    return { fonte: 'encoder', angulo: a.angulo, angulo_sem_zero: a.anguloSemZero, bruto, lido_em: lidoEm, motivo: null, encoder };
+    return { fonte: 'encoder', angulo: a.angulo, angulo_sem_zero: a.anguloSemZero, bruto, lido_em: lidoEm, motivo: null, encoder, sem_calibracao: false, calibracao };
+  }
+
+  /**
+   * O que os alarmes do ângulo (NEXON-103) precisam saber do giro agora: o lado comandado
+   * lido das entradas, o percentímetro em curso e a TON que executa (viva ou não).
+   */
+  async giroAtual(id: string): Promise<{ dir: 'D' | 'E' | null; lido: boolean; percentual: number | null; ton: { em: Date; e: number } | null }> {
+    const pts = await this.pontos(id);
+    const st = await this.statusPivo(pts);
+    const ton = await this.tonLocal(pts).catch(() => null);
+    const ativa = await this.irrigacaoAtiva(id).catch(() => null);
+    // percentual: 0 = irrigando parado (água sem girar); null = não dá para saber (ligado no painel)
+    const cfg = ativa?.irrigacao?.config;
+    const daIrrigacao = cfg ? (cfg.semGiro ? 0 : cfg.semAgua ? 100 : Number(cfg.percentual)) : NaN;
+    const pct = ton && ton.e !== 0 && Number.isFinite(ton.pm) && ton.pm >= 0 ? ton.pm / 10 : daIrrigacao;
+    return {
+      dir: st.direita === 1 ? 'D' : st.esquerda === 1 ? 'E' : null,
+      lido: st.direita !== null && st.esquerda !== null,
+      percentual: Number.isFinite(pct) && pct >= 0 ? pct : null,
+      ton: ton ? { em: ton.em, e: ton.e } : null,
+    };
   }
 
   /** Lâmina a 100 % (mm) e ciclo do percentímetro (s, padrão 60) da Configuração. */
@@ -1658,8 +1706,13 @@ export class PivoSequenciaService implements OnModuleInit {
       ORDER BY p.ordem, p.nome, b.updated_at DESC NULLS LAST`;   // ponto em 2 BIs (legado): vale o vínculo mais recente
     const cmd: Partial<Record<PapelComando, string>> = {};
     const st: Partial<Record<PapelStatus, { ton_id: string; bi: number; inv: boolean }>> = {};
+    let modoTon: MapaBi | null = null;
     for (const r of rows) {
       const n = norm(r.nome);
+      if (r.tipo === 'status' && PAPEL_MODO_TON.test(n)) {
+        if (!modoTon && r.ton_id && r.bi) modoTon = { ton_id: r.ton_id, bi: r.bi, inv: !!r.inv };
+        continue;
+      }
       if (r.tipo === 'comando') {
         // ordem importa: "anti-horário" antes de "horário"
         for (const k of ['valvula', 'canhao', 'ligar', 'percentimetro', 'esquerda', 'direita', 'desligar'] as const) if (PAPEIS_COMANDO[k].test(n)) { if (!cmd[k]) cmd[k] = r.id; break; }
@@ -1667,7 +1720,7 @@ export class PivoSequenciaService implements OnModuleInit {
         for (const k of ['canhao', 'ligado', 'permissivo', 'pressao', 'erro', 'desligado', 'esquerda', 'direita'] as const) if (PAPEIS_STATUS[k].test(n)) { if (!st[k]) st[k] = { ton_id: r.ton_id, bi: r.bi, inv: !!r.inv }; break; }
       }
     }
-    return { cmd, st };
+    return { cmd, st, modoTon };
   }
 
   private async statusPivo(pts: { st: Partial<Record<string, { ton_id: string; bi: number; inv: boolean }>> }) {

@@ -1,4 +1,4 @@
-import { agruparConjugados, camposTecnicosAlterados, janelaOuPadrao, PONTA_PADRAO, RESERVADO_PADRAO } from './pivo-config.util';
+import { agruparConjugados, camposTecnicosAlterados, janelaOuPadrao, pedidoComCalibracaoAtiva, PONTA_PADRAO, RESERVADO_PADRAO } from './pivo-config.util';
 
 describe('pivo-config.util', () => {
   describe('janelaOuPadrao', () => {
@@ -92,6 +92,35 @@ describe('pivo-config.util', () => {
       ]);
       expect(camposTecnicosAlterados({ motobomba_equipamento_id: null }, atual)).toEqual(['motobomba_equipamento_id']);
       expect(camposTecnicosAlterados({ parametros: { pressao_minima: null } }, atual)).toEqual(['pressao_minima']);
+    });
+  });
+
+  describe('PUT de config com calibração do ângulo ativa (NEXON-103)', () => {
+    const cal = {
+      motobomba_equipamento_id: null,
+      parametros: { lamina_100: 8, correcao_angulo_zero: -103.13, encoder_equipamento_id: 'ENC1', encoder_resolucao: 360, encoder_invertido: false },
+    };
+
+    it('pedido que não toca no encoder passa direto', () => {
+      expect(pedidoComCalibracaoAtiva({ parametros: { lamina_100: 9 } }, cal)).toBeNull();
+      expect(pedidoComCalibracaoAtiva({}, cal)).toBeNull();
+    });
+
+    it('bloco inteiro com o zero arredondado pela tela não é alteração: descarta', () => {
+      expect(pedidoComCalibracaoAtiva({ parametros: { ...cal.parametros, lamina_100: 9, correcao_angulo_zero: -103 } }, cal)).toBe('descartar');
+      expect(pedidoComCalibracaoAtiva({ parametros: { correcao_angulo_zero: -103.1, encoder_invertido: false } }, cal)).toBe('descartar');
+    });
+
+    it('mudar o zero ou o sentido de verdade: recusa (só recalibrando)', () => {
+      expect(pedidoComCalibracaoAtiva({ parametros: { correcao_angulo_zero: -90 } }, cal)).toBe('recusar');
+      expect(pedidoComCalibracaoAtiva({ parametros: { correcao_angulo_zero: null } }, cal)).toBe('recusar');
+      expect(pedidoComCalibracaoAtiva({ parametros: { encoder_invertido: true } }, cal)).toBe('recusar');
+    });
+
+    it('trocar o encoder ou a resolução: desativa a calibração', () => {
+      expect(pedidoComCalibracaoAtiva({ parametros: { encoder_resolucao: 4096 } }, cal)).toBe('desativar');
+      expect(pedidoComCalibracaoAtiva({ parametros: { encoder_equipamento_id: 'ENC2', correcao_angulo_zero: 0 } }, cal)).toBe('desativar');
+      expect(pedidoComCalibracaoAtiva({ parametros: { encoder_equipamento_id: null } }, cal)).toBe('desativar');
     });
   });
 });

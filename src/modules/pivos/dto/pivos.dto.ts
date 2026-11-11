@@ -46,6 +46,33 @@ export class JanelaPivoDto {
   dias!: number[];
 }
 
+/** POST /pivos/:id/calibracao — calibração do ângulo (NEXON-103): leitura do encoder × azimute do braço. */
+export class CalibracaoAnguloDto {
+  @ApiProperty({ description: 'Leitura do encoder na calibração — o valor que o "Ler encoder" devolveu' })
+  @IsInt() @Min(0) @Max(16_777_215)
+  bruto_cal: number;
+
+  @ApiProperty({ enum: [1, -1], description: '+1: a contagem aumenta com o pivô no sentido horário (visto de cima); −1: diminui' })
+  @IsIn([1, -1])
+  sentido: number;
+
+  @ApiProperty({ description: 'Latitude do centro do pivô (graus decimais)' })
+  @IsNumber() @Min(-90) @Max(90)
+  centro_lat: number;
+
+  @ApiProperty({ description: 'Longitude do centro do pivô (graus decimais)' })
+  @IsNumber() @Min(-180) @Max(180)
+  centro_lon: number;
+
+  @ApiProperty({ description: 'Latitude da ponta — a última torre, não o meio do lance' })
+  @IsNumber() @Min(-90) @Max(90)
+  ponta_lat: number;
+
+  @ApiProperty({ description: 'Longitude da ponta' })
+  @IsNumber() @Min(-180) @Max(180)
+  ponta_lon: number;
+}
+
 /** PUT /pivos/:id/config — parcial: o que não vier fica como está. */
 /** Parâmetros de irrigação e direcionamento da água (aba Configuração do pivô). */
 export class ParametrosPivoDto {
@@ -80,6 +107,10 @@ export class ParametrosPivoDto {
   @ApiPropertyOptional({ description: 'Encoder conta ao contrário do sentido de Avanço' })
   @IsOptional() @IsBoolean()
   encoder_invertido?: boolean;
+
+  @ApiPropertyOptional({ description: 'Alarme de pivô travado (min): girando com o ângulo parado por este tempo. Padrão 10.' })
+  @IsOptional() @ValidateIf((_, v) => v !== null) @IsInt() @Min(1) @Max(240)
+  travado_min?: number | null;
 
   @ApiPropertyOptional({ enum: ['valvula', 'fisico'], description: 'Sistema conjugado: válvula pelo NexON ou intertravamento físico' })
   @IsOptional() @IsIn(['valvula', 'fisico'])
