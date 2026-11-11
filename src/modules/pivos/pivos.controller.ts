@@ -34,14 +34,14 @@ export class PivosController {
   @Post(':id/acionar')
   @HttpCode(HttpStatus.OK)
   @Permissions('equipamentos.acionar_ponto')
-  @ApiOperation({ summary: 'Executa a sequência: girar_direita | girar_esquerda (liga bomba → pressão → gira) | desligar. `irrigacao` opcional: direção, %, sem água, canhão, parada e início (futuro = agenda).' })
+  @ApiOperation({ summary: 'Executa a sequência: girar_direita | girar_esquerda (liga bomba → pressão → gira) | desligar. `irrigacao` opcional: direção, %, sem água, canhão, parada e início (futuro = agenda). `reiniciar: true` com girar_*: pivô ligado desliga e liga de novo com a `irrigacao` nova; `manterParada: true` herda a parada automática em curso.' })
   acionar(
     @Param('id') id: string,
-    @Body() body: { acao: AcaoPivo; irrigacao?: unknown },
+    @Body() body: { acao: AcaoPivo; irrigacao?: unknown; reiniciar?: boolean; manterParada?: boolean },
     @CurrentUser() user?: any,
     @Cliente() cliente?: ClienteInfo,
   ) {
-    return this.sequencia.acionar(id, body?.acao, user, cliente, { irrigacao: body?.irrigacao });
+    return this.sequencia.acionar(id, body?.acao, user, cliente, { irrigacao: body?.irrigacao, reiniciar: body?.reiniciar === true, manterParada: body?.manterParada === true });
   }
 
   @Post(':id/canhao')
