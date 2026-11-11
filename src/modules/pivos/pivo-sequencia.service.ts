@@ -85,7 +85,7 @@ type Autor = ScopedUser & { nome?: string };
 const SEQ_PADRAO: SequenciaCfg = { pressurizacao_s: 120, confirma_giro_s: 30, confirma_bomba_s: 30, comandos_mantidos: false };
 const norm = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 
-type PapelComando = 'ligar' | 'canhao' | 'percentimetro' | 'direita' | 'esquerda' | 'desligar';
+type PapelComando = 'ligar' | 'valvula' | 'canhao' | 'percentimetro' | 'direita' | 'esquerda' | 'desligar';
 type PapelStatus = 'ligado' | 'canhao' | 'permissivo' | 'pressao' | 'direita' | 'esquerda' | 'desligado' | 'erro';
 type MapaBi = { ton_id: string; bi: number; inv: boolean };
 /** Resultado de comandar o canhão (aplicarCanhao). */
@@ -98,6 +98,8 @@ type ResCanhao = 'ok' | 'ja' | 'sem_ponto' | 'sem_status' | 'sem_leitura' | 'nao
 const PAPEIS_COMANDO: Record<PapelComando, RegExp> = {
   // Ligar: o painel liga a bomba e fecha a solenoide (só na partida com água)
   ligar: /^(?!.*deslig).*(ligar|bomba)/,
+  // Válvula ON/OFF do pivô (BO02 do padrão): saída mantida, abre com a bomba e fecha depois dela
+  valvula: /valvul|solenoid/,
   // Canhão final: botão do painel que ALTERNA (pulso); o estado vem do Canhao_ligado
   canhao: /canha/,
   // Percentímetro = BO do motor de movimento (ciclo local na TON — docs/IOT-PIVO-PERCENTIMETRO-LAMINA.md)
@@ -1248,6 +1250,7 @@ export class PivoSequenciaService implements OnModuleInit {
         const ligada = await this.bombaLigada(b);
         if (ligada === 1) {
           await passo('bomba', 'Bomba já ligada (sistema compartilhado) — sem esperar pressurização', true);
+          if (await this.saidaMantida(id, pts.cmd.valvula, true, 'Válvula ON', user, cliente)) await passo('valvula', 'Válvula aberta (ON)', true);
         } else {
           await this.cmd.acionarBoDireto(
             { equipamentoId: id, tonId: b.ton_id, bo: b.bo_liga, modo: b.modo === 'mantido' ? 'liga' : 'pulso', pulsoMs: b.pulso_ms, rotulo: b.origem === 'pontos' ? 'Ligar (bomba)' : 'Ligar bomba' },
@@ -1255,6 +1258,7 @@ export class PivoSequenciaService implements OnModuleInit {
           );
           liguei = true;
           await passo('bomba', 'Comando Ligar bomba enviado', true);
+          if (await this.saidaMantida(id, pts.cmd.valvula, true, 'Válvula ON', user, cliente)) await passo('valvula', 'Válvula aberta (ON)', true);
           if (b.bi_confirma) {
             const ok = await this.esperar(async () => (await this.bombaLigada(b)) === 1, b.confirma_s ?? 30, ctl);
             if (ctl.cancelar) return await this.interrompida(passo, fim);
@@ -1484,6 +1488,22 @@ export class PivoSequenciaService implements OnModuleInit {
     passo: (e: string, m: string, ok: boolean | null) => Promise<void>,
     user?: Autor, cliente?: ClienteInfo, desligarEnviado = false,
   ) {
+    // Válvula ON/OFF deste pivô: fecha DEPOIS da bomba (não fecha o caminho com a bomba empurrando);
+    // com a bomba mantida para outro pivô do conjugado, fecha logo (a água segue para o outro).
+    const pValvula = (await this.pontos(id)).cmd.valvula;
+    try {
+      await this._desligarBomba(id, b, passo, user, cliente, desligarEnviado);
+    } finally {
+      if (pValvula && (await this.saidaMantida(id, pValvula, false, 'Válvula OFF', user, cliente).catch(() => false)))
+        await passo('valvula', 'Válvula fechada (OFF)', true);
+    }
+  }
+
+  private async _desligarBomba(
+    id: string, b: Bombeamento,
+    passo: (e: string, m: string, ok: boolean | null) => Promise<void>,
+    user?: Autor, cliente?: ClienteInfo, desligarEnviado = false,
+  ) {
     const comp = await this.companheiros(id, b);
     const girando: string[] = [];
     for (const c of comp) {
@@ -1559,7 +1579,7 @@ export class PivoSequenciaService implements OnModuleInit {
       const n = norm(r.nome);
       if (r.tipo === 'comando') {
         // ordem importa: "anti-horário" antes de "horário"
-        for (const k of ['canhao', 'ligar', 'percentimetro', 'esquerda', 'direita', 'desligar'] as const) if (PAPEIS_COMANDO[k].test(n)) { if (!cmd[k]) cmd[k] = r.id; break; }
+        for (const k of ['valvula', 'canhao', 'ligar', 'percentimetro', 'esquerda', 'direita', 'desligar'] as const) if (PAPEIS_COMANDO[k].test(n)) { if (!cmd[k]) cmd[k] = r.id; break; }
       } else if (r.tipo === 'status' && r.ton_id && r.bi) {
         for (const k of ['canhao', 'ligado', 'permissivo', 'pressao', 'erro', 'desligado', 'esquerda', 'direita'] as const) if (PAPEIS_STATUS[k].test(n)) { if (!st[k]) st[k] = { ton_id: r.ton_id, bi: r.bi, inv: !!r.inv }; break; }
       }

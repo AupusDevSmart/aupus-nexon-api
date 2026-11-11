@@ -219,6 +219,33 @@ describe('saídas mantidas (sequencia.comandos_mantidos)', () => {
     expect(acionados).toEqual([]);
   });
 
+  it('válvula ON/OFF (ponto Valvula): abre junto com a bomba e fecha DEPOIS dela', async () => {
+    const pts: Ponto[] = [...PTS, { id: 'p-valv', tipo: 'comando', nome: 'Valvula' }];
+    const bos = { ...BOS, 'p-valv': { ton_id: 'T', bo: 4, pulso_ms: 500 } };
+    const entradas: Record<string, number | null> = { 'T:2': 0, 'T:3': 0 };
+    const m = montar(pts, bos, entradas);
+    const q = m.svc.prisma.$queryRaw;
+    m.svc.prisma.$queryRaw = jest.fn(async (st: TemplateStringsArray, ...v: unknown[]) =>
+      (st.join('?').includes('comandos_mantidos') ? [{ m: true }] : q(st, ...v)));
+    m.svc.prisma.$executeRaw = jest.fn(async () => 1);
+    const saidas: string[] = [];
+    m.svc.cmd.acionarBoDireto = jest.fn(async (p: { bo: number; modo: string }) => {
+      saidas.push(`r${p.bo} ${p.modo}`);
+      if (p.bo === 2) entradas['T:2'] = p.modo === 'liga' ? 1 : 0;
+      if (p.bo === 3) entradas['T:3'] = p.modo === 'liga' ? 1 : 0;
+    });
+    m.svc.cmd.lerEntradaTon = jest.fn(async (ton: string, bi: number) => ({ valor: entradas[`${ton}:${bi}`] ?? null, updated_at: null }));
+    const seq = { pressurizacao_s: 0, confirma_giro_s: 5, confirma_bomba_s: 5, comandos_mantidos: true };
+    m.svc.lerConfig = async () => ({ bombeamento: await m.svc.bombaDosPontos('PIV'), bomba_de: null, sequencia: seq });
+    m.svc.companheiros = async () => [];
+    expect((await m.svc.pontos('PIV')).cmd.valvula).toBe('p-valv');
+    await m.svc.executar('PIV', 'girar_direita', { seqId: 'S', cancelar: false });
+    expect(saidas).toEqual(['r1 liga', 'r4 liga', 'r3 desliga', 'r2 liga']);
+    saidas.length = 0;
+    await m.svc.executar('PIV', 'desligar', { seqId: 'S2', cancelar: false });
+    expect(saidas).toEqual(['r2 desliga', 'r3 desliga', 'r6 desliga', 'r1 desliga', 'r4 desliga']);
+  });
+
   it('desligar sem ponto Desligar: baixa os dois sentidos, o canhão e o Ligar', async () => {
     const { svc, saidas, acionados } = mantido({ 'T:2': 1, 'T:3': 0 });
     await svc.executar('PIV', 'desligar', { seqId: 'S', cancelar: false });
