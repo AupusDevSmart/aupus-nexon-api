@@ -43,12 +43,12 @@ function montar(pontos: any[], resposta: (cmd: string) => string | Error) {
 }
 
 const respostaPadrao = (c: string) =>
-  c === 'pivo status' ? 'pivo_st 0 0 -1 -'
+  c === 'pivo status' ? 'pivo_st 0 0 -1 nenhuma a0 r00 i0 x0 o00'
   : c.startsWith('pivo io') ? 'pivo_io_ok'
   : c.startsWith('pivo tempos') ? 'pivo_tempos_ok'
   : c.startsWith('pivo enc') ? 'pivo_enc_ok'
   : c.startsWith('pivo ligar') ? 'pivo_ligando'
-  : c.startsWith('pivo desligar') ? 'pivo_desligando'
+  : c.startsWith('pivo desligar') ? 'pivo_parada_executada'
   : 'unknown_cmd';
 
 function exec(seqId: string, acao: 'girar_direita' | 'girar_esquerda' | 'desligar', irr: any = null) {
@@ -65,6 +65,9 @@ function exec(seqId: string, acao: 'girar_direita' | 'girar_esquerda' | 'desliga
   };
 }
 
+/** Status da TON no formato de 12/11 (spec 7.3, compacto). */
+const ST = (et: number, p = 0, mo = 0, extra: any = {}) => ({ o: 'x', i: 18, et, p, an: null, gp: 0, al: 360, pm: 600, mo, at: 0, d: 'D', a: 1, bo: 0, ...extra });
+const ENC = { resolucao: 360, invertido: false, zero: 0 };
 const IRR = (parada: any, extra: any = {}) => ({ modo: 'simples', config: { direcao: 'Avanço', percentual: 60, semAgua: false, canhao: false, ...extra }, parada });
 
 describe('PivoTonService', () => {
@@ -82,107 +85,114 @@ describe('PivoTonService', () => {
     expect(cmds.filter((c) => c === 'pivo status')).toHaveLength(1);   // cache: não pergunta de novo
   });
 
-  it('montarLigar: tempo, sem parada (7 dias), voltas sem encoder vira tempo estimado, seco = 100 %', () => {
+  it('montarLigar com encoder: só GRAUS (voltas × 360; ângulo final → graus no sentido); sem parada e tempo não existem', () => {
     const { svc } = montar(LAB, respostaPadrao);
     const id = '01KXYZABCDEFGH12345678ABCD';
-    const t = svc.montarLigar(exec(id, 'girar_direita', IRR({ tipo: 'porTempo', minutos: 90 })).x as any, false);
-    expect(t.cmd).toBe(`pivo ligar ${idCurto(id)} d 1 600 0 t 5400`);
-    expect(t.cmd.length).toBeLessThan(60);   // cabe no pacote LoRa com o envelope
-    expect(svc.montarLigar(exec(id, 'girar_esquerda', IRR({ tipo: 'semParar' })).x as any, false).cmd).toMatch(/ e 1 600 0 t 604800$/);
-    // 1 volta a 60 %: 6 h × 100/60 = 10 h
-    expect(svc.montarLigar(exec(id, 'girar_direita', IRR({ tipo: 'porVoltas', voltas: 1 })).x as any, false).cmd).toMatch(/ t 36000$/);
-    expect(svc.montarLigar(exec(id, 'girar_direita', IRR({ tipo: 'porVoltas', voltas: 1 })).x as any, true).cmd).toMatch(/ v 1$/);
-    expect(svc.montarLigar(exec(id, 'girar_direita', IRR({ tipo: 'porTempo', minutos: 5 }, { semAgua: true, canhao: true })).x as any, false).cmd).toMatch(/ d 0 1000 0 t 300$/);
+    const m = (acao: any, parada: any, extra: any = {}, ang: number | null = null) => {
+      const e = exec(id, acao, IRR(parada, extra)); (e.x as any).anguloAtual = ang;
+      return svc.montarLigar(e.x as any, ENC).cmd;
+    };
+    expect(m('girar_direita', { tipo: 'porVoltas', voltas: 1 })).toBe(`pivo ligar ${idCurto(id)} d 1 600 0 g 360`);
+    expect(m('girar_direita', { tipo: 'porVoltas', voltas: 2.5 })).toMatch(/ g 900$/);
+    expect(m('girar_direita', { tipo: 'porAngulo', angulo: 100 }, {}, 10)).toMatch(/ g 90$/);
+    expect(m('girar_esquerda', { tipo: 'porAngulo', angulo: 350 }, {}, 20)).toMatch(/ e .* g 30$/);
+    expect(() => m('girar_direita', { tipo: 'semParar' })).toThrow(/sem parada/);
+    expect(() => m('girar_direita', { tipo: 'porTempo', minutos: 30 })).toThrow(/tempo não existe/);
+    // canhão com faixa (liga 200 → desliga 100 na calibração): OFF dentro de [100, 200]
+    const f = m('girar_direita', { tipo: 'porVoltas', voltas: 1 }, { canhao: true, faixasCanhao: [{ liga: 200, desliga: 100 }] });
+    expect(f).toMatch(/ d 1 600 1 g 360 f 100 200$/);
+    expect(f.length).toBeLessThan(60);   // cabe no pacote LoRa com o envelope
   });
 
-  it('ligar: manda a configuração uma vez, o plano, e conclui quando a TON reporta irrigando', async () => {
+  it('montarLigar sem encoder (provisório): tempo estimado; sem parada recusado', () => {
+    const { svc } = montar(LAB, respostaPadrao);
+    const id = '01KXYZABCDEFGH12345678ABCD';
+    const m = (parada: any, extra: any = {}) => svc.montarLigar(exec(id, 'girar_direita', IRR(parada, extra)).x as any, null).cmd;
+    expect(m({ tipo: 'porTempo', minutos: 90 })).toMatch(/ d 1 600 0 t 5400$/);
+    expect(m({ tipo: 'porVoltas', voltas: 1 })).toMatch(/ t 36000$/);   // 6 h × 100/60
+    expect(m({ tipo: 'porTempo', minutos: 5 }, { semAgua: true, canhao: true })).toMatch(/ d 0 1000 0 t 300$/);
+    expect(() => m({ tipo: 'semParar' })).toThrow(/sem parada/);
+  });
+
+  it('ligar: manda a configuração uma vez (tempos novos, encoder bruto), o plano, e conclui com a TON girando', async () => {
     const { svc, cmds } = montar(LAB, respostaPadrao);
     const alvo = (await svc.alvo('PIV'))!;
     const e = exec('SEQ00000000000000000000AAAA', 'girar_direita', IRR({ tipo: 'porTempo', minutos: 30 }));
     setTimeout(() => {
-      svc.receberEvento('T', { t: 'passo', x: 'bomba_ligada', e: 'ligando', id: 'aaaaaaaa'.slice(0, 8) });
-      svc.receberEvento('T', { t: 'passo', x: 'bomba_ligada', e: 'ligando', id: idCurto('SEQ00000000000000000000AAAA') });
-      svc.receberStatus('T', { e: 2, p: 0, f: '', d: 'D', a: 1, pm: 600, an: null, pc: 0, al: -1, sg: -1, bi: 15, bo: 21, c: 1 });
+      svc.receberEvento('T', { t: 'passo', x: 'bomba_ligada', e: 'aguardando_pressao', id: 'outraaaa' });
+      svc.receberEvento('T', { t: 'passo', x: 'bomba_ligada', e: 'aguardando_pressao', id: idCurto('SEQ00000000000000000000AAAA') });
+      svc.receberStatus('T', ST(2));
     }, 300);
     await svc.executar(e.x as any, alvo);
-    expect(cmds.filter((c) => /^pivo (io|tempos|enc)/.test(c))).toHaveLength(3);
+    expect(cmds).toContain('pivo tempos 10 30 5 0 0 0 30 600 60');
+    expect(cmds).toContain('pivo enc 0 0 0');
     expect(cmds).toContain(`pivo ligar ${idCurto('SEQ00000000000000000000AAAA')} d 1 600 0 t 1800`);
-    expect(e.passos.some((m) => /Bombeamento ON/.test(m))).toBe(true);
+    expect(e.passos.filter((m) => /Bombeamento ON/.test(m))).toHaveLength(1);
     expect(e.fins).toEqual([['concluida', undefined]]);
-    // segunda partida: config igual → não reenvia
     const e2 = exec('SEQ00000000000000000000BBBB', 'girar_direita', IRR({ tipo: 'porTempo', minutos: 30 }));
-    setTimeout(() => svc.receberStatus('T', { e: 2, p: 0, f: '', d: 'D', a: 1, pm: 600, an: null, pc: 0, al: -1, sg: -1, bi: 15, bo: 21, c: 1 }), 300);
+    setTimeout(() => svc.receberStatus('T', ST(2)), 300);
     await svc.executar(e2.x as any, alvo);
-    expect(cmds.filter((c) => /^pivo io/.test(c))).toHaveLength(1);
+    expect(cmds.filter((c) => /^pivo io/.test(c))).toHaveLength(1);   // config igual: não reenvia
   });
 
   it('satélite (sem eventos): os passos saem do código de passo do status', async () => {
     const { svc } = montar(LAB, respostaPadrao);
     const alvo = (await svc.alvo('PIV'))!;
     const e = exec('SEQ00000000000000000000GGGG', 'girar_esquerda', IRR({ tipo: 'porTempo', minutos: 30 }));
-    const st = (e_: number, p: number) => ({ e: e_, p, f: '', d: 'E', a: 1, pm: -1, an: null, pc: 0, al: -1, sg: -1, bi: 0, bo: 0, c: 1 });
-    setTimeout(() => svc.receberStatus('T', st(1, 2)), 200);
-    setTimeout(() => svc.receberStatus('T', st(1, 3)), 1000);
-    setTimeout(() => svc.receberStatus('T', st(2, 0)), 1800);
+    setTimeout(() => svc.receberStatus('T', ST(1, 1)), 200);
+    setTimeout(() => svc.receberStatus('T', ST(1, 2)), 1000);
+    setTimeout(() => svc.receberStatus('T', ST(2, 0)), 1800);
     await svc.executar(e.x as any, alvo);
-    expect(e.passos.filter((m) => /Bombeamento ON|girar esquerda ON/.test(m))).toHaveLength(2);
+    expect(e.passos.filter((m) => /Bombeamento ON|girar esquerda ON/i.test(m))).toHaveLength(2);
     expect(e.fins).toEqual([['concluida', undefined]]);
   });
 
-  it('ligar: recusa da TON vira mensagem clara', async () => {
-    const { svc } = montar(LAB, (c) => (c.startsWith('pivo ligar') ? 'pivo_pivo_girando' : respostaPadrao(c)));
+  it('ligar: recusa da TON vira mensagem clara (condição de partida)', async () => {
+    const { svc } = montar(LAB, (c) => (c.startsWith('pivo ligar') ? 'pivo_condicao_partida' : respostaPadrao(c)));
     const alvo = (await svc.alvo('PIV'))!;
     const e = exec('SEQ00000000000000000000CCCC', 'girar_direita', IRR({ tipo: 'porTempo', minutos: 30 }));
     await svc.executar(e.x as any, alvo);
-    expect(e.fins).toEqual([['falhou', 'A TON não ligou: O pivô já está girando pelo painel']]);
+    expect(e.fins).toEqual([['falhou', 'A TON não ligou: Condição de partida não OK: tensão (BI02) ou segurança (BI05) em 0']]);
   });
 
-  it('ligar: falha na TON (sem pressão) encerra a sequência com o motivo', async () => {
+  it('ligar: a TON parou na partida (pressão não subiu) encerra com o motivo', async () => {
     const { svc } = montar(LAB, respostaPadrao);
     const alvo = (await svc.alvo('PIV'))!;
     const e = exec('SEQ00000000000000000000DDDD', 'girar_direita', IRR({ tipo: 'porTempo', minutos: 30 }));
-    setTimeout(() => svc.receberEvento('T', { t: 'falha', x: 'sem_pressao', e: 'desligando', id: idCurto('SEQ00000000000000000000DDDD') }), 300);
+    setTimeout(() => svc.receberStatus('T', ST(1, 1)), 200);
+    setTimeout(() => svc.receberStatus('T', ST(0, 0, 4)), 3500);
     await svc.executar(e.x as any, alvo);
-    expect(e.fins).toEqual([['falhou', 'Falha na TON: Sem pressão (BI01) no tempo de pressurização']]);
+    expect(e.fins).toEqual([['falhou', 'Falha na TON: A pressão não subiu no tempo de espera (BI01)']]);
   });
 
-  it('desligar: espera a TON parar; com a sequência local já parada, as saídas caem na hora', async () => {
-    const { svc } = montar(LAB, respostaPadrao);
-    const alvo = (await svc.alvo('PIV'))!;
+  it('desligar: a TON desliga tudo na hora e confirma no ack', async () => {
+    const { svc, cmds } = montar(LAB, respostaPadrao);
     const e = exec('SEQ00000000000000000000EEEE', 'desligar');
-    setTimeout(() => {
-      svc.receberEvento('T', { t: 'passo', x: 'bomba_desligada', e: 'desligando', id: 'x' });
-      svc.receberStatus('T', { e: 0, p: 0, f: '', d: 'D', a: 1, pm: -1, an: null, pc: 0, al: -1, sg: -1, bi: 0, bo: 0, c: 1 });
-    }, 300);
-    await svc.executar(e.x as any, alvo);
+    await svc.executar(e.x as any, (await svc.alvo('PIV'))!);
+    expect(cmds).toContain('pivo desligar');
+    expect(e.passos.some((m) => /Parada executada/.test(m))).toBe(true);
     expect(e.fins).toEqual([['concluida', undefined]]);
-    expect(e.passos.some((m) => /Bombeamento OFF/.test(m))).toBe(true);
-
-    const { svc: s2, cmds } = montar(LAB, (c) => (c.startsWith('pivo desligar') ? 'pivo_ja_parado' : respostaPadrao(c)));
-    const e2 = exec('SEQ00000000000000000000FFFF', 'desligar');
-    await s2.executar(e2.x as any, (await s2.alvo('PIV'))!);
-    expect(cmds).toContain('pivo desligar comando');
-    expect(e2.fins).toEqual([['concluida', undefined]]);
   });
 
   it('parada sozinha da TON (sem sequência acompanhando) avisa quem registra na trilha', () => {
     const { svc } = montar(LAB, respostaPadrao);
     const visto: any[] = [];
     svc.aoPararSozinho = (t, m, f) => visto.push([t, m, f]);
-    svc.receberEvento('T', { t: 'parado', x: 'concluido', e: 'parado', id: 'abc' });
-    svc.receberEvento('T', { t: 'parado', x: 'concluido', e: 'parado', id: 'abc' });   // repetido: avisa 1x
-    svc.receberEvento('T2', { t: 'falha', x: 'seguranca', e: 'desligando', id: 'abc' });
-    expect(visto).toEqual([['T', 'concluido', false], ['T2', 'seguranca', true]]);
+    svc.receberEvento('T', { t: 'parado', x: 'concluida', e: 'parado', id: 'abc' });
+    svc.receberEvento('T', { t: 'parado', x: 'concluida', e: 'parado', id: 'abc' });   // repetido: avisa 1x
+    svc.receberEvento('T2', { t: 'parado', x: 'seguranca', e: 'parado', id: 'abc' });
+    expect(visto).toEqual([['T', 'concluida', false], ['T2', 'seguranca', true]]);
   });
 
-  it('satélite: a ida a PARADO pelo status (sem evento) também avisa, com o motivo da falha', () => {
+  it('satélite: a ida a PARADO pelo status também avisa, com o motivo; status traz alertas decodificados', () => {
     const { svc } = montar(LAB, respostaPadrao);
     const visto: any[] = [];
     svc.aoPararSozinho = (t, m, f) => visto.push([t, m, f]);
-    const st = (e: number, f = '') => ({ e, p: 0, f, d: 'D', a: 1, pm: 600, an: null, pc: 0, al: -1, sg: -1, bi: 0, bo: 0, c: 1 });
-    svc.receberStatus('T', st(2));
-    svc.receberStatus('T', st(0, 'sem_pressao'));
-    svc.receberStatus('T', st(0, 'sem_pressao'));
-    expect(visto).toEqual([['T', 'sem_pressao', true]]);
+    svc.receberStatus('T', ST(2, 0, 0, { at: 3 }));
+    expect(svc.statusDaTon('T')!.alertas).toEqual({ erro_posicao: true, falha_canhao: true, reinicios_repetidos: false });
+    svc.receberStatus('T', ST(0, 0, 3));
+    svc.receberStatus('T', ST(0, 0, 3));
+    expect(visto).toEqual([['T', 'queda_pressao', true]]);
+    expect(svc.statusDaTon('T')!.motivo_texto).toBe('Queda de pressão (BI01)');
   });
 });

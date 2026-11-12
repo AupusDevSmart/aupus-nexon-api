@@ -90,6 +90,8 @@ function montar(c: Cenario = {}) {
   return { svc, cmds, sql, valores, prisma, auditoria, ton };
 }
 
+// 12/11/2026 (spec "Automacao do pivo" 5.3 + decisao do usuario): a TON usa so' o valor BRUTO do encoder;
+// a calibracao fica no NexON/app. Por isso o `pivo enc` enviado e' sempre '<resolucao> 0 0'.
 describe('calibração do ângulo do pivô (serviço)', () => {
   describe('Ler encoder', () => {
     it('5 leituras iguais: válida', async () => {
@@ -134,7 +136,7 @@ describe('calibração do ângulo do pivô (serviço)', () => {
       await svc.lerEncoder('pivo-11', ADMIN);
       await svc.salvar('pivo-11', DTO, ADMIN);
       // azimute 43,87° − 147 = zero −103,13° (a tela mostra 43,9° e 96,9° com bruto 200)
-      expect(cmds).toEqual(['pivo encler', 'pivo enc 360 0 -103.13']);
+      expect(cmds).toEqual(['pivo encler', 'pivo enc 360 0 0']);
       const escritas = sql.filter((q) => /UPDATE calibracao_angulo|INSERT INTO calibracao_angulo|UPDATE pivo_config/.test(q));
       expect(escritas[0]).toMatch(/UPDATE calibracao_angulo SET ativa = false/);   // desativa a anterior, não apaga
       expect(escritas[1]).toMatch(/INSERT INTO calibracao_angulo/);
@@ -152,11 +154,11 @@ describe('calibração do ângulo do pivô (serviço)', () => {
       }));
     });
 
-    it('sentido anti-horário vai como encoder invertido', async () => {
+    it('sentido anti-horário: a TON continua só com o bruto (a calibração fica no NexON)', async () => {
       const { svc, cmds } = montar();
       await svc.lerEncoder('pivo-11', ADMIN);
       await svc.salvar('pivo-11', { ...DTO, sentido: -1 }, ADMIN);
-      expect(cmds[1]).toBe('pivo enc 360 1 -169.13');
+      expect(cmds[1]).toBe('pivo enc 360 0 0');
     });
 
     it('a TON não confirma: erro e NADA gravado', async () => {
@@ -171,7 +173,7 @@ describe('calibração do ângulo do pivô (serviço)', () => {
       const { svc, cmds, auditoria } = montar({ bancoFalha: true });
       await svc.lerEncoder('pivo-11', ADMIN);
       await expect(svc.salvar('pivo-11', DTO, ADMIN)).rejects.toThrow(/duplicate key/);
-      expect(cmds).toEqual(['pivo encler', 'pivo enc 360 0 -103.13', 'pivo enc 0 0 0']);
+      expect(cmds).toEqual(['pivo encler', 'pivo enc 360 0 0', 'pivo enc 0 0 0']);
       expect(auditoria.registrar).not.toHaveBeenCalled();
     });
 
@@ -179,7 +181,7 @@ describe('calibração do ângulo do pivô (serviço)', () => {
       const { svc, cmds } = montar({ bancoFalha: true, vigente: linhaCal({ az_cal: 10, bruto_cal: 100, zero: -90 }) });
       await svc.lerEncoder('pivo-11', ADMIN);
       await expect(svc.salvar('pivo-11', DTO, ADMIN)).rejects.toThrow();
-      expect(cmds[2]).toBe('pivo enc 360 0 -90');
+      expect(cmds[2]).toBe('pivo enc 360 0 0');
     });
 
     it('servidor sem a tabela: avisa antes de mexer na placa', async () => {
@@ -255,7 +257,7 @@ describe('calibração do ângulo do pivô (serviço)', () => {
       const anterior = linhaCal({ id: 'cal-antiga', ativa: false, az_cal: 43.9, bruto_cal: 147, zero: -103.1, desativada_em: new Date() });
       const { svc, cmds, sql, auditoria } = montar({ vigente: linhaCal({ id: 'cal-nova' }), anterior });
       await svc.restaurar('pivo-11', ADMIN);
-      expect(cmds).toEqual(['pivo enc 360 0 -103.1']);
+      expect(cmds).toEqual(['pivo enc 360 0 0']);
       expect(sql.some((q) => /UPDATE calibracao_angulo SET ativa = false/.test(q))).toBe(true);
       expect(sql.some((q) => /UPDATE calibracao_angulo SET ativa = true/.test(q))).toBe(true);
       expect(auditoria.registrar).toHaveBeenCalledWith(expect.objectContaining({ acao: 'pivo_calibracao_restaurada' }));

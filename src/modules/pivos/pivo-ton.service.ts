@@ -32,11 +32,28 @@ export interface AlvoTon {
   inv: string;
 }
 
-/** Status compacto publicado pela TON (glue pivo.cpp). */
+/**
+ * Status da TON (glue pivo.cpp, spec 7.3), normalizado:
+ * e = etapa (0 parado, 1 aguardando pressão/giro, 2 girando) · p = passo da partida (1 pressão, 2 giro)
+ * f = motivo da última parada ('' = nenhuma) · at = alertas (bit0 erro de posição, 1 falha no canhão,
+ * 2 reinícios repetidos) · an = ângulo BRUTO do encoder · pc = graus percorridos · al = graus da parada
+ * bi = entradas (bit4 = segurança OK) · bo = saídas (bit6 = girando) · o = id da ordem.
+ */
 export interface StatusTon {
   e: number; p: number; f: string; d: string; a: number; pm: number;
-  an: number | null; pc: number; al: number; sg: number; bi: number; bo: number; c: number;
+  an: number | null; pc: number; al: number; bi: number; bo: number; at: number; o: string;
 }
+
+/** Motivo da última parada (código da TON, spec 8.6 + extras) → nome. */
+export const MOTIVOS = ['', 'concluida', 'comando_operador', 'queda_pressao', 'pressao_nao_subiu', 'tensao', 'seguranca',
+  'reinicio_slave', 'condicao_partida', 'nao_girou', 'lado_caiu', 'falha_reles'] as const;
+const motivoDe = (v: unknown): string => {
+  if (typeof v === 'number') return MOTIVOS[v] ?? String(v);
+  const s = String(v ?? '');
+  return s === 'nenhuma' || s === '-' ? '' : s;
+};
+/** Paradas que NÃO são falha (situação final "Concluída"/"Interrompida"). */
+export const PARADA_NORMAL = new Set(['', 'concluida', 'comando_operador']);
 
 export interface ExecutarNaTon {
   pivoId: string;
@@ -46,7 +63,7 @@ export interface ExecutarNaTon {
   ctl: { cancelar: boolean };
   reiniciar: boolean;
   restanteParadaMs?: number | null;
-  sequencia: { pressurizacao_s: number; confirma_giro_s: number; confirma_bomba_s: number };
+  sequencia: { pressurizacao_s: number; confirma_giro_s: number; confirma_bomba_s: number; tol_pressao_s?: number; tol_tensao_s?: number };
   cicloPercS: number;
   tempoVolta100h: number;
   anguloAtual: number | null;
@@ -56,11 +73,10 @@ export interface ExecutarNaTon {
   cliente?: ClienteInfo;
 }
 
-const ESTADO = ['parado', 'ligando', 'irrigando', 'desligando'] as const;
+const ESTADO = ['parado', 'aguardando_pressao', 'girando'] as const;
 
 /** Textos da trilha para os eventos da TON (t:x). */
 const TXT_PASSO: Record<string, string> = {
-  tensao: 'Conferindo a tensão (BI02)',
   bomba_ligada: 'Bombeamento ON (BO01) e válvula ON — aguardando pressão (BI01)',
   girar_direita: 'Pressão OK — girar direita ON (BO03), aguardando o giro (BI03)',
   girar_esquerda: 'Pressão OK — girar esquerda ON (BO04), aguardando o giro (BI04)',
@@ -70,49 +86,50 @@ const TXT_PASSO: Record<string, string> = {
   canhao_desligar: 'Canhão OFF (BO06)',
   canhao_ligado: 'Canhão confirmado ligado (BI06)',
   canhao_desligado: 'Canhão confirmado desligado (BI06)',
-  bomba_desligada: 'Bombeamento OFF (BO01) e válvula OFF — aguardando a pressão cair',
-  lados_desligados: 'Percentímetro 0 % e lados OFF — aguardando o pivô parar',
 };
 export const TXT_FALHA: Record<string, string> = {
-  sem_tensao: 'Sem tensão (BI02)',
-  sem_pressao: 'Sem pressão (BI01) no tempo de pressurização',
-  nao_girou: 'O pivô não confirmou o giro (BI03/BI04)',
-  seguranca: 'Segurança atuou (desalinhado, BI05)',
-  lado_caiu: 'O pivô parou sem comando (girando caiu)',
-  sem_posicao: 'Sem leitura do encoder',
-  nao_parou: 'O pivô não confirmou a parada (BI03/BI04)',
-  reinicio: 'A TON reiniciou com o pivô ligado (queda de energia ou reset)',
+  concluida: 'Parada programada atingida (graus percorridos)',
+  comando_operador: 'Desligado pelo operador',
+  queda_pressao: 'Queda de pressão (BI01)',
+  pressao_nao_subiu: 'A pressão não subiu no tempo de espera (BI01)',
+  tensao: 'Sem tensão (BI02)',
+  seguranca: 'Segurança atuou (BI05)',
+  reinicio_slave: 'A TON reiniciou com o pivô ligado (queda de energia ou reset)',
+  condicao_partida: 'Condição de partida não OK (tensão BI02 ou segurança BI05)',
+  nao_girou: 'O pivô não confirmou o sentido (BI03/BI04)',
+  lado_caiu: 'O pivô parou sem comando (retorno do sentido caiu)',
   falha_reles: 'Relés da TON sem controle (expansor I2C): a TON desligou o pivô',
-  concluido: 'Parada programada atingida',
-  comando: 'Desligado por comando',
 };
-/** Passo em curso no status (pivo::Passo) — o satélite LoRa não manda eventos, só o status/ack. */
+/** Passo da partida no status (pivo::Passo) — o satélite LoRa não manda eventos, só o status/ack. */
 const TXT_PASSO_N: Record<number, (dir: string) => string> = {
-  1: () => 'Conferindo a tensão (BI02)',
-  2: () => 'Bombeamento ON (BO01) e válvula ON — aguardando pressão (BI01)',
-  3: (d) => `Pressão OK — girar ${d === 'E' ? 'esquerda ON (BO04), aguardando o giro (BI04)' : 'direita ON (BO03), aguardando o giro (BI03)'}`,
-  4: () => 'Bombeamento OFF (BO01) e válvula OFF — aguardando a pressão cair',
-  5: () => 'Percentímetro 0 % e lados OFF — aguardando o pivô parar',
+  1: () => 'Bombeamento ON (BO01) e válvula ON — aguardando pressão (BI01)',
+  2: (d) => `Girar ${d === 'E' ? 'esquerda ON (BO04), aguardando o giro (BI04)' : 'direita ON (BO03), aguardando o giro (BI03)'}`,
 };
-const TXT_AVISO: Record<string, string> = {
-  canhao_nao_ligou: 'O canhão não confirmou ligado (BI06) — segue irrigando',
-  canhao_nao_desligou: 'O canhão não confirmou desligado (BI06)',
-  pressao_nao_caiu: 'A pressão não caiu depois de desligar a bomba (BI01)',
-  salto_posicao: 'Leitura do encoder pulou (ignorada)',
-};
+const TXT_AVISO: Record<string, string> = {};
 const TXT_RECUSA: Record<string, string> = {
   pivo_ja_ligado: 'A TON já está com uma irrigação em curso',
   pivo_pivo_girando: 'O pivô já está girando pelo painel',
-  pivo_desalinhado: 'Segurança atuada (desalinhado): a TON não liga',
+  pivo_condicao_partida: 'Condição de partida não OK: tensão (BI02) ou segurança (BI05) em 0',
   pivo_sem_config: 'A TON ainda não recebeu a configuração do pivô',
   pivo_io_incompleto: 'Falta BO de giro, percentímetro ou bombeamento ligada nesta TON',
-  pivo_sem_encoder: 'Parada por voltas/ângulo precisa do encoder na mesma TON',
+  pivo_sem_encoder: 'Parada em graus precisa do encoder na mesma TON',
   pivo_falha_reles: 'Os relés da TON estão sem controle (expansor I2C) — confira a placa antes de ligar',
 };
 
-/** `pivo enc <resolução> <inv 0/1> <zero°>` — o encoder como a TON guarda (zero com duas casas). */
-export function comandoEnc(enc: { resolucao: number | null; invertido: boolean; zero: number }): string {
-  return `pivo enc ${enc.resolucao} ${enc.invertido ? 1 : 0} ${Math.round(enc.zero * 100) / 100}`;
+/**
+ * `pivo enc <resolução> 0 0` — a TON usa só o valor BRUTO do encoder (spec 5.3 e decisão 12/11): sem
+ * zero nem sentido. A calibração (NEXON-103) fica no NexON/app, que converte bruto ↔ ângulo.
+ */
+export function comandoEnc(enc: { resolucao: number | null; invertido?: boolean; zero?: number }): string {
+  return `pivo enc ${enc.resolucao} 0 0`;
+}
+
+/** Ângulo calibrado (azimute) → contagem bruta do encoder (inverso de anguloDoEncoder). */
+export function brutoDoAngulo(angulo: number, enc: { resolucao: number | null; invertido: boolean; zero: number }): number {
+  const res = enc.resolucao || 360;
+  let g = (((angulo - enc.zero) % 360) + 360) % 360;
+  if (enc.invertido) g = (360 - g) % 360;
+  return Math.round((g * res) / 360) % res;
 }
 
 const norm = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
@@ -150,11 +167,22 @@ export class PivoTonService implements OnModuleInit {
 
   // ------------------------------------------------------------------ entrada (MQTT)
 
-  receberStatus(tonId: string, d: any) {
-    if (!d || typeof d !== 'object' || typeof d.e !== 'number') return;
+  /** Status da TON no formato de 12/11 (o, i, et, p, an, gp, al, pm, mo, at, d, a, bo) → StatusTon. */
+  static normalizar(d: any): StatusTon | null {
+    if (!d || typeof d !== 'object' || typeof d.et !== 'number') return null;
+    return {
+      e: d.et, p: Number(d.p) || 0, f: motivoDe(d.mo), d: String(d.d ?? 'D'), a: Number(d.a ?? 1), pm: Number(d.pm ?? -1),
+      an: typeof d.an === 'number' ? d.an : null, pc: Number(d.gp) || 0, al: Number(d.al) || 0,
+      bi: Number(d.i) || 0, bo: Number(d.bo) || 0, at: Number(d.at) || 0, o: String(d.o ?? ''),
+    };
+  }
+
+  receberStatus(tonId: string, dados: any) {
+    const d = PivoTonService.normalizar(dados);
+    if (!d) return;
     const t = tonId.trim();
     const ant = this.status.get(t)?.s;
-    this.status.set(t, { s: d as StatusTon, em: Date.now(), n: ++this.n });
+    this.status.set(t, { s: d, em: Date.now(), n: ++this.n });
     this.suporte.set(t, { ok: true, em: Date.now() });
     // A TON foi a PARADO sozinha (falta de pressão, segurança, parada programada…) sem uma
     // sequência do NexON acompanhando: o NexON encerra a irrigação na hora (sem esperar as BIs).
@@ -167,8 +195,8 @@ export class PivoTonService implements OnModuleInit {
     const ult = this.paradaAvisada.get(t) ?? 0;
     if (Date.now() - ult < 30_000) return;
     this.paradaAvisada.set(t, Date.now());
-    const m = motivo || 'concluido';
-    try { this.aoPararSozinho?.(t, m, !['concluido', 'comando', ''].includes(m), id); } catch { /* melhor esforço */ }
+    const m = motivo || 'concluida';
+    try { this.aoPararSozinho?.(t, m, !PARADA_NORMAL.has(m), id); } catch { /* melhor esforço */ }
   }
 
   receberEvento(tonId: string, d: any) {
@@ -183,10 +211,16 @@ export class PivoTonService implements OnModuleInit {
   }
 
   /** Último status da TON (até 15 min). */
-  statusDaTon(tonId: string): (StatusTon & { estado: string; em: Date }) | null {
+  statusDaTon(tonId: string): (StatusTon & { estado: string; em: Date; motivo_ultima_parada: string; motivo_texto: string | null;
+    alertas: { erro_posicao: boolean; falha_canhao: boolean; reinicios_repetidos: boolean } }) | null {
     const r = this.status.get(tonId.trim());
     if (!r || Date.now() - r.em > 15 * 60_000) return null;
-    return { ...r.s, estado: ESTADO[r.s.e] ?? '?', em: new Date(r.em) };
+    const at = r.s.at || 0;
+    return {
+      ...r.s, estado: ESTADO[r.s.e] ?? '?', em: new Date(r.em),
+      motivo_ultima_parada: r.s.f || 'nenhuma', motivo_texto: r.s.f ? (TXT_FALHA[r.s.f] ?? r.s.f) : null,
+      alertas: { erro_posicao: !!(at & 1), falha_canhao: !!(at & 2), reinicios_repetidos: !!(at & 4) },
+    };
   }
 
   /** Canhão comandado com sucesso: atualiza o bit da BO06 no status em memória até o próximo status da TON. */
@@ -196,7 +230,7 @@ export class PivoTonService implements OnModuleInit {
     r.s = { ...r.s, bo: ligado ? (r.s.bo | 32) : (r.s.bo & ~32) };
   }
 
-  /** A TON está com a sequência local ligada (ligando/irrigando/desligando)? */
+  /** A TON está com a sequência local ligada (partindo ou girando)? */
   ligadaNaTon(tonId: string): boolean {
     const s = this.statusDaTon(tonId);
     return !!s && s.e !== 0;
@@ -258,33 +292,35 @@ export class PivoTonService implements OnModuleInit {
     }
   }
 
-  /** `pivo status` → ack "pivo_st <e> <p> <permil> <falha|->" (chega mesmo pelo LoRa). */
-  async lerEstadoPeloAck(pivoId: string, tonId: string, user?: Autor, cliente?: ClienteInfo): Promise<{ e: number; p: number; pm: number; f: string }> {
+  /** `pivo status` → ack "pivo_st <etapa> <passo> <permil> <motivo> a<alertas> …" (chega mesmo pelo LoRa). */
+  async lerEstadoPeloAck(pivoId: string, tonId: string, user?: Autor, cliente?: ClienteInfo): Promise<{ e: number; p: number; pm: number; f: string; at: number }> {
     const r = await this.cmd.comandoTon({ equipamentoId: pivoId, tonId, cmd: 'pivo status', rotulo: 'Estado do pivô na TON', ackOk: /^pivo_st /, silencioso: true }, user, cliente);
-    const m = /^pivo_st (\d) (\d) (-?\d+) (\S+)/.exec(r.msg);
+    const m = /^pivo_st (\d) (\d) (-?\d+) (\S+)(?: a(\d+))?/.exec(r.msg);
     if (!m) throw new Error(`resposta inesperada: ${r.msg}`);
-    const est = { e: Number(m[1]), p: Number(m[2]), pm: Number(m[3]), f: m[4] === '-' ? '' : m[4] };
+    const est = { e: Number(m[1]), p: Number(m[2]), pm: Number(m[3]), f: motivoDe(m[4]), at: Number(m[5] ?? 0) };
     this.suporte.set(tonId, { ok: true, em: Date.now() });
     const ant = this.status.get(tonId)?.s;
-    this.status.set(tonId, { s: { ...(ant ?? { d: 'D', a: 1, an: null, pc: 0, al: -1, sg: -1, bi: 0, bo: 0, c: 1 }), e: est.e, p: est.p, pm: est.pm, f: est.f } as StatusTon, em: Date.now(), n: ++this.n });
+    const base: StatusTon = ant ?? { e: 0, p: 0, f: '', d: 'D', a: 1, pm: -1, an: null, pc: 0, al: 0, bi: 0, bo: 0, at: 0, o: '' };
+    this.status.set(tonId, { s: { ...base, e: est.e, p: est.p, pm: est.pm, f: est.f, at: est.at }, em: Date.now(), n: ++this.n });
     return est;
   }
 
   /** Configuração da TON (io/tempos/enc) — só manda o que mudou desde o último envio aceito. */
   private async garantirConfig(x: ExecutarNaTon, alvo: AlvoTon) {
     const s = x.sequencia;
+    // pivo tempos <espera_pressao> <confirma_giro> <confirma_canhao> <tol_pressao> <tol_tensao> <tol_lado> <sem_posicao> <janela_giro> <ciclo_perc>
     const tempos = [
-      2,
-      clamp(s.pressurizacao_s > 0 ? s.pressurizacao_s : 120, 5, 1800),
+      clamp(s.pressurizacao_s > 0 ? s.pressurizacao_s : 60, 5, 1800),   // espera da pressão (spec: 60 s)
       clamp(s.confirma_giro_s || 30, 5, 600),
-      clamp(s.confirma_giro_s || 30, 5, 600),
-      clamp(s.confirma_bomba_s || 30, 5, 600),
-      60,
-      0,   // tolerância de queda (pressão/tensão/lado): 0 = desliga na hora (decidido 11/11)
-      300, 600,
+      5,                                                                // canhão sem BI06 por 5 s -> alerta
+      clamp(s.tol_pressao_s ?? 0, 0, 60),                               // tolerâncias: 0 = desliga na hora
+      clamp(s.tol_tensao_s ?? 0, 0, 60),
+      0,
+      30,                                                               // encoder sem leitura 30 s -> alerta
+      600,
       clamp(x.cicloPercS || 60, 5, 600),
     ];
-    const enc = await this.encoderNaTon(x.pivoId, alvo.tonId);
+    const enc = await this.encoderNaTon(x.pivoId, alvo.tonId, false);
     const cmds = [
       { cmd: `pivo io ${alvo.bo.join(' ')} ${alvo.bi.join(' ')} ${alvo.inv}`, ok: /^pivo_io_ok$/, rotulo: 'Configuração de I/O do pivô na TON' },
       { cmd: `pivo tempos ${tempos.join(' ')}`, ok: /^pivo_tempos_ok$/, rotulo: 'Tempos de confirmação do pivô na TON' },
@@ -292,23 +328,19 @@ export class PivoTonService implements OnModuleInit {
     ];
     const hash = cmds.map((c) => c.cmd).join('|');
     const st = this.statusDaTon(alvo.tonId);
-    if (this.cfgEnviada.get(alvo.tonId) === hash && (!st || st.c === 1)) return;
-    // (se a TON só aceitar a tolerância de 1 s, o hash não bate e na próxima partida tenta 0 de novo — após regravar, vale 0)
+    void st;
+    if (this.cfgEnviada.get(alvo.tonId) === hash) return;
     await x.passo('ton', 'Enviando a configuração do pivô para a TON', null);
     for (const c of cmds) {
       try {
         await this.cmd.comandoTon({ equipamentoId: x.pivoId, tonId: alvo.tonId, cmd: c.cmd, rotulo: c.rotulo, ackOk: c.ok }, x.user, x.cliente);
       } catch (e) {
-        // Firmware anterior a 11/11 só aceita tolerância de 1 s pra cima: manda 1 s (o mínimo dele) até regravar.
-        const m = e instanceof Error ? e.message : String((e as any)?.response?.message ?? e);
-        if (!c.cmd.startsWith('pivo tempos') || !/pivo_tempos_faixa/.test(m + JSON.stringify((e as any)?.response ?? ''))) throw e;
-        const t1 = tempos.map((v, i) => (i === 6 ? 1 : v));
-        const c1 = `pivo tempos ${t1.join(' ')}`;
-        await this.cmd.comandoTon({ equipamentoId: x.pivoId, tonId: alvo.tonId, cmd: c1, rotulo: `${c.rotulo} (firmware antigo: tolerância 1 s)`, ackOk: c.ok }, x.user, x.cliente);
-        cmds[1].cmd = c1;
+        const m = String((e as any)?.response?.message ?? (e as any)?.message ?? e);
+        if (/pivo_tempos_invalido|pivo_tempos_faixa/.test(m)) throw new Error('O firmware desta TON é anterior a 12/11/2026: regrave a TON para usar a sequência nova do pivô.');
+        throw e;
       }
     }
-    this.cfgEnviada.set(alvo.tonId, cmds.map((c) => c.cmd).join('|'));   // o que a TON aceitou de fato
+    this.cfgEnviada.set(alvo.tonId, hash);
     await x.passo('ton', 'Configuração aplicada na TON', true);
   }
 
@@ -339,35 +371,47 @@ export class PivoTonService implements OnModuleInit {
 
   // ------------------------------------------------------------------ plano
 
-  /** `pivo ligar <id8> <d|e> <agua> <permil> <canhao> <v|a|t> <valor>` (sem segmentos: não cabe no LoRa). */
-  montarLigar(x: ExecutarNaTon, comEncoder: boolean): { cmd: string; pararEm: Date | null; parada: string } {
+  /**
+   * `pivo ligar <id8> <d|e> <agua> <permil> <canhao> <g|t> <valor> [f <desliga_em> <liga_em>]`.
+   * A TON só enxerga GRAUS (decisão 12/11): voltas = 360 × n; ângulo final = graus até lá no sentido.
+   * Sem encoder (provisório, até termos um para teste): tempo estimado. "Sem parada" não existe.
+   * Lança Error com a mensagem para o operador quando o plano não vale.
+   */
+  montarLigar(x: ExecutarNaTon, enc: { resolucao: number | null; invertido: boolean; zero: number } | null): { cmd: string; pararEm: Date | null; parada: string } {
     const irr = x.irr;
     const dir = x.acao === 'girar_direita' ? 'd' : 'e';
     const agua = irr ? !irr.config.semAgua : true;
     const pm = !agua ? 1000 : clamp((irr?.config.percentual ?? 100) * 10, 0, 1000);
     const canhao = agua && irr?.config.canhao ? 1 : 0;
     const p = irr?.parada ?? { tipo: 'semParar' as const };
-    let tipo = 't', valor = '604800', pararEm: Date | null = null, parada = 'sem parada (7 dias no máximo)';
-    if (typeof x.restanteParadaMs === 'number') {
-      const s = Math.max(60, Math.round(x.restanteParadaMs / 1000));
-      tipo = 't'; valor = String(s); pararEm = new Date(Date.now() + s * 1000); parada = `o que faltava (${Math.round(s / 60)} min)`;
-    } else if (p.tipo === 'porTempo') {
-      const s = clamp(p.minutos * 60, 60, 7 * 86400);
-      tipo = 't'; valor = String(s); pararEm = new Date(Date.now() + s * 1000); parada = `${p.minutos} min`;
-    } else if ((p.tipo === 'porVoltas' || p.tipo === 'porAngulo') && comEncoder) {
-      tipo = p.tipo === 'porVoltas' ? 'v' : 'a';
-      valor = String(p.tipo === 'porVoltas' ? Math.round(p.voltas * 100) / 100 : Math.round(p.angulo * 10) / 10);
-      parada = p.tipo === 'porVoltas' ? `${p.voltas} volta(s) pelo encoder` : `ângulo ${p.angulo}° pelo encoder`;
-    } else if ((p.tipo === 'porVoltas' || p.tipo === 'porAngulo') && irr) {
-      // Sem encoder na TON: a TON para pelo TEMPO estimado (tempo de volta a 100 % ÷ percentímetro).
-      const ms = duracaoParadaMs(irr, x.tempoVolta100h, x.anguloAtual);
-      if (ms) {
-        const s = clamp(ms / 1000, 60, 7 * 86400);
-        tipo = 't'; valor = String(s); pararEm = new Date(Date.now() + s * 1000);
-        parada = `${p.tipo === 'porVoltas' ? `${p.voltas} volta(s)` : `ângulo ${p.angulo}°`} por tempo estimado (${Math.round(s / 60)} min, sem encoder na TON)`;
-      }
+    let tipo: 'g' | 't', valor: number, pararEm: Date | null = null, parada: string;
+    if (p.tipo === 'semParar') throw new Error('Escolha a parada (graus ou voltas): "sem parada" não existe com a sequência na TON.');
+    if (enc) {
+      if (p.tipo === 'porVoltas') { tipo = 'g'; valor = Math.round(p.voltas * 360); parada = `${p.voltas} volta(s) = ${valor}°`; }
+      else if (p.tipo === 'porAngulo') {
+        if (x.anguloAtual == null) throw new Error('Sem a posição atual do pivô: não dá para calcular os graus até o ângulo final.');
+        // Avanço (direita) = ângulo crescente na calibração; Reverso (esquerda) = decrescente.
+        let d = dir === 'd' ? ((p.angulo - x.anguloAtual) % 360 + 360) % 360 : ((x.anguloAtual - p.angulo) % 360 + 360) % 360;
+        if (d < 1) d = 360;
+        tipo = 'g'; valor = Math.round(d); parada = `até ${p.angulo}° (${valor}° a percorrer)`;
+      } else throw new Error('Parada por tempo não existe com a sequência na TON: use graus ou voltas.');
+      if (typeof x.restanteParadaMs === 'number') throw new Error('Reinício com parada herdada não existe: desligue e envie uma nova ordem.');
+    } else {
+      // PROVISÓRIO (sem encoder na TON): a TON para pelo TEMPO estimado.
+      let s: number | null = null;
+      if (typeof x.restanteParadaMs === 'number') s = Math.round(x.restanteParadaMs / 1000);
+      else if (p.tipo === 'porTempo') s = p.minutos * 60;
+      else if (irr) { const ms = duracaoParadaMs(irr, x.tempoVolta100h, x.anguloAtual); s = ms ? ms / 1000 : null; }
+      if (!s) throw new Error('Sem encoder na TON e sem como estimar o tempo da parada (0 % ou ângulo sem posição).');
+      tipo = 't'; valor = clamp(s, 60, 7 * 86400); pararEm = new Date(Date.now() + valor * 1000);
+      parada = `${p.tipo === 'porVoltas' ? `${p.voltas} volta(s)` : p.tipo === 'porAngulo' ? `ângulo ${p.angulo}°` : `${p.minutos} min`} por tempo (${Math.round(valor / 60)} min, sem encoder na TON)`;
     }
-    return { cmd: `pivo ligar ${idCurto(x.seqId)} ${dir} ${agua ? 1 : 0} ${pm} ${canhao} ${tipo} ${valor}`, pararEm, parada };
+    // Faixa do canhão (spec 6.4): a da Irrigação (liga → desliga, em graus calibrados) vira bruto do encoder.
+    // Canhão LIGADO de "liga" até "desliga" ⇒ DESLIGADO dentro de [desliga, liga].
+    let faixa = '';
+    const f = canhao && enc ? irr?.config.faixasCanhao?.[0] : undefined;
+    if (f) faixa = ` f ${brutoDoAngulo(f.desliga, enc!) % 360} ${brutoDoAngulo(f.liga, enc!) % 360}`;
+    return { cmd: `pivo ligar ${idCurto(x.seqId)} ${dir} ${agua ? 1 : 0} ${pm} ${canhao} ${tipo} ${valor}${faixa}`, pararEm, parada };
   }
 
   // ------------------------------------------------------------------ execução
@@ -379,18 +423,13 @@ export class PivoTonService implements OnModuleInit {
     const msgErro = (e: any) => e?.response?.message || e?.message || String(e);
     try {
       if (x.acao === 'desligar' || x.reiniciar) {
-        const ok = await this.desligar(x, alvo);
-        if (x.acao === 'desligar') {
-          await x.fim(ok === false ? 'falhou' : 'concluida', ok === false ? TXT_FALHA.nao_parou : undefined);
-          return;
-        }
-        if (ok === false) { await x.fim('falhou', `Reinício: ${TXT_FALHA.nao_parou} — não religou`); return; }
+        await this.desligar(x, alvo);
+        if (x.acao === 'desligar') { await x.fim('concluida'); return; }
         if (x.ctl.cancelar) { await x.fim('interrompida', 'Interrompida pelo Desligar'); return; }
         await x.passo('reinicio', 'Pivô parado — religando com as novas opções', true);
       }
       await this.garantirConfig(x, alvo);
-      const comEncoder = !!(await this.encoderNaTon(x.pivoId, t));
-      const plano = this.montarLigar(x, comEncoder);
+      const plano = this.montarLigar(x, await this.encoderNaTon(x.pivoId, t, false));
       const t0 = Date.now();
       const n0 = this.n;
       try {
@@ -406,7 +445,7 @@ export class PivoTonService implements OnModuleInit {
           irrigacao = CASE WHEN irrigacao IS NULL THEN NULL ELSE irrigacao || '{"naTon": true}'::jsonb END
         WHERE id = ${x.seqId}`;
       await x.passo('ton', `Plano enviado à TON — parada: ${plano.parada}. A TON executa a sequência sozinha`, true);
-      const limiteS = 2 + Math.max(5, x.sequencia.pressurizacao_s || 120) + Math.max(5, x.sequencia.confirma_giro_s || 30) + 90;
+      const limiteS = Math.max(5, x.sequencia.pressurizacao_s || 60) + Math.max(5, x.sequencia.confirma_giro_s || 30) + 90;
       const fimLigar = await this.acompanhar(x, alvo, t0, n0, limiteS, (e) => e === 2);
       if (fimLigar === 'cancelado') { await x.fim('interrompida', 'Interrompida pelo Desligar'); return; }
       if (fimLigar === 'ok') { await x.passo('pivo', 'Pivô irrigando — a TON acompanha as paradas e a segurança', true); await x.fim('concluida'); return; }
@@ -419,22 +458,12 @@ export class PivoTonService implements OnModuleInit {
     }
   }
 
-  /** `pivo desligar` e espera a TON parar. true = parado; false = não confirmou; null = sem retorno. */
-  private async desligar(x: ExecutarNaTon, alvo: AlvoTon): Promise<boolean | null> {
-    const t0 = Date.now();
-    const n0 = this.n;
-    const r = await this.cmd.comandoTon({ equipamentoId: x.pivoId, tonId: alvo.tonId, cmd: 'pivo desligar comando', rotulo: 'Desligar (sequência na TON)', ackOk: /^pivo_(desligando|ja_parado|ja_desligando)$/ }, x.user, x.cliente);
-    if (r.msg === 'pivo_ja_parado') {
-      await x.passo('ton', 'TON: todas as saídas do pivô desligadas', true);
-      return true;
-    }
-    await x.passo('ton', 'Desligar enviado à TON — ela executa a sequência de desligar', true);
-    const limiteS = Math.max(5, x.sequencia.confirma_bomba_s || 30) + 60 + 60;
-    const res = await this.acompanhar(x, alvo, t0, n0, limiteS, (e) => e === 0, true);
-    if (res === 'ok') { await x.passo('pivo', 'Pivô parado (confirmado pela TON)', true); return true; }
-    if (res === 'cancelado') return null;
-    await x.passo('pivo', res, false);
-    return /parada/.test(res) ? false : null;
+  /** `pivo desligar`: a TON desliga TUDO na hora (spec 6.6) e confirma no ack ("parada executada"). */
+  private async desligar(x: ExecutarNaTon, alvo: AlvoTon): Promise<void> {
+    const r = await this.cmd.comandoTon({ equipamentoId: x.pivoId, tonId: alvo.tonId, cmd: 'pivo desligar', rotulo: 'Parar (sequência na TON)', ackOk: /^pivo_(parada_executada|ja_parado)$|^already_seen$/ }, x.user, x.cliente);
+    await x.passo('ton', r.msg === 'pivo_ja_parado' ? 'TON: pivô já estava parado — saídas do pivô em LOW' : 'Parada executada pela TON: todas as saídas em LOW', true);
+    const st = this.status.get(alvo.tonId.trim());
+    if (st) st.s = { ...st.s, e: 0, p: 0, f: 'comando_operador', bo: 0, o: '' };   // até o próximo status da TON
   }
 
   /**
@@ -460,11 +489,10 @@ export class PivoTonService implements OnModuleInit {
       for (const ev of (this.eventos.get(t) ?? []).filter((v) => v.n > n0)) {
         if (vistos.has(ev)) continue;
         vistos.add(ev);
-        if (!desligando && ev.id && ev.id !== id8 && ev.t !== 'falha') continue;
+        if (!desligando && ev.id && ev.id !== id8 && ev.t !== 'parado') continue;
         if (ev.t === 'passo' && TXT_PASSO[ev.x]) await passoUmaVez(TXT_PASSO[ev.x]);
-        else if (ev.t === 'aviso') await x.passo('ton', TXT_AVISO[ev.x] ?? `Aviso da TON: ${ev.x}`, false);
-        else if (ev.t === 'falha' && ev.x !== 'nao_parou' && !desligando) return `Falha na TON: ${TXT_FALHA[ev.x] ?? ev.x}`;
-        else if (ev.t === 'falha' && ev.x === 'nao_parou') return TXT_FALHA.nao_parou;
+        else if (ev.t === 'alerta') await x.passo('ton', TXT_AVISO[ev.x] ?? `Alerta da TON: ${ev.x}`, false);
+        else if (ev.t === 'parado' && !desligando && !PARADA_NORMAL.has(ev.x)) return `Falha na TON: ${TXT_FALHA[ev.x] ?? ev.x}`;
       }
       const st = this.status.get(t);
       if (st && st.n > n0) {
@@ -472,7 +500,6 @@ export class PivoTonService implements OnModuleInit {
         const txtN = TXT_PASSO_N[st.s.p]?.(dir);
         if (txtN) await passoUmaVez(txtN);
         if (chegou(st.s.e) && (desligando || st.s.e !== 0)) {
-          if (desligando && st.s.f === 'nao_parou') return TXT_FALHA.nao_parou;
           return 'ok';
         }
         if (!desligando && st.s.e === 0 && saiuDoParado && st.s.f) return `Falha na TON: ${TXT_FALHA[st.s.f] ?? st.s.f}`;

@@ -53,7 +53,7 @@ export interface Bombeamento {
  * selo, ex.: TON no lugar do CLP) — Ligar/Girar/Canhão = `rN on`, desligar = `rN off`.
  * Padrão (false): pulsos nos botões do painel, que faz o selo.
  */
-export interface SequenciaCfg { pressurizacao_s: number; confirma_giro_s: number; confirma_bomba_s: number; comandos_mantidos: boolean }
+export interface SequenciaCfg { pressurizacao_s: number; confirma_giro_s: number; confirma_bomba_s: number; comandos_mantidos: boolean; tol_pressao_s?: number; tol_tensao_s?: number }
 export interface AcionarOpts {
   irrigacao?: unknown;
   origem?: OrigemSequencia;
@@ -84,7 +84,7 @@ const PAUSA_REINICIO_S = 10;
 interface Passo { t: string; etapa: string; msg: string; ok: boolean | null }
 type Autor = ScopedUser & { nome?: string };
 
-const SEQ_PADRAO: SequenciaCfg = { pressurizacao_s: 120, confirma_giro_s: 30, confirma_bomba_s: 30, comandos_mantidos: false };
+const SEQ_PADRAO: SequenciaCfg = { pressurizacao_s: 60, confirma_giro_s: 30, confirma_bomba_s: 30, comandos_mantidos: false };   // espera da pressão: 60 s (spec)
 const norm = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 
 type PapelComando = 'ligar' | 'valvula' | 'canhao' | 'percentimetro' | 'direita' | 'esquerda' | 'desligar';
@@ -286,6 +286,9 @@ export class PivoSequenciaService implements OnModuleInit {
         confirma_bomba_s: confirmaBomba,
         // ON/OFF na BO do Bombeamento (pulso 0 no Configurar I/O) também vale como saídas mantidas.
         comandos_mantidos: s.comandos_mantidos === true || (bomba?.origem === 'pontos' && bomba.modo === 'mantido'),
+        // Tolerâncias de queda na TON (spec: pressão e tensão separadas). Padrão 0 = desliga na hora (decisão 11/11).
+        tol_pressao_s: Number.isFinite(Number(s.tol_pressao_s)) ? Number(s.tol_pressao_s) : 0,
+        tol_tensao_s: Number.isFinite(Number(s.tol_tensao_s)) ? Number(s.tol_tensao_s) : 0,
       },
     };
   }
@@ -578,6 +581,11 @@ export class PivoSequenciaService implements OnModuleInit {
     const reiniciar = opts.reiniciar === true;
     if (reiniciar && acao === 'desligar') throw new BadRequestException('Reiniciar vale só para girar_direita | girar_esquerda.');
     const id = await this.assertPivo(pivoId, user);
+    // Sequência na TON (spec 2.1/2.2): não há nova ordem com o pivô ligado. Percentímetro e canhão se
+    // ajustam em operação; sentido, água e parada exigem Desligar e enviar a nova ordem.
+    if (reiniciar && this.ton && (await this.ton.alvo(id, user, cliente).catch(() => null))) {
+      throw new ConflictException('Com a TON executando a ordem, para mudar sentido, água ou parada é preciso Desligar e enviar a nova ordem. Percentímetro e canhão mudam sem desligar.');
+    }
     const eq = await this.prisma.equipamentos.findFirst({ where: { id }, select: { nome: true, automacao: true } });
     if (!eq?.automacao) throw new BadRequestException(`"${eq?.nome?.trim()}" não tem automação habilitada.`);
     const pts = await this.pontos(id);
