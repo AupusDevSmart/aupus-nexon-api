@@ -76,3 +76,19 @@ export function zeroParaAqui(anguloSemZero: number): number {
   const z = arred(norm180(-anguloSemZero), 1);
   return Object.is(z, -0) ? 0 : z;
 }
+
+/**
+ * A TON que lê um encoder: aquela cujo Tópico Base é o começo do tópico do encoder
+ * (`<base da TON>/<Nome>_<end>/data`). Com mais de uma candidata vale a de tópico mais longo
+ * (satélite debaixo do gateway). null = encoder sem tópico ou de TON que não existe mais.
+ */
+export function tonDoEncoder<T extends { topico: string }>(topicoEncoder: string | null | undefined, tons: T[]): T | null {
+  const t = (topicoEncoder ?? '').trim();
+  if (!t) return null;
+  let melhor: T | null = null;
+  for (const ton of tons) {
+    const base = (ton.topico ?? '').trim();
+    if (base && t.startsWith(`${base}/`) && (!melhor || base.length > melhor.topico.trim().length)) melhor = ton;
+  }
+  return melhor;
+}

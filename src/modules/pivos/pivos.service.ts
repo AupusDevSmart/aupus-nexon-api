@@ -3,7 +3,7 @@ import { Prisma, PrismaService, PermissionScopeService, ScopedUser } from '@/cor
 import { novoId26 } from '../../core/common/cliente-info';
 import { colunaTrilhaAusente } from '../logs-mqtt/logs-mqtt-filtros';
 import { PivoConfigDto, ProgramacaoPivoDto } from './dto/pivos.dto';
-import { brutoDoEncoder } from './pivo-posicao.util';
+import { brutoDoEncoder, tonDoEncoder } from './pivo-posicao.util';
 import { calibracaoVigente, desativarCalibracao } from './pivo-calibracao.repo';
 import { agoraEmSaoPaulo, lerData, validarAgenda, type Ocupado } from './pivo-agenda.util';
 import { capacidades, isGlobal, MSG_SOMENTE_LEITURA, papelCanonico } from '../../core/modules/auth/papeis';
@@ -215,8 +215,8 @@ export class PivosService {
   async opcoesEncoder(equipamentoId: string, user?: ScopedUser) {
     const eq = await this.carregarEquipamento(equipamentoId, user);
     if (!eq.unidade_id) return [];
-    const rows = await this.prisma.$queryRaw<Array<{ id: string; nome: string; dados: any; ts: Date | null }>>`
-      SELECT TRIM(e.id) AS id, e.nome, d.dados, d.timestamp_dados AS ts
+    const rows = await this.prisma.$queryRaw<Array<{ id: string; nome: string; topico: string | null; dados: any; ts: Date | null }>>`
+      SELECT TRIM(e.id) AS id, e.nome, NULLIF(TRIM(e.topico_mqtt), '') AS topico, d.dados, d.timestamp_dados AS ts
       FROM equipamentos e
       LEFT JOIN tipos_equipamentos te ON te.id = e.tipo_equipamento_id
       LEFT JOIN LATERAL (
@@ -225,8 +225,25 @@ export class PivosService {
       ) d ON true
       WHERE e.unidade_id = ${eq.unidade_id}::bpchar AND e.deleted_at IS NULL
         AND (te.codigo = 'ENCODER' OR UPPER(TRIM(e.tipo_equipamento)) = 'ENCODER')
-      ORDER BY e.nome`;
-    return rows.map((r) => ({ id: r.id, nome: r.nome?.trim() ?? r.id, bruto: brutoDoEncoder(r.dados), lido_em: r.ts }));
+      ORDER BY e.nome, e.created_at DESC`;
+    // De qual TON é cada encoder (o tópico dele fica debaixo do tópico da TON) e se é a TON do
+    // pivô: dois encoders com o mesmo nome (TON trocada, diagrama antigo) ficavam iguais na lista.
+    const tons = await this.prisma.$queryRaw<Array<{ id: string; nome: string; topico: string; removida: boolean; do_pivo: boolean }>>`
+      SELECT TRIM(t.id) AS id, TRIM(t.nome) AS nome, TRIM(t.topico_mqtt) AS topico, t.deleted_at IS NOT NULL AS removida,
+             EXISTS (SELECT 1 FROM ton_bo b JOIN equipamento_pontos p ON p.id = b.equipamento_ponto_id
+                      WHERE b.ton_id = t.id AND b.deleted_at IS NULL AND b.ativo
+                        AND p.equipamento_id = ${eq.id}::bpchar AND p.deleted_at IS NULL AND p.ativo) AS do_pivo
+      FROM equipamentos t
+      WHERE COALESCE(TRIM(t.topico_mqtt), '') <> ''
+        AND (t.unidade_id = ${eq.unidade_id}::bpchar OR t.id IN (
+          SELECT b.ton_id FROM ton_bo b JOIN equipamento_pontos p ON p.id = b.equipamento_ponto_id WHERE p.equipamento_id = ${eq.id}::bpchar))`.catch(() => []);
+    return rows.map((r) => {
+      const ton = tonDoEncoder(r.topico, tons);
+      return {
+        id: r.id, nome: r.nome?.trim() ?? r.id, bruto: brutoDoEncoder(r.dados), lido_em: r.ts,
+        ton_nome: ton?.nome ?? null, ton_removida: ton?.removida ?? false, na_ton_do_pivo: !!ton?.do_pivo && !ton.removida,
+      };
+    });
   }
 
   // ==========================================================================
