@@ -181,6 +181,14 @@ export class PivoTonService implements OnModuleInit {
 
   /** Status da TON no formato de 12/11 (o, i, et, p, an, gp, al, pm, mo, at, d, a, bo) → StatusTon. */
   static normalizar(d: any): StatusTon | null {
+    // Formato posicional (firmware de 12/11, cabe no MTU do LoRa): {"s":"et,p,i,bo,an,gp,al,pm,mo,at,d,a,o"}
+    if (d && typeof d === 'object' && typeof d.s === 'string') {
+      const v = d.s.split(',');
+      if (v.length < 13 || v[0] === '' || isNaN(Number(v[0]))) return null;
+      const n = (i: number) => Number(v[i]) || 0;
+      d = { et: n(0), p: n(1), i: n(2), bo: n(3), an: v[4] === '' ? null : Number(v[4]), gp: n(5), al: n(6),
+        pm: v[7] === '' ? -1 : Number(v[7]), mo: n(8), at: n(9), d: v[10] || 'D', a: v[11] === '' ? 1 : Number(v[11]), o: v.slice(12).join(',') };
+    }
     if (!d || typeof d !== 'object' || typeof d.et !== 'number') return null;
     return {
       e: d.et, p: Number(d.p) || 0, f: motivoDe(d.mo), d: String(d.d ?? 'D'), a: Number(d.a ?? 1), pm: Number(d.pm ?? -1),

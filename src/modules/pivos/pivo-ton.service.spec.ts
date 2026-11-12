@@ -209,4 +209,12 @@ describe('PivoTonService', () => {
     expect(visto).toEqual([['T', 'queda_pressao', true]]);
     expect(svc.statusDaTon('T')!.motivo_texto).toBe('Queda de pressão (BI01)');
   });
+
+  it('normalizar: formato posicional do LoRa (s = et,p,i,bo,an,gp,al,pm,mo,at,d,a,o) = mesmo que o JSON com chaves', () => {
+    const a = PivoTonService.normalizar({ s: '2,0,63,127,359,90,360,500,7,2,E,1,z5dfmnz1' })!;
+    expect(a).toEqual(PivoTonService.normalizar({ o: 'z5dfmnz1', i: 63, et: 2, p: 0, an: 359, gp: 90, al: 360, pm: 500, mo: 7, at: 2, d: 'E', a: 1, bo: 127 }));
+    const b = PivoTonService.normalizar({ s: '0,0,16,0,,0,0,-1,11,0,D,1,' })!;
+    expect(b).toMatchObject({ e: 0, an: null, pm: -1, f: 'falha_reles', o: '', bi: 16 });
+    expect(PivoTonService.normalizar({ s: 'lixo' })).toBeNull();
+  });
 });
