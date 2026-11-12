@@ -400,12 +400,22 @@ export interface CameraRtsp {
   canal: number;
 }
 
-/** URL RTSP com usuário e senha codificados. subtype 0 = principal, 1 = secundário (Intelbras/Dahua). */
+/** Câmeras Wi-Fi do app Yoosee (Gwell): mesmo firmware sob várias marcas. */
+const FABRICANTES_YOOSEE = new Set(['yoosee', 'gwell', 'yyp2p']);
+
+/**
+ * URL RTSP com usuário e senha codificados. subtype 0 = principal, 1 = secundário.
+ * Caminho por fabricante: Intelbras/Dahua (padrão), Hikvision e Yoosee (`/onvif1` e `/onvif2`).
+ */
 export function montarRtsp(c: CameraRtsp, senha: string, subtype: 0 | 1): string {
   const cred = `${encodeURIComponent(c.usuario)}:${encodeURIComponent(senha)}`;
   const host = c.ip.includes(':') && !c.ip.startsWith('[') ? `[${c.ip}]` : c.ip;
   const canal = Math.max(1, c.canal || 1);
-  if ((c.fabricante ?? '').toLowerCase() === 'hikvision') {
+  const fabricante = (c.fabricante ?? '').trim().toLowerCase();
+  if (FABRICANTES_YOOSEE.has(fabricante)) {
+    return `rtsp://${cred}@${host}:${c.porta_rtsp}/onvif${subtype + 1}`;
+  }
+  if (fabricante === 'hikvision') {
     return `rtsp://${cred}@${host}:${c.porta_rtsp}/Streaming/Channels/${canal}0${subtype + 1}`;
   }
   return `rtsp://${cred}@${host}:${c.porta_rtsp}/cam/realmonitor?channel=${canal}&subtype=${subtype}`;

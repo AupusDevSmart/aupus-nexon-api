@@ -217,6 +217,8 @@ describe('cameras-regras · agente e mídia', () => {
     expect(montarRtsp(cam, 'p@ss:w/rd', 0)).toBe('rtsp://admin:p%40ss%3Aw%2Frd@192.168.0.108:554/cam/realmonitor?channel=1&subtype=0');
     expect(montarRtsp(cam, 'x', 1)).toContain('subtype=1');
     expect(montarRtsp({ ...cam, fabricante: 'hikvision', canal: 2 }, 'x', 1)).toContain('/Streaming/Channels/202');
+    expect(montarRtsp({ ...cam, fabricante: 'Yoosee ' }, 'x', 0)).toBe('rtsp://admin:x@192.168.0.108:554/onvif1');
+    expect(montarRtsp({ ...cam, fabricante: 'yoosee' }, 'x', 1)).toBe('rtsp://admin:x@192.168.0.108:554/onvif2');
   });
 
   it('caminho do stream e token da query', () => {
