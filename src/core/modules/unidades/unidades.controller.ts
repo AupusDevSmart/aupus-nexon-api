@@ -295,6 +295,23 @@ export class UnidadesController {
     }
   }
 
+  @Get(':id/capacidades')
+  @Permissions('unidades.view')
+  @ApiOperation({
+    summary: 'Capacidades da instalação',
+    description:
+      'O que existe na instalação (geração, medição de entrada/carga, rede, grandezas elétricas, demanda contratada), ' +
+      'com fonte e estado de comunicação. "Existe" = há fonte de dados configurada, não símbolo no unifilar.',
+  })
+  @ApiParam({ name: 'id', description: 'ID da unidade' })
+  @ApiResponse({ status: HttpStatus.OK, description: 'Capacidades da unidade' })
+  @ApiResponse({ status: HttpStatus.NOT_FOUND, description: 'Unidade não encontrada' })
+  @UsePlantaScope({ entity: 'unidade' })
+  async getCapacidades(@Param('id') id: string, @CurrentUser() user: any) {
+    await this.scope.assertEntityInScope('unidade', id, user);
+    return this.unidadesService.getCapacidades(id);
+  }
+
   @Get(':id/estatisticas')
   @Permissions('unidades.view')
   @ApiOperation({

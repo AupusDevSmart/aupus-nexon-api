@@ -26,7 +26,7 @@ describe('Escopo por planta nas rotas de unidade e planta', () => {
   let usuario: any;
   const fn = () => jest.fn(async (..._a: any[]) => ({ ok: true, data: [], pagination: { total: 0 } }));
   const unidSvc: Record<string, jest.Mock> = {
-    create: fn(), update: fn(), remove: fn(), findOne: fn(), findByPlanta: fn(), findAll: fn(), getEstatisticas: fn(),
+    create: fn(), update: fn(), remove: fn(), findOne: fn(), findByPlanta: fn(), findAll: fn(), getEstatisticas: fn(), getCapacidades: fn(),
   };
   const equipSvc: Record<string, jest.Mock> = { findByUnidade: fn(), getEstatisticasUnidade: fn() };
   const anexosUnidSvc: Record<string, jest.Mock> = { uploadAnexo: fn(), listarAnexos: fn() };
@@ -71,6 +71,7 @@ describe('Escopo por planta nas rotas de unidade e planta', () => {
     ['put', '/unidades/U2'],
     ['delete', '/unidades/U2'],
     ['get', '/unidades/U2/estatisticas'],
+    ['get', '/unidades/U2/capacidades'],
     ['get', '/unidades/U2/equipamentos'],
     ['get', '/unidades/U2/equipamentos/estatisticas'],
     ['get', '/unidades/planta/P2'],

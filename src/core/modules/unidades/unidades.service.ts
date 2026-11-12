@@ -1,6 +1,7 @@
 import { Injectable, Logger, NotFoundException, BadRequestException, ForbiddenException, ConflictException, HttpException } from '@nestjs/common';
 import { apagarComDescendentes, compartilhadosNaCascata, descreverCompartilhados } from '../sincronizacao/arvore';
 import { PrismaService } from '../../prisma/prisma.service';
+import { buscarCapacidades, type CapacidadesUnidade } from './capacidades';
 import { CreateUnidadeDto } from './dto/create-unidade.dto';
 import { UpdateUnidadeDto } from './dto/update-unidade.dto';
 import { FindAllUnidadesDto } from './dto/find-all-unidades.dto';
@@ -580,6 +581,20 @@ export class UnidadesService {
       this.logger.error(`Erro ao excluir a instalação ${id}`, error instanceof Error ? error.stack : String(error));
       throw error;
     }
+  }
+
+  /**
+   * Capacidades da instalação (NEXON-110): Geração, Carga, Rede, Grandezas elétricas e demanda
+   * contratada que existem de verdade, com estado de comunicação. Regra em `capacidades.ts`.
+   */
+  async getCapacidades(unidadeId: string): Promise<CapacidadesUnidade> {
+    const unidade = await this.prisma.unidades.findFirst({
+      where: { id: unidadeId, deleted_at: null },
+      select: { id: true, demanda_carga: true, demanda_geracao: true },
+    });
+    if (!unidade) throw new NotFoundException(`Unidade com ID ${unidadeId} não encontrada`);
+    const num = (v: unknown) => (v == null ? null : Number(v));
+    return buscarCapacidades(this.prisma, unidade.id, num(unidade.demanda_carga), num(unidade.demanda_geracao));
   }
 
   async getEstatisticas(unidadeId: string, user?: ScopedUser) {
