@@ -44,9 +44,7 @@ function montar(pontos: any[], resposta: (cmd: string) => string | Error) {
 
 const respostaPadrao = (c: string) =>
   c === 'pivo status' ? 'pivo_st 0 0 -1 nenhuma a0 r00 i0 x0 o00'
-  : c.startsWith('pivo io') ? 'pivo_io_ok'
-  : c.startsWith('pivo tempos') ? 'pivo_tempos_ok'
-  : c.startsWith('pivo enc') ? 'pivo_enc_ok'
+  : c.startsWith('pivo cfg') ? 'pivo_cfg_ok k0000'
   : c.startsWith('pivo ligar') ? 'pivo_ligando'
   : c.startsWith('pivo desligar') ? 'pivo_parada_executada'
   : 'unknown_cmd';
@@ -124,15 +122,31 @@ describe('PivoTonService', () => {
       svc.receberStatus('T', ST(2));
     }, 300);
     await svc.executar(e.x as any, alvo);
-    expect(cmds).toContain('pivo tempos 10 30 5 0 0 0 30 600 60');
-    expect(cmds).toContain('pivo enc 0 0 0');
+    expect(cmds).toContain('pivo cfg 123456 123456 000010 10 30 5 0 0 0 30 600 60 0');   // um comando só
     expect(cmds).toContain(`pivo ligar ${idCurto('SEQ00000000000000000000AAAA')} d 1 600 0 t 1800`);
     expect(e.passos.filter((m) => /Bombeamento ON/.test(m))).toHaveLength(1);
     expect(e.fins).toEqual([['concluida', undefined]]);
     const e2 = exec('SEQ00000000000000000000BBBB', 'girar_direita', IRR({ tipo: 'porTempo', minutos: 30 }));
     setTimeout(() => svc.receberStatus('T', ST(2)), 300);
     await svc.executar(e2.x as any, alvo);
-    expect(cmds.filter((c) => /^pivo io/.test(c))).toHaveLength(1);   // config igual: não reenvia
+    expect(cmds.filter((c) => /^pivo cfg/.test(c))).toHaveLength(1);   // config igual: não reenvia
+  });
+
+  it('CRC16 igual ao da TON (glue pivo.cpp, conferido no simulador do firmware)', () => {
+    const { crc16 } = require('./pivo-ton.service');
+    expect(crc16('123456 123456 000000 60 30 5 0 0 0 30 600 60 0')).toBe('FAED');
+  });
+
+  it('config: a TON já tem a mesma (CRC no ack do status) → nada é enviado', async () => {
+    const args = '123456 123456 000010 10 30 5 0 0 0 30 600 60 0';
+    const { crc16 } = require('./pivo-ton.service');
+    const { svc, cmds } = montar(LAB, (c) => (c === 'pivo status' ? `pivo_st 0 0 -1 nenhuma a0 k${crc16(args)} r00 i0 x0 o00` : respostaPadrao(c)));
+    const alvo = (await svc.alvo('PIV'))!;   // o alvo() pergunta o status e guarda o CRC
+    const e = exec('SEQ00000000000000000000HHHH', 'girar_direita', IRR({ tipo: 'porTempo', minutos: 30 }));
+    setTimeout(() => svc.receberStatus('T', ST(2)), 300);
+    await svc.executar(e.x as any, alvo);
+    expect(cmds.filter((c) => /^pivo cfg/.test(c))).toHaveLength(0);
+    expect(cmds.filter((c) => /^pivo ligar/.test(c))).toHaveLength(1);
   });
 
   it('satélite (sem eventos): os passos saem do código de passo do status', async () => {

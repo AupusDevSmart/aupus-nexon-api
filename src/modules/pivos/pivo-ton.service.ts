@@ -124,6 +124,16 @@ export function comandoEnc(enc: { resolucao: number | null; invertido?: boolean;
   return `pivo enc ${enc.resolucao} 0 0`;
 }
 
+/** CRC16 Modbus de um texto — o mesmo que a TON calcula sobre os argumentos do `pivo cfg`. */
+export function crc16(txt: string): string {
+  let c = 0xffff;
+  for (const b of Buffer.from(txt, 'utf8')) {
+    c ^= b;
+    for (let i = 0; i < 8; i++) c = c & 1 ? (c >>> 1) ^ 0xa001 : c >>> 1;
+  }
+  return c.toString(16).toUpperCase().padStart(4, '0');
+}
+
 /** Ângulo calibrado (azimute) → contagem bruta do encoder (inverso de anguloDoEncoder). */
 export function brutoDoAngulo(angulo: number, enc: { resolucao: number | null; invertido: boolean; zero: number }): number {
   const res = enc.resolucao || 360;
@@ -147,6 +157,8 @@ export class PivoTonService implements OnModuleInit {
   private n = 0;
   private readonly suporte = new Map<string, { ok: boolean; em: number }>();
   private readonly cfgEnviada = new Map<string, string>();
+  /** CRC da configuração que a TON informou ter (ack do `pivo status`: "k<crc>"). */
+  private readonly cfgNaTon = new Map<string, string>();
   /** A TON parou sozinha (parada programada, falha, segurança): quem registra na trilha do pivô. */
   aoPararSozinho?: (tonId: string, motivo: string, falha: boolean, id: string) => void;
   /** Sequência acompanhada agora por TON (o evento de parada dela não é "sozinho"). */
@@ -295,10 +307,11 @@ export class PivoTonService implements OnModuleInit {
   /** `pivo status` → ack "pivo_st <etapa> <passo> <permil> <motivo> a<alertas> …" (chega mesmo pelo LoRa). */
   async lerEstadoPeloAck(pivoId: string, tonId: string, user?: Autor, cliente?: ClienteInfo): Promise<{ e: number; p: number; pm: number; f: string; at: number }> {
     const r = await this.cmd.comandoTon({ equipamentoId: pivoId, tonId, cmd: 'pivo status', rotulo: 'Estado do pivô na TON', ackOk: /^pivo_st /, silencioso: true }, user, cliente);
-    const m = /^pivo_st (\d) (\d) (-?\d+) (\S+)(?: a(\d+))?/.exec(r.msg);
+    const m = /^pivo_st (\d) (\d) (-?\d+) (\S+)(?: a(\d+))?(?: k([0-9A-F]{4}))?/.exec(r.msg);
     if (!m) throw new Error(`resposta inesperada: ${r.msg}`);
     const est = { e: Number(m[1]), p: Number(m[2]), pm: Number(m[3]), f: motivoDe(m[4]), at: Number(m[5] ?? 0) };
     this.suporte.set(tonId, { ok: true, em: Date.now() });
+    if (m[6]) this.cfgNaTon.set(tonId.trim(), m[6]);
     const ant = this.status.get(tonId)?.s;
     const base: StatusTon = ant ?? { e: 0, p: 0, f: '', d: 'D', a: 1, pm: -1, an: null, pc: 0, al: 0, bi: 0, bo: 0, at: 0, o: '' };
     this.status.set(tonId, { s: { ...base, e: est.e, p: est.p, pm: est.pm, f: est.f, at: est.at }, em: Date.now(), n: ++this.n });
@@ -321,26 +334,23 @@ export class PivoTonService implements OnModuleInit {
       clamp(x.cicloPercS || 60, 5, 600),
     ];
     const enc = await this.encoderNaTon(x.pivoId, alvo.tonId, false);
-    const cmds = [
-      { cmd: `pivo io ${alvo.bo.join(' ')} ${alvo.bi.join(' ')} ${alvo.inv}`, ok: /^pivo_io_ok$/, rotulo: 'Configuração de I/O do pivô na TON' },
-      { cmd: `pivo tempos ${tempos.join(' ')}`, ok: /^pivo_tempos_ok$/, rotulo: 'Tempos de confirmação do pivô na TON' },
-      { cmd: enc ? comandoEnc(enc) : 'pivo enc 0 0 0', ok: /^pivo_enc_ok$/, rotulo: 'Encoder do pivô na TON' },
-    ];
-    const hash = cmds.map((c) => c.cmd).join('|');
-    const st = this.statusDaTon(alvo.tonId);
-    void st;
-    if (this.cfgEnviada.get(alvo.tonId) === hash) return;
+    // Um comando só (cabe no LoRa): BOs e BIs em 6 dígitos, polaridade, 9 tempos e a resolução do encoder.
+    const args = `${alvo.bo.join('')} ${alvo.bi.join('')} ${alvo.inv} ${tempos.join(' ')} ${enc?.resolucao ?? 0}`;
+    const t = alvo.tonId.trim();
+    if (this.cfgEnviada.get(t) === args) return;
+    // A TON já tem esta config (CRC do ack do "pivo status", feito no alvo()): nada a mandar.
+    if (this.cfgNaTon.get(t) === crc16(args)) { this.cfgEnviada.set(t, args); return; }
     await x.passo('ton', 'Enviando a configuração do pivô para a TON', null);
-    for (const c of cmds) {
-      try {
-        await this.cmd.comandoTon({ equipamentoId: x.pivoId, tonId: alvo.tonId, cmd: c.cmd, rotulo: c.rotulo, ackOk: c.ok }, x.user, x.cliente);
-      } catch (e) {
-        const m = String((e as any)?.response?.message ?? (e as any)?.message ?? e);
-        if (/pivo_tempos_invalido|pivo_tempos_faixa/.test(m)) throw new Error('O firmware desta TON é anterior a 12/11/2026: regrave a TON para usar a sequência nova do pivô.');
-        throw e;
-      }
+    try {
+      const r = await this.cmd.comandoTon({ equipamentoId: x.pivoId, tonId: t, cmd: `pivo cfg ${args}`, rotulo: 'Configuração do pivô na TON', ackOk: /^pivo_cfg_ok/ }, x.user, x.cliente);
+      const k = /k([0-9A-F]{4})/.exec(r.msg)?.[1];
+      if (k) this.cfgNaTon.set(t, k);
+    } catch (e) {
+      const m = String((e as any)?.response?.message ?? (e as any)?.message ?? e);
+      if (/pivo_cmd_desconhecido|pivo_cfg_invalido|pivo_tempos/.test(m)) throw new Error('O firmware desta TON é anterior a 12/11/2026: regrave a TON para usar a sequência nova do pivô.');
+      throw e;
     }
-    this.cfgEnviada.set(alvo.tonId, hash);
+    this.cfgEnviada.set(t, args);
     await x.passo('ton', 'Configuração aplicada na TON', true);
   }
 
@@ -350,6 +360,7 @@ export class PivoTonService implements OnModuleInit {
    */
   esquecerConfig(tonId: string) {
     this.cfgEnviada.delete(tonId.trim());
+    this.cfgNaTon.delete(tonId.trim());
   }
 
   /**
