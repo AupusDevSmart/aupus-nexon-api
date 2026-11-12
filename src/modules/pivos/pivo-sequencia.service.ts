@@ -140,7 +140,7 @@ const MSG_CANHAO: Record<ResCanhao, (ligar: boolean, s: number) => string> = {
   sem_status: () => 'Canhão: sem o status Canhao_ligado o NexON não comanda (o botão alterna)',
   sem_leitura: () => 'Canhão: sem leitura do Canhao_ligado — não comandado',
   nao_confirmou: (l, s) => `Canhão não confirmou ${l ? 'ligado' : 'desligado'} em ${s}s`,
-  enviado: (l) => `Canhão final ${l ? 'ligado' : 'desligado'} (saída mantida, sem status para confirmar)`,
+  enviado: (l) => `Canhão final ${l ? 'ligado' : 'desligado'} (comando aplicado na saída; a confirmação fica com a TON)`,
 };
 
 /** Posição do pivô para a tela e para a parada por ângulo (ver posicao()). */
@@ -203,6 +203,14 @@ export class PivoSequenciaService implements OnModuleInit {
         VALUES (${novoId26()}, ${r.id}::bpchar, 'desligar', 'concluida', 'parada', ${JSON.stringify(passos)}::jsonb,
           ${falha ? txt : null}, now())`.catch((e) => this.logger.warn(`[pivo-ton] encerrar irrigação de ${r.id}: ${e?.message ?? e}`));
     }
+  }
+
+  /** Canhão ligado: com a sequência na TON, a saída BO06 que ela comandou; senão a BI Canhao_ligado. */
+  private async canhaoLigado(pts: { cmd: Partial<Record<PapelComando, string>>; st: Partial<Record<PapelStatus, MapaBi>> }): Promise<0 | 1 | null> {
+    const m = this.ton && pts.cmd.canhao ? await this.boDoPonto(pts.cmd.canhao) : null;
+    const st = m && this.ton?.ligadaNaTon(m.ton_id) ? this.ton.statusDaTon(m.ton_id) : null;
+    if (st) return (st.bo & 32) ? 1 : 0;
+    return this.lerStatus(pts.st.canhao);
   }
 
   /** Estado da sequência na TON do pivô (status/ack mais recente), para a ficha. */
@@ -524,7 +532,8 @@ export class PivoSequenciaService implements OnModuleInit {
           parado: !!(await this.boDoPonto(pts.cmd.percentimetro)) || (!!cfg.bombeamento && !!cfg.bombeamento.bi_confirma) },
         comandos_mantidos: cfg.sequencia.comandos_mantidos,
         // Canhão: comandável só com o ponto Canhao (BO) e o status Canhao_ligado (BI)
-        canhao: { comando: !!pts.cmd.canhao, tem_status: !!pts.st.canhao, ligado: await this.lerStatus(pts.st.canhao) },
+        // Com a sequência na TON, "ligado" = o que a TON comandou (BO06 no status dela); senão, a BI.
+        canhao: { comando: !!pts.cmd.canhao, tem_status: !!pts.st.canhao, ligado: await this.canhaoLigado(pts) },
         permissivo: await this.lerStatus(pts.st.permissivo),
         status: st,
         lido_em: await this.lidoEmPivo(pts),
@@ -1064,10 +1073,16 @@ export class PivoSequenciaService implements OnModuleInit {
     // Pivô ligado pela sequência na TON: o canhão é dela ("pivo canhao"); o status só confirma.
     const mCan = this.ton ? await this.boDoPonto(pts.cmd.canhao) : null;
     if (mCan && this.ton?.ligadaNaTon(mCan.ton_id)) {
-      await this.cmd.comandoTon({ equipamentoId: id, tonId: mCan.ton_id, cmd: `pivo canhao ${alvo}`, rotulo: ligar ? 'Canhão ligado' : 'Canhão desligado', ackOk: /^pivo_canhao_(on|off)$/ }, user, cliente);
-      if (!pts.st.canhao) return 'enviado';
-      const okT = await this.esperar(async () => (await this.lerStatus(pts.st.canhao)) === alvo, segundos, ctl);
-      return okT ? 'ok' : 'nao_confirmou';
+      try {
+        await this.cmd.comandoTon({ equipamentoId: id, tonId: mCan.ton_id, cmd: `pivo canhao ${alvo}`, rotulo: ligar ? 'Canhão ligado' : 'Canhão desligado', ackOk: /^pivo_canhao_(on|off)$/ }, user, cliente);
+      } catch (e: any) {
+        // "já ligado/desligado" na TON = o pedido já vale (firmware anterior a 12/11 recusava em vez de repetir)
+        const m = String(e?.response?.message ?? e?.message ?? '');
+        if (!/pivo_canhao_ja_(ligado|desligado)/.test(m)) throw e;
+      }
+      this.ton.marcarCanhao(mCan.ton_id, ligar);
+      // A TON confere a BI06 e avisa se o canhão não confirmar; aqui não espera (BI presa não trava a ficha).
+      return 'enviado';
     }
     if (await this.mantido(id)) {
       // Saída mantida: a BO É o canhão (on = ligado). Manda SEMPRE o nível pedido; o status, se
@@ -1097,7 +1112,10 @@ export class PivoSequenciaService implements OnModuleInit {
     if (!pts.cmd.canhao) throw new BadRequestException('O pivô não tem o ponto Canhao ligado a uma BO (Topologia IoT → Configurar I/O).');
     const mant = await this.mantido(id);
     if (!pts.st.canhao && !mant) throw new BadRequestException('Ligue o status Canhao_ligado a uma BI: sem ele o NexON não comanda o canhão (o botão do painel alterna).');
-    if (pts.st.canhao) {
+    // Sequência na TON: o estado do canhão é o que a TON comandou (BO06); a BI só confirma (lá na TON).
+    const mTon = this.ton ? await this.boDoPonto(pts.cmd.canhao) : null;
+    const naTon = !!(mTon && this.ton?.ligadaNaTon(mTon.ton_id));
+    if (pts.st.canhao && !naTon) {
       const atual = await this.lerStatus(pts.st.canhao);
       if (atual === null && !mant) throw new ConflictException('Sem leitura do Canhao_ligado — não dá para saber o estado do canhão.');
       if (atual === (ligar ? 1 : 0)) throw new ConflictException(ligar ? 'O canhão já está ligado.' : 'O canhão já está desligado.');

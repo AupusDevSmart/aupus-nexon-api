@@ -187,6 +187,13 @@ export class PivoTonService implements OnModuleInit {
     return { ...r.s, estado: ESTADO[r.s.e] ?? '?', em: new Date(r.em) };
   }
 
+  /** Canhão comandado com sucesso: atualiza o bit da BO06 no status em memória até o próximo status da TON. */
+  marcarCanhao(tonId: string, ligado: boolean) {
+    const r = this.status.get(tonId.trim());
+    if (!r) return;
+    r.s = { ...r.s, bo: ligado ? (r.s.bo | 32) : (r.s.bo & ~32) };
+  }
+
   /** A TON está com a sequência local ligada (ligando/irrigando/desligando)? */
   ligadaNaTon(tonId: string): boolean {
     const s = this.statusDaTon(tonId);
