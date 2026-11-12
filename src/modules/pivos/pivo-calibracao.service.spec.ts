@@ -20,6 +20,7 @@ interface Cenario {
   anterior?: any;
   ack?: (cmd: string) => string | Error;
   semTabela?: boolean;
+  pontos?: Array<{ nome: string; ton_id: string | null; ton_nome: string | null; topico: string | null }>;
   bancoFalha?: boolean;
   alvo?: { tonId: string } | null;
   encoderNaTon?: boolean;
@@ -47,6 +48,8 @@ function montar(c: Cenario = {}) {
     $queryRaw: jest.fn(async (s: TemplateStringsArray) => {
       const q = s.join('?');
       if (q.includes('to_regclass')) return [{ ok: !c.semTabela }];
+      if (q.includes('FROM equipamento_pontos')) return c.pontos ?? [];
+      if (q.includes('AS enc_nome')) return [{ ton_nome: 'TON4v2', enc_nome: 'Emulador' }];
       if (q.includes('FROM calibracao_angulo') && q.includes('NOT c.ativa')) return c.anterior ? [c.anterior] : [];
       if (q.includes('FROM calibracao_angulo')) return c.vigente ? [c.vigente] : [];
       if (q.includes('FROM equipamentos e')) return [{ nome: 'Pivo 11', unidade_id: 'un-1', unidade_nome: 'Pivos 1,2,3,11', planta_id: 'pl-1', planta_nome: 'Chimarrão' }];
@@ -73,6 +76,7 @@ function montar(c: Cenario = {}) {
   };
   const ton: any = {
     alvo: jest.fn(async () => (c.alvo === undefined ? { tonId: 'ton-1' } : c.alvo)),
+    motivoSemSuporte: jest.fn(() => 'TON "TON4v2" nao respondeu ao comando pivo status dentro do timeout.'),
     encoderNaTon: jest.fn(async () => (c.encoderNaTon === false ? null : encoder)),
     esquecerConfig: jest.fn(),
   };
@@ -122,6 +126,38 @@ describe('calibração do ângulo do pivô (serviço)', () => {
     it('pivô sem encoder na Configuração', async () => {
       const { svc } = montar({ encoder: null });
       await expect(svc.lerEncoder('pivo-11', ADMIN)).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    describe('sem TON para calibrar: a mensagem diz qual é o problema', () => {
+      const P = (nome: string, ton: string | null, topico: string | null = 'AUPUS/BANCADA/satellite/AA') =>
+        ({ nome, ton_id: ton, ton_nome: ton ? `TON-${ton}` : null, topico: ton ? topico : null });
+      const tudoNa = (ton: string, topico: string | null) => ['Girar_direita', 'Girar_esquerda', 'Percentimetro', 'Bombeamento'].map((n) => P(n, ton, topico));
+
+      it('TON do pivô sem Tópico Base (caso do PIV-01 da bancada)', async () => {
+        const { svc, cmds } = montar({ alvo: null, pontos: tudoNa('4v2', null) });
+        await expect(svc.lerEncoder('pivo-11', ADMIN)).rejects.toThrow(/A TON "TON-4v2" do pivô está sem Tópico Base/);
+        expect(cmds).toEqual([]);
+      });
+
+      it('comandos de giro sem saída da TON', async () => {
+        const { svc } = montar({ alvo: null, pontos: [P('Girar_direita', null), P('Girar_esquerda', null), P('Percentimetro', '4')] });
+        await expect(svc.lerEncoder('pivo-11', ADMIN)).rejects.toThrow(/não estão todos ligados a uma saída da TON/);
+      });
+
+      it('comandos em duas TONs', async () => {
+        const { svc } = montar({ alvo: null, pontos: [P('Girar_direita', 'A'), P('Girar_esquerda', 'A'), P('Percentimetro', 'B')] });
+        await expect(svc.lerEncoder('pivo-11', ADMIN)).rejects.toThrow(/em mais de uma TON \(TON-A, TON-B\)/);
+      });
+
+      it('TON com tópico que não respondeu', async () => {
+        const { svc } = montar({ alvo: null, pontos: tudoNa('4', 'AUPUS/X') });
+        await expect(svc.lerEncoder('pivo-11', ADMIN)).rejects.toThrow(/A TON "TON-4" do pivô não respondeu ao NexON \(TON "TON4v2" nao respondeu/);
+      });
+    });
+
+    it('encoder de outra TON: diz qual encoder e qual TON', async () => {
+      const { svc } = montar({ encoderNaTon: false });
+      await expect(svc.lerEncoder('pivo-11', ADMIN)).rejects.toThrow(/O encoder "Emulador" não está no RS485 da TON "TON4v2" do pivô/);
     });
 
     it('encoder fora do RS485 da TON do pivô', async () => {

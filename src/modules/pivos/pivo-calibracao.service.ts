@@ -341,13 +341,49 @@ export class PivoCalibracaoService {
   /** TON que executa o pivô, com o encoder no RS485 dela (é quem lê e quem guarda a calibração). */
   private async tonDoEncoder(id: string, user?: Autor, cliente?: ClienteInfo): Promise<string> {
     const alvo = await this.ton.alvo(id, user, cliente);
-    if (!alvo) {
-      throw new ConflictException('Este pivô não está numa TON com a sequência local: ligue giro e percentímetro na mesma TON (Topologia) e grave o firmware');
-    }
-    if (!(await this.ton.encoderNaTon(id, alvo.tonId, false))) {
-      throw new ConflictException('O encoder escolhido não está no RS485 da TON deste pivô');
-    }
+    if (!alvo) throw new ConflictException(await this.porQueSemTon(id));
+    if (!(await this.ton.encoderNaTon(id, alvo.tonId, false))) throw new ConflictException(await this.porQueEncoderFora(id, alvo.tonId));
     return alvo.tonId;
+  }
+
+  /**
+   * O pivô não tem TON que execute a calibração: diz QUAL é o problema (comandos sem BO, em mais
+   * de uma TON, TON sem tópico, TON que não respondeu) em vez de uma frase genérica.
+   */
+  private async porQueSemTon(id: string): Promise<string> {
+    const rows = await this.prisma.$queryRaw<Array<{ nome: string; ton_id: string | null; ton_nome: string | null; topico: string | null }>>`
+      SELECT p.nome, TRIM(b.ton_id) AS ton_id, TRIM(t.nome) AS ton_nome, NULLIF(TRIM(t.topico_mqtt), '') AS topico
+      FROM equipamento_pontos p
+      LEFT JOIN ton_bo b ON b.equipamento_ponto_id = p.id AND b.deleted_at IS NULL AND b.ativo
+      LEFT JOIN equipamentos t ON t.id = b.ton_id
+      WHERE p.equipamento_id = ${id}::bpchar AND p.deleted_at IS NULL AND p.ativo AND p.tipo = 'comando'`.catch(() => []);
+    const sem = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+    const ligados = rows.filter((r) => r.ton_id);
+    const tem = (re: RegExp) => ligados.some((r) => re.test(sem(r.nome)));
+    if (!tem(/direit|horario/) || !tem(/esquerd/) || !tem(/percent/)) {
+      return 'Os comandos de giro (direita e esquerda) e o percentímetro do pivô não estão todos ligados a uma saída da TON: confira em Topologia → TON → Configurar BOs';
+    }
+    const tons = new Map(ligados.map((r) => [r.ton_id as string, r]));
+    if (tons.size > 1) {
+      return `Os comandos do pivô estão em mais de uma TON (${[...tons.values()].map((t) => t.ton_nome ?? 'TON').join(', ')}): a calibração exige todos na mesma TON`;
+    }
+    const ton = [...tons.values()][0];
+    const nome = ton.ton_nome ?? 'TON';
+    if (!ton.topico) {
+      return `A TON "${nome}" do pivô está sem Tópico Base no cadastro: sem ele o NexON não fala com a placa. Confira a TON na Topologia e salve o diagrama`;
+    }
+    const motivo = this.ton.motivoSemSuporte(ton.ton_id as string);
+    return `A TON "${nome}" do pivô não respondeu ao NexON${motivo ? ` (${motivo.slice(0, 160)})` : ''}: confira se está ligada e com o firmware do pivô gravado`;
+  }
+
+  /** O encoder escolhido não é lido pela TON do pivô (tópico dele fora do tópico da TON). */
+  private async porQueEncoderFora(id: string, tonId: string): Promise<string> {
+    const r = await this.prisma.$queryRaw<Array<{ ton_nome: string | null; enc_nome: string | null }>>`
+      SELECT (SELECT TRIM(nome) FROM equipamentos WHERE id = ${tonId}::bpchar) AS ton_nome,
+             (SELECT TRIM(e.nome) FROM pivo_config c JOIN equipamentos e ON e.id = (c.parametros->>'encoder_equipamento_id')::bpchar
+               WHERE c.equipamento_id = ${id}::bpchar) AS enc_nome`.catch(() => []);
+    const ton = r[0]?.ton_nome ?? 'TON', enc = r[0]?.enc_nome ?? 'escolhido';
+    return `O encoder "${enc}" não está no RS485 da TON "${ton}" do pivô (é de outra TON ou de um diagrama antigo): ligue o nó Encoder à TON do pivô na Topologia, salve e escolha esse encoder na Configuração`;
   }
 
   private async gravarNaTon(id: string, tonId: string, enc: { resolucao: number; invertido: boolean; zero: number }, user?: Autor, cliente?: ClienteInfo) {

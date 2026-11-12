@@ -156,6 +156,11 @@ export class PivoTonService implements OnModuleInit {
   /** Contador de mensagens recebidas: "depois do comando" é n > n0 (horário em ms empata). */
   private n = 0;
   private readonly suporte = new Map<string, { ok: boolean; em: number }>();
+  /** Por que a TON foi dada como "sem sequência local" da última vez (para dizer a quem perguntou). */
+  private readonly semSuportePorque = new Map<string, string>();
+  motivoSemSuporte(tonId: string): string | null {
+    return this.semSuportePorque.get(tonId.trim()) ?? null;
+  }
   private readonly cfgEnviada = new Map<string, string>();
   /** CRC da configuração que a TON informou ter (ack do `pivo status`: "k<crc>"). */
   private readonly cfgNaTon = new Map<string, string>();
@@ -307,6 +312,7 @@ export class PivoTonService implements OnModuleInit {
       return true;
     } catch (e) {
       this.suporte.set(tonId, { ok: false, em: Date.now() });
+      this.semSuportePorque.set(tonId, e instanceof Error ? e.message : String(e));
       this.logger.log(`[pivo-ton] TON ${tonId} sem sequência local (${e instanceof Error ? e.message : e}) — segue no servidor`);
       return false;
     }
