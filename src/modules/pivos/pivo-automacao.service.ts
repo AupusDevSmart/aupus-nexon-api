@@ -241,6 +241,6 @@ export class PivoAutomacaoService {
 
   private paradaTxt(i: Irrigacao) {
     const p = i.parada;
-    return p.tipo === 'porVoltas' ? `${p.voltas} volta(s)` : p.tipo === 'porTempo' ? `${p.minutos} min` : p.tipo === 'porAngulo' ? `ângulo ${p.angulo}°` : 'sem parada';
+    return p.tipo === 'porVoltas' ? `${p.voltas} volta(s)` : p.tipo === 'porTempo' ? `${p.minutos} min` : p.tipo === 'porAngulo' ? `ângulo ${p.angulo}°` : p.tipo === 'porGraus' ? `${p.graus}°` : 'sem parada';
   }
 }

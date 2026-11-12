@@ -24,7 +24,7 @@ export interface ConfigIrrigacao {
    */
   semGiro?: boolean;
 }
-export type Parada = { tipo: 'semParar' } | { tipo: 'porAngulo'; angulo: number } | { tipo: 'porVoltas'; voltas: number } | { tipo: 'porTempo'; minutos: number };
+export type Parada = { tipo: 'semParar' } | { tipo: 'porAngulo'; angulo: number } | { tipo: 'porGraus'; graus: number } | { tipo: 'porVoltas'; voltas: number } | { tipo: 'porTempo'; minutos: number };
 export interface Irrigacao {
   modo: 'simples' | 'angulo' | 'segmentos' | 'programacao';
   config: ConfigIrrigacao;
@@ -81,6 +81,8 @@ export function normalizarIrrigacao(raw: unknown): Irrigacao | null {
   let parada: Parada = { tipo: 'semParar' };
   if (p.tipo === 'porVoltas' && Number(p.voltas) > 0) parada = { tipo: 'porVoltas', voltas: clamp(Number(p.voltas), 0.1, 50) };
   else if (p.tipo === 'porAngulo' && Number.isFinite(Number(p.angulo))) parada = { tipo: 'porAngulo', angulo: norm360(Number(p.angulo)) };
+  // Andar X graus a partir de onde está (decisão 12/11: o valor digitado é o quanto andar, não o destino)
+  else if (p.tipo === 'porGraus' && Number(p.graus) > 0) parada = { tipo: 'porGraus', graus: clamp(Math.round(Number(p.graus)), 1, 3600) };
   else if (p.tipo === 'porTempo' && Number(p.minutos) > 0) parada = { tipo: 'porTempo', minutos: clamp(Math.round(Number(p.minutos)), 1, 7 * 1440) };
   const modo = ['simples', 'angulo', 'segmentos', 'programacao'].includes(r.modo) ? r.modo : 'simples';
   if (modo === 'angulo' && Number.isFinite(Number(r.anguloFinal)) && parada.tipo === 'semParar') {
@@ -113,6 +115,7 @@ export function resumoIrrigacao(i: Irrigacao | null | undefined): string {
   partes.push(
     p.tipo === 'porVoltas' ? `${p.voltas} volta${p.voltas === 1 ? '' : 's'}`
       : p.tipo === 'porAngulo' ? `para em ${p.angulo}°`
+      : p.tipo === 'porGraus' ? `anda ${p.graus}°`
         : p.tipo === 'porTempo' ? `${p.minutos} min`
           : 'sem parada',
   );
@@ -133,6 +136,7 @@ export function duracaoParadaMs(i: Irrigacao, tempoVolta100h: number, anguloAtua
   const fator = i.config.semAgua ? 1 : 100 / i.config.percentual;
   const horasPorVolta = Math.max(0.1, tempoVolta100h) * fator;
   if (p.tipo === 'porVoltas') return Math.round(p.voltas * horasPorVolta * 3600000);
+  if (p.tipo === 'porGraus') return Math.round((p.graus / 360) * horasPorVolta * 3600000);
   if (p.tipo === 'porAngulo' && anguloAtual != null) {
     let delta = i.config.direcao === 'Reverso' ? norm360(anguloAtual - p.angulo) : norm360(p.angulo - anguloAtual);
     if (delta <= 0) delta = 360;

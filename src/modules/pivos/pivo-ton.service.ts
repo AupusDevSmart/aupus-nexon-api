@@ -413,6 +413,7 @@ export class PivoTonService implements OnModuleInit {
     if (p.tipo === 'semParar') throw new Error('Escolha a parada (graus ou voltas): "sem parada" não existe com a sequência na TON.');
     if (enc) {
       if (p.tipo === 'porVoltas') { tipo = 'g'; valor = Math.round(p.voltas * 360); parada = `${p.voltas} volta(s) = ${valor}°`; }
+      else if (p.tipo === 'porGraus') { tipo = 'g'; valor = p.graus; parada = `anda ${valor}°`; }
       else if (p.tipo === 'porAngulo') {
         if (x.anguloAtual == null) throw new Error('Sem a posição atual do pivô: não dá para calcular os graus até o ângulo final.');
         // Avanço (direita) = ângulo crescente na calibração; Reverso (esquerda) = decrescente.
@@ -429,7 +430,7 @@ export class PivoTonService implements OnModuleInit {
       else if (irr) { const ms = duracaoParadaMs(irr, x.tempoVolta100h, x.anguloAtual); s = ms ? ms / 1000 : null; }
       if (!s) throw new Error('Sem encoder na TON e sem como estimar o tempo da parada (0 % ou ângulo sem posição).');
       tipo = 't'; valor = clamp(s, 60, 7 * 86400); pararEm = new Date(Date.now() + valor * 1000);
-      parada = `${p.tipo === 'porVoltas' ? `${p.voltas} volta(s)` : p.tipo === 'porAngulo' ? `ângulo ${p.angulo}°` : `${p.minutos} min`} por tempo (${Math.round(valor / 60)} min, sem encoder na TON)`;
+      parada = `${p.tipo === 'porVoltas' ? `${p.voltas} volta(s)` : p.tipo === 'porGraus' ? `${p.graus}°` : p.tipo === 'porAngulo' ? `ângulo ${p.angulo}°` : `${p.minutos} min`} por tempo (${Math.round(valor / 60)} min, sem encoder na TON)`;
     }
     // Faixa do canhão (spec 6.4): a da Irrigação (liga → desliga, em graus calibrados) vira bruto do encoder.
     // Canhão LIGADO de "liga" até "desliga" ⇒ DESLIGADO dentro de [desliga, liga].

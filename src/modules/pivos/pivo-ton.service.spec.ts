@@ -94,6 +94,9 @@ describe('PivoTonService', () => {
     expect(m('girar_direita', { tipo: 'porVoltas', voltas: 2.5 })).toMatch(/ g 900$/);
     expect(m('girar_direita', { tipo: 'porAngulo', angulo: 100 }, {}, 10)).toMatch(/ g 90$/);
     expect(m('girar_esquerda', { tipo: 'porAngulo', angulo: 350 }, {}, 20)).toMatch(/ e .* g 30$/);
+    // "Andar X°" (12/11): o valor é o quanto andar, a partir de onde está, nos dois sentidos
+    expect(m('girar_direita', { tipo: 'porGraus', graus: 30 }, {}, 165.8)).toMatch(/ d .* g 30$/);
+    expect(m('girar_esquerda', { tipo: 'porGraus', graus: 30 }, {}, 165.8)).toMatch(/ e .* g 30$/);
     expect(() => m('girar_direita', { tipo: 'semParar' })).toThrow(/sem parada/);
     expect(() => m('girar_direita', { tipo: 'porTempo', minutos: 30 })).toThrow(/tempo não existe/);
     // canhão com faixa (liga 200 → desliga 100 na calibração): OFF dentro de [100, 200]

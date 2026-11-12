@@ -632,7 +632,7 @@ export class PivoSequenciaService implements OnModuleInit {
     // SEM o ponto (NEXON-98), o servidor liga só a bomba e não manda girar (`semGiro`): precisa
     // de uma bomba configurada, senão não há o que ligar.
     if (irrigacao && !irrigacao.config.semAgua && !(irrigacao.config.percentual > 0)) {
-      if (irrigacao.parada.tipo === 'porAngulo' || irrigacao.parada.tipo === 'porVoltas') {
+      if (irrigacao.parada.tipo === 'porAngulo' || irrigacao.parada.tipo === 'porVoltas' || irrigacao.parada.tipo === 'porGraus') {
         throw new BadRequestException('Parado não percorre ângulo nem volta: use parada por tempo ou sem parada.');
       }
       // "Tem percentímetro" = o ponto ligado a uma BO de verdade (o ponto sozinho não segura o pivô).
@@ -698,7 +698,7 @@ export class PivoSequenciaService implements OnModuleInit {
           if (pa.tipo === 'porTempo') {
             // o que falta do tempo; já vencido, para em 1 min (o tick ia desligar agora)
             if (resta != null) restanteParadaMs = Math.max(60000, resta);
-          } else if (pa.tipo === 'porVoltas' && resta != null) {
+          } else if ((pa.tipo === 'porVoltas' || pa.tipo === 'porGraus') && resta != null) {
             // o que falta percorrer, na velocidade nova (seco anda a 100 %; 0 % não chega);
             // já vencido, para em 1 min, como por tempo (nunca recomeça as voltas do zero)
             const vAntes = antesDoReinicio!.config.semAgua ? 100 : antesDoReinicio!.config.percentual;
@@ -708,7 +708,7 @@ export class PivoSequenciaService implements OnModuleInit {
           }
           // por ângulo: a partida recalcula do ângulo atual, no sentido novo
           // Parado não alcança ângulo nem volta: a parada herdada cai (fica sem parada).
-          if (!irrigacao.config.semAgua && !(irrigacao.config.percentual > 0) && (pa.tipo === 'porAngulo' || pa.tipo === 'porVoltas')) {
+          if (!irrigacao.config.semAgua && !(irrigacao.config.percentual > 0) && (pa.tipo === 'porAngulo' || pa.tipo === 'porVoltas' || pa.tipo === 'porGraus')) {
             irrigacao = { ...irrigacao, parada: { tipo: 'semParar' } };
             restanteParadaMs = undefined;
           }

@@ -37,3 +37,14 @@ describe('percentímetro: lâmina → %', () => {
     expect(resumoIrrigacao(i)).toBe('Direita · 59,7% (6,00 mm) · Molhado · sem parada');
   });
 });
+
+describe('parada "Andar X°" (porGraus, 12/11)', () => {
+  it('normaliza, resume e estima a duração', () => {
+    const i = normalizarIrrigacao({ config: { percentual: 50, direcao: 'Avanço' }, parada: { tipo: 'porGraus', graus: 30 } })!;
+    expect(i.parada).toEqual({ tipo: 'porGraus', graus: 30 });
+    expect(resumoIrrigacao(i)).toMatch(/anda 30°$/);
+    // 30° = 1/12 de volta; 6 h/volta a 100 % → a 50 % 12 h/volta → 1 h
+    expect(duracaoParadaMs(i, 6, null)).toBe(3600000);
+    expect(normalizarIrrigacao({ config: {}, parada: { tipo: 'porGraus', graus: 0 } })!.parada).toEqual({ tipo: 'semParar' });
+  });
+});
