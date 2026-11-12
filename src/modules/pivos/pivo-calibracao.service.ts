@@ -16,10 +16,11 @@ import { colunaTrilhaAusente } from '../logs-mqtt/logs-mqtt-filtros';
 import { CalibracaoAnguloDto } from './dto/pivos.dto';
 import { PivoSequenciaService } from './pivo-sequencia.service';
 import { comandoEnc, PivoTonService } from './pivo-ton.service';
-import { anguloDoEncoder } from './pivo-posicao.util';
+import { anguloDoEncoder, brutoDoEncoder } from './pivo-posicao.util';
 import { calibracaoAnterior, calibracaoVigente, LinhaCalibracao, tabelaCalibracaoExiste } from './pivo-calibracao.repo';
 import {
   avaliarLeituras,
+  avaliarPublicacoes,
   azimute,
   coordenadaValida,
   DISTANCIA_MAX_M,
@@ -41,6 +42,7 @@ const TXT_TON: Array<[RegExp, string]> = [
   [/pivo_sem_encoder/, 'A TON não tem encoder no RS485: confira o nó Encoder na Topologia e regrave o firmware'],
   [/pivo_ligado/, 'A TON está com o pivô ligado: a calibração só é feita com o pivô parado'],
   [/pivo_enc_invalido/, 'A TON recusou os valores da calibração'],
+  [/already_seen/, 'a resposta do comando se perdeu no rádio (a placa devolveu só "already_seen")'],
   [/lora_no_ack/, 'A TON não respondeu pelo rádio LoRa'],
   [/nao respondeu|timeout/i, 'A TON não respondeu (sem comunicação)'],
 ];
@@ -110,16 +112,26 @@ export class PivoCalibracaoService {
     const id = String(pivoId).trim();
     const enc = this.exigirEncoder(estado);
     const tonId = await this.tonDoEncoder(id, user, cliente);
-    let msg: string;
+    let ack: ReturnType<typeof lerAckEncoder> = null;
+    let falha: unknown = null;
     try {
-      msg = (await this.cmd.comandoTon(
+      const msg = (await this.cmd.comandoTon(
         { equipamentoId: id, tonId, cmd: 'pivo encler', rotulo: 'Leitura do encoder para calibração', ackOk: /^pivo_el/ }, user, cliente,
       )).msg;
+      ack = lerAckEncoder(msg);
+      if (!ack) falha = new Error(msg);
     } catch (e) {
-      throw this.erroDaTon(e, 'A TON não leu o encoder');
+      falha = e;
     }
-    const ack = lerAckEncoder(msg);
-    if (!ack) throw new BadGatewayException(`Resposta inesperada da TON ao ler o encoder: ${msg}`);
+    if (!ack) {
+      // A TON recusou de propósito (pivô ligado, firmware sem encoder): não há o que contornar.
+      const bruto = String((falha as any)?.response?.message ?? (falha as Error)?.message ?? falha);
+      if (/pivo_ligado|pivo_sem_encoder/.test(bruto)) throw this.erroDaTon(falha, 'A TON não leu o encoder');
+      // A resposta do comando não chegou (satélite LoRa: o ack com as leituras colide com o reenvio
+      // do gateway e volta só "already_seen"; firmware antigo; rádio mudo). O encoder continua
+      // sendo publicado sozinho a cada minuto: a leitura sai dessas publicações.
+      return this.lerPelaPublicacao(id, enc, bruto, user, cliente);
+    }
     const r = avaliarLeituras(ack.leituras, enc.resolucao, ack.erros);
     if (r.valida && r.valor != null) {
       this.leituras.set(id, { valor: r.valor, leituras: r.leituras, em: Date.now(), usuarioId: user?.id?.trim() ?? null });
@@ -130,7 +142,29 @@ export class PivoCalibracaoService {
       ? `Encoder lido para calibração: ${r.valor} (${r.leituras.join(', ')})`
       : `Leitura do encoder para calibração recusada: ${r.motivo}${r.leituras.length ? ` (${r.leituras.join(', ')})` : ''}`,
     user, cliente, r.valida ? 'INFO' : 'WARN');
-    return { valida: r.valida, valor: r.valor, leituras: r.leituras, motivo: r.motivo, lido_em: new Date() };
+    return { valida: r.valida, valor: r.valor, leituras: r.leituras, motivo: r.motivo, lido_em: new Date(), origem: 'comando' as const };
+  }
+
+  /** Leitura do encoder pelas publicações automáticas da TON (reserva do `pivo encler` sem resposta). */
+  private async lerPelaPublicacao(
+    id: string, enc: { equipamento_id: string; resolucao: number | null }, falhaDoComando: string, user?: Autor, cliente?: ClienteInfo,
+  ) {
+    const rows = await this.prisma.$queryRaw<Array<{ dados: any; ts: Date }>>`
+      SELECT dados, timestamp_dados AS ts FROM equipamentos_dados
+      WHERE equipamento_id = ${enc.equipamento_id}::bpchar ORDER BY timestamp_dados DESC LIMIT 6`.catch(() => []);
+    const pubs = rows
+      .map((r) => ({ valor: brutoDoEncoder(r.dados), amostras: Number(r.dados?.samples), em: r.ts }))
+      .filter((p): p is { valor: number; amostras: number; em: Date } => p.valor != null);
+    const r = avaliarPublicacoes(pubs, enc.resolucao);
+    const porque = TXT_TON.find(([re]) => re.test(falhaDoComando))?.[1] ?? `a TON respondeu "${falhaDoComando.slice(0, 80)}" sem as leituras`;
+    if (!r.valida || r.valor == null) {
+      this.leituras.delete(id);
+      await this.trilha(id, `Leitura do encoder para calibração falhou: ${porque}; pela publicação automática também não: ${r.motivo}`, user, cliente, 'WARN');
+      throw new BadGatewayException(`A TON não devolveu as leituras do encoder (${porque}) e pela publicação automática também não deu: ${r.motivo}`);
+    }
+    this.leituras.set(id, { valor: r.valor, leituras: r.leituras, em: Date.now(), usuarioId: user?.id?.trim() ?? null });
+    await this.trilha(id, `Encoder lido para calibração pela publicação automática da TON: ${r.valor} (${r.leituras.join(', ')}) — o comando não devolveu as leituras (${porque})`, user, cliente);
+    return { valida: true, valor: r.valor, leituras: r.leituras, motivo: null, lido_em: new Date(), origem: 'publicacao' as const };
   }
 
   // ------------------------------------------------------------------ salvar

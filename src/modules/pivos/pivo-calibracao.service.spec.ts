@@ -20,6 +20,8 @@ interface Cenario {
   anterior?: any;
   ack?: (cmd: string) => string | Error;
   semTabela?: boolean;
+  /** Publicações automáticas do encoder (equipamentos_dados), da mais nova para a mais antiga. */
+  publicacoes?: Array<{ posicao: number; samples: number; haMin: number }>;
   pontos?: Array<{ nome: string; ton_id: string | null; ton_nome: string | null; topico: string | null }>;
   bancoFalha?: boolean;
   alvo?: { tonId: string } | null;
@@ -48,6 +50,9 @@ function montar(c: Cenario = {}) {
     $queryRaw: jest.fn(async (s: TemplateStringsArray) => {
       const q = s.join('?');
       if (q.includes('to_regclass')) return [{ ok: !c.semTabela }];
+      if (q.includes('FROM equipamentos_dados')) {
+        return (c.publicacoes ?? []).map((p) => ({ dados: { posicao: p.posicao, samples: p.samples }, ts: new Date(Date.now() - p.haMin * 60_000) }));
+      }
       if (q.includes('FROM equipamento_pontos')) return c.pontos ?? [];
       if (q.includes('AS enc_nome')) return [{ ton_nome: 'TON4v2', enc_nome: 'Emulador' }];
       if (q.includes('FROM calibracao_angulo') && q.includes('NOT c.ativa')) return c.anterior ? [c.anterior] : [];
@@ -121,6 +126,53 @@ describe('calibração do ângulo do pivô (serviço)', () => {
     it('firmware sem o comando: pede para regravar a placa', async () => {
       const { svc } = montar({ ack: () => 'pivo_cmd_desconhecido' });
       await expect(svc.lerEncoder('pivo-11', ADMIN)).rejects.toThrow(/regrave o firmware/);
+    });
+
+    describe('a resposta do comando não chega (satélite LoRa): usa a publicação automática da TON', () => {
+      const PUBS = [{ posicao: 125, samples: 15, haMin: 1 }, { posicao: 125, samples: 15, haMin: 2 }, { posicao: 125, samples: 13, haMin: 3 }];
+
+      it('"already_seen" no lugar das leituras + publicações estáveis: leitura válida', async () => {
+        const { svc, prisma } = montar({ ack: () => 'already_seen', publicacoes: PUBS });
+        const r = await svc.lerEncoder('pivo-11', ADMIN);
+        expect(r).toMatchObject({ valida: true, valor: 125, leituras: [125, 125, 125], origem: 'publicacao' });
+        expect(prisma.logs_mqtt.create).toHaveBeenCalledWith(expect.objectContaining({
+          data: expect.objectContaining({ mensagem: expect.stringMatching(/pela publicação automática da TON: 125/) }),
+        }));
+      });
+
+      it('a leitura da publicação vale para salvar a calibração', async () => {
+        const { svc, cmds } = montar({ ack: (c) => (c === 'pivo encler' ? 'already_seen' : 'pivo_enc_ok'), publicacoes: PUBS });
+        await svc.lerEncoder('pivo-11', ADMIN);
+        await svc.salvar('pivo-11', { ...DTO, bruto_cal: 125 }, ADMIN);
+        expect(cmds[1]).toMatch(/^pivo enc 360 0 /);
+      });
+
+      it('TON sem resposta pelo rádio também cai na publicação', async () => {
+        const { svc } = montar({ ack: () => new Error('TON não aplicou "pivo encler": lora_no_ack'), publicacoes: PUBS });
+        expect((await svc.lerEncoder('pivo-11', ADMIN)).origem).toBe('publicacao');
+      });
+
+      it('publicações variando (pivô andando): recusa com o motivo', async () => {
+        const { svc } = montar({ ack: () => 'already_seen', publicacoes: [{ posicao: 130, samples: 15, haMin: 1 }, { posicao: 125, samples: 15, haMin: 2 }] });
+        await expect(svc.lerEncoder('pivo-11', ADMIN)).rejects.toThrow(/leitura instável: variou 5 posições/);
+      });
+
+      it('publicação velha ou única: não serve', async () => {
+        const { svc } = montar({ ack: () => 'already_seen', publicacoes: [{ posicao: 125, samples: 15, haMin: 1 }, { posicao: 125, samples: 15, haMin: 20 }] });
+        await expect(svc.lerEncoder('pivo-11', ADMIN)).rejects.toThrow(/publicou só 1 leitura/);
+        const semNada = montar({ ack: () => 'already_seen' });
+        await expect(semNada.svc.lerEncoder('pivo-11', ADMIN)).rejects.toThrow(/não publicou leitura do encoder/);
+      });
+
+      it('pivô ligado: recusa da TON vale, sem contornar pela publicação', async () => {
+        const { svc } = montar({ ack: () => new Error('TON não aplicou "pivo encler": pivo_ligado'), publicacoes: PUBS });
+        await expect(svc.lerEncoder('pivo-11', ADMIN)).rejects.toThrow(/só é feita com o pivô parado/);
+      });
+
+      it('leituras com erro no próprio comando continuam recusadas (não troca pela publicação)', async () => {
+        const { svc } = montar({ ack: () => 'pivo_el_erro 2', publicacoes: PUBS });
+        expect(await svc.lerEncoder('pivo-11', ADMIN)).toMatchObject({ valida: false, origem: 'comando' });
+      });
     });
 
     it('pivô sem encoder na Configuração', async () => {
