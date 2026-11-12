@@ -65,13 +65,16 @@ function montar(parametros: Record<string, unknown> = { encoder_equipamento_id: 
 
 describe('alarmes do ângulo do pivô', () => {
   describe('encoder sem resposta', () => {
-    it('TON viva e 5 min sem leitura: abre; leitura voltou: fecha', async () => {
+    it('TON viva e 12 min sem leitura: abre; leitura voltou: fecha', async () => {
       const m = montar();
+      // satélite de pivô só publica na mudança + reforço de 5 min: 6 min sem leitura é normal
       await m.passo(0, { idadeLeituraMs: 6 * MIN });
+      expect(m.vivos()).toEqual([]);
+      await m.passo(1, { idadeLeituraMs: 13 * MIN });
       expect(m.vivos()).toEqual(['encoder_sem_resposta']);
-      await m.passo(1, { idadeLeituraMs: 7 * MIN });
+      await m.passo(2, { idadeLeituraMs: 14 * MIN });
       expect(m.abertos).toHaveLength(1);   // não duplica
-      await m.passo(2, { idadeLeituraMs: 20_000 });
+      await m.passo(3, { idadeLeituraMs: 20_000 });
       expect(m.vivos()).toEqual([]);
     });
 
@@ -84,7 +87,7 @@ describe('alarmes do ângulo do pivô', () => {
 
     it('tiraram o encoder da Configuração: o alarme aberto fecha', async () => {
       const m = montar();
-      await m.passo(0, { idadeLeituraMs: 6 * MIN });
+      await m.passo(0, { idadeLeituraMs: 13 * MIN });
       m.tirarEncoder();
       await m.passo(1, {});
       expect(m.vivos()).toEqual([]);

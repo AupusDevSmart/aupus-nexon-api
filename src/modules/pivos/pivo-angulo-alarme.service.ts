@@ -18,12 +18,12 @@ const LOCK_KEY = 71_103_001;
 /**
  * Encoder sem resposta: a TON pausa o encoder depois de 3 leituras seguidas com erro ou
  * timeout e para de publicar. Aqui isso aparece como falta de leitura nova com a TON viva.
- * A leitura chega a cada 60 s e é gravada com até 1 min de atraso (buffer): 5 min sem
- * leitura nova não é atraso normal.
+ * Satélite de pivô (12/11): a TON só publica encoder/status quando MUDAM, com reforço a cada
+ * 5 min — mais o POLL de 30 s e até 1 min de buffer. 12 min sem leitura nova não é atraso normal.
  */
-const ENCODER_MUDO_MS = 5 * 60_000;
-/** TON "viva": publicou o status do pivô há menos que isto (ela publica a cada 60 s parada). */
-const TON_VIVA_MS = 150_000;
+const ENCODER_MUDO_MS = 12 * 60_000;
+/** TON "viva": publicou o status do pivô há menos que isto (reforço a cada 5 min + folga). */
+const TON_VIVA_MS = 7 * 60_000;
 
 export type CodigoAlarmeAngulo = 'encoder_sem_resposta' | 'sentido_invertido' | 'pivo_travado';
 
