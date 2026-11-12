@@ -130,6 +130,41 @@ export function avaliarLeituras(leituras: number[], resolucao: number | null, er
   return { valida: true, valor, leituras: ls, motivo: null };
 }
 
+/** Publicações automáticas do encoder que servem de leitura quando a TON não devolve o `pivo encler`. */
+export const PUBLICACOES_JANELA_MS = 6 * 60_000;
+export const PUBLICACOES_MIN = 2;
+
+export interface PublicacaoEncoder { valor: number; amostras: number; em: Date }
+
+/**
+ * Leitura do encoder pelas PUBLICAÇÕES automáticas da TON (uma por minuto, cada uma com o último
+ * valor e quantas amostras Modbus leu). Reserva para quando o comando `pivo encler` executa mas a
+ * resposta não chega (satélite LoRa: o ack com as leituras colide com o reenvio do gateway).
+ * Vale com 2 ou mais publicações nos últimos 6 min, ao menos 5 amostras no total e os valores
+ * iguais ou variando ±1 — o encoder parado por mais tempo do que as 5 leituras seguidas pedem.
+ */
+export function avaliarPublicacoes(pubs: PublicacaoEncoder[], resolucao: number | null, agora = Date.now()): LeituraEncoder {
+  const recentes = pubs
+    .filter((p) => Number.isFinite(p.valor) && p.valor >= 0 && agora - new Date(p.em).getTime() <= PUBLICACOES_JANELA_MS)
+    .sort((a, b) => new Date(a.em).getTime() - new Date(b.em).getTime());
+  const ls = recentes.map((p) => Math.round(p.valor));
+  const base = { valida: false, valor: null, leituras: ls };
+  if (!ls.length) return { ...base, motivo: 'a TON não publicou leitura do encoder nos últimos 6 minutos' };
+  const amostras = recentes.reduce((n, p) => n + (Number.isFinite(p.amostras) && p.amostras > 0 ? p.amostras : 1), 0);
+  if (ls.length < PUBLICACOES_MIN || amostras < LEITURAS_CALIBRACAO) {
+    return { ...base, motivo: `a TON publicou só ${ls.length} leitura(s) do encoder nos últimos 6 minutos: aguarde mais um minuto e leia de novo` };
+  }
+  let maior = 0;
+  for (const a of ls) for (const b of ls) {
+    const d = Math.abs(resolucao ? deltaCircular(naVolta(a, resolucao), naVolta(b, resolucao), resolucao) : b - a);
+    if (d > maior) maior = d;
+  }
+  if (maior > VARIACAO_MAX_LEITURAS) {
+    return { ...base, motivo: `leitura instável: variou ${maior} posições entre as publicações (${ls.join(', ')}) — o pivô está parado?` };
+  }
+  return { valida: true, valor: ls[ls.length - 1], leituras: ls, motivo: null };
+}
+
 /**
  * Ack do `pivo encler`: "pivo_el <v1> <v2> <v3> <v4> <v5>" (todas boas) ou
  * "pivo_el_erro <quantas leu antes de falhar>".
