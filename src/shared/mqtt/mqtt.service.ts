@@ -39,6 +39,8 @@ interface PendingCommand {
   attempt: number;           // 1 = primeira tentativa
   maxAttempts: number;
   timeoutMs: number;
+  /** ack "duplicate" já recebido (a TON pegou o reenvio): vale se o ack de verdade não vier */
+  duplicado?: CmdAckResult;
 }
 
 export interface ReconcileResult {
@@ -1535,15 +1537,31 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       return;
     }
 
-    clearTimeout(pending.timer);
-    this.pendingCommands.delete(cmd_id);
-
     const result: CmdAckResult = {
       cmd_id,
       status: (dados.status as CmdAckStatus) || 'error',
       msg: typeof dados.msg === 'string' ? dados.msg : '',
       ts: typeof dados.ts === 'number' ? dados.ts : Math.floor(Date.now() / 1000),
     };
+
+    // "duplicate" = a TON recebeu o REENVIO de um comando que ela já está executando (ex.:
+    // "pivo encler" faz 5 leituras e passa do timeout). O ack de verdade (com o resultado)
+    // ainda pode chegar: espera mais um timeout por ele, sem reenviar de novo. Se não vier,
+    // vale o "duplicate" (comando recebido), como antes. Bancada 12/11: o "already_seen"
+    // chegava primeiro e a calibração recebia uma resposta sem a leitura.
+    if (result.status === 'duplicate' && !pending.duplicado) {
+      pending.duplicado = result;
+      clearTimeout(pending.timer);
+      pending.timer = setTimeout(() => {
+        if (!this.pendingCommands.has(cmd_id)) return;
+        this.pendingCommands.delete(cmd_id);
+        pending.resolve(result);
+      }, pending.timeoutMs);
+      return;
+    }
+
+    clearTimeout(pending.timer);
+    this.pendingCommands.delete(cmd_id);
     pending.resolve(result);
   }
 
