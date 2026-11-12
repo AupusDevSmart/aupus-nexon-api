@@ -721,10 +721,14 @@ export class EquipamentosCmdService {
     if (!topico) throw new BadRequestException(`A TON "${ton.nome}" não tem Tópico Base.`);
     if (!this.mqtt.isConnected()) throw new ServiceUnavailableException('Broker MQTT nao conectado no momento.');
 
+    // Satélite LoRa: o comando passa pelo gateway, que já repete 3x no rádio (~12 s até dar
+    // lora_no_ack). Reenviar pelo MQTT a cada 5 s fazia a satélite receber CÓPIAS e responder
+    // "already_seen" no lugar do resultado (ex.: "pivo encler", 5 leituras seguidas).
+    const opcoes = topico.includes('/satellite/') ? { timeoutMs: 15000, maxAttempts: 2 } : {};
     let t0 = Date.now();
     let ack: CmdAckResult;
     try {
-      ack = await this.mqtt.publishCommand(topico, p.cmd);
+      ack = await this.mqtt.publishCommand(topico, p.cmd, opcoes);
       // Satélite LoRa: o ack não voltou (rádio ocupado com o relatório das entradas).
       // Comandos de texto (perc) são idempotentes — repetir uma vez é seguro.
       if (ack.status === 'error' && String(ack.msg ?? '') === 'lora_no_ack') {
@@ -733,7 +737,7 @@ export class EquipamentosCmdService {
           user, cliente,
         );
         t0 = Date.now();
-        ack = await this.mqtt.publishCommand(topico, p.cmd);
+        ack = await this.mqtt.publishCommand(topico, p.cmd, opcoes);
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Erro desconhecido';
