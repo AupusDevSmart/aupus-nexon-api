@@ -1,4 +1,4 @@
-import { anguloDoEncoder, brutoDoEncoder, parametrosEncoder, zeroParaAqui } from './pivo-posicao.util';
+import { anguloDoEncoder, brutoDoEncoder, parametrosEncoder, tonDoEncoder, zeroParaAqui } from './pivo-posicao.util';
 
 describe('posição do pivô pelo encoder', () => {
   const cfg = { resolucao: 8192, invertido: false, zero: 0 };
@@ -59,5 +59,23 @@ describe('posição do pivô pelo encoder', () => {
       .toEqual({ equipamentoId: 'abc', resolucao: 4096, invertido: true, zero: 12 });
     expect(parametrosEncoder({ encoder_resolucao: 4 })).toEqual({ equipamentoId: null, resolucao: null, invertido: false, zero: 0 });
     expect(parametrosEncoder(undefined).resolucao).toBeNull();
+  });
+
+  describe('de qual TON é o encoder (NEXON-103)', () => {
+    const tons = [
+      { nome: 'TON2', topico: 'AUPUS/BANCADA' },
+      { nome: 'TON4', topico: 'AUPUS/BANCADA/satellite/98:A3:16:EB:DC:10' },
+      { nome: 'TON4v2', topico: 'AUPUS/BANCADA/satellite/98:A3:16:EB:E1:A0' },
+    ];
+    it('satélite debaixo do gateway: vale a TON de tópico mais longo', () => {
+      expect(tonDoEncoder('AUPUS/BANCADA/satellite/98:A3:16:EB:E1:A0/Emulador_1/data', tons)?.nome).toBe('TON4v2');
+      expect(tonDoEncoder('AUPUS/BANCADA/satellite/98:A3:16:EB:DC:10/Emulador_1/data', tons)?.nome).toBe('TON4');
+      expect(tonDoEncoder('AUPUS/BANCADA/Encoder_1/data', tons)?.nome).toBe('TON2');
+    });
+    it('prefixo tem de fechar na barra; sem tópico ou sem TON: null', () => {
+      expect(tonDoEncoder('AUPUS/BANCADA2/Encoder_1/data', tons)).toBeNull();
+      expect(tonDoEncoder(null, tons)).toBeNull();
+      expect(tonDoEncoder('OUTRA/Encoder_1/data', tons)).toBeNull();
+    });
   });
 });
