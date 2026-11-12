@@ -1123,6 +1123,15 @@ export class PivoSequenciaService implements OnModuleInit {
     // Sequência na TON: o estado do canhão é o que a TON comandou (BO06); a BI só confirma (lá na TON).
     const mTon = this.ton ? await this.boDoPonto(pts.cmd.canhao) : null;
     const naTon = !!(mTon && this.ton?.ligadaNaTon(mTon.ton_id));
+    // Pivô com a sequência na TON e a TON PARADA (status recente dela): com o pivô parado a TON
+    // mantém o canhão em OFF (reafirma a cada 1 s). Desligar = já vale; ligar = ligue o pivô antes.
+    // Antes caía no caminho da saída mantida e esperava a BI06 — presa em 1 na bancada, o
+    // "desligar canhão" nunca confirmava (30 s de erro).
+    if (mTon && !naTon && this.ton?.statusDaTon(mTon.ton_id)) {
+      if (ligar) throw new ConflictException('Ligue o pivô antes de ligar o canhão.');
+      this.ton.marcarCanhao(mTon.ton_id, false);
+      return { ok: true, ligado: 0 };
+    }
     if (pts.st.canhao && !naTon) {
       const atual = await this.lerStatus(pts.st.canhao);
       if (atual === null && !mant) throw new ConflictException('Sem leitura do Canhao_ligado — não dá para saber o estado do canhão.');
