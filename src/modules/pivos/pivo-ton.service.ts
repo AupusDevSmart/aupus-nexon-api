@@ -82,6 +82,7 @@ export const TXT_FALHA: Record<string, string> = {
   sem_posicao: 'Sem leitura do encoder',
   nao_parou: 'O pivô não confirmou a parada (BI03/BI04)',
   reinicio: 'A TON reiniciou com o pivô ligado (queda de energia ou reset)',
+  falha_reles: 'Relés da TON sem controle (expansor I2C): a TON desligou o pivô',
   concluido: 'Parada programada atingida',
   comando: 'Desligado por comando',
 };
@@ -106,6 +107,7 @@ const TXT_RECUSA: Record<string, string> = {
   pivo_sem_config: 'A TON ainda não recebeu a configuração do pivô',
   pivo_io_incompleto: 'Falta BO de giro, percentímetro ou bombeamento ligada nesta TON',
   pivo_sem_encoder: 'Parada por voltas/ângulo precisa do encoder na mesma TON',
+  pivo_falha_reles: 'Os relés da TON estão sem controle (expansor I2C) — confira a placa antes de ligar',
 };
 
 /** `pivo enc <resolução> <inv 0/1> <zero°>` — o encoder como a TON guarda (zero com duas casas). */
