@@ -1071,11 +1071,19 @@ export class PivoSequenciaService implements OnModuleInit {
    * TON, ponta…). Conta o tempo inteiro ligado, inclusive o tempo parado do ciclo do percentímetro.
    */
   async horimetro(id: string, ligadoAgora = true): Promise<number> {
+    // pivo_config.parametros: horimetro_desde (ISO; antes disso não conta) + horimetro_base_h (horas iniciais,
+    // ex.: o que o horímetro do painel marcava quando o NexON começou a contar)
+    const cfg = await this.prisma.$queryRaw<Array<{ desde: string | null; base: string | null }>>`
+      SELECT parametros->>'horimetro_desde' AS desde, parametros->>'horimetro_base_h' AS base
+      FROM pivo_config WHERE equipamento_id = ${id}::bpchar LIMIT 1`.catch(() => []);
+    const desdeD = cfg[0]?.desde ? new Date(cfg[0].desde) : null;
+    const desde = desdeD && !Number.isNaN(desdeD.getTime()) ? desdeD : new Date(0);
+    const base = Number(cfg[0]?.base) > 0 ? Number(cfg[0]?.base) : 0;
     const rows = await this.prisma.$queryRaw<Array<{ acao: string; status: string; created_at: Date; finished_at: Date | null }>>`
       SELECT acao, status, created_at, finished_at FROM pivo_sequencias
-      WHERE equipamento_id = ${id}::bpchar AND status NOT IN ('agendada', 'cancelada')
+      WHERE equipamento_id = ${id}::bpchar AND status NOT IN ('agendada', 'cancelada') AND created_at >= ${desde}
       ORDER BY created_at`;
-    return horasLigado(rows, new Date(), ligadoAgora);
+    return Math.round((base + horasLigado(rows, new Date(), ligadoAgora)) * 10) / 10;
   }
 
   private async lerStatus(m: MapaBi | undefined): Promise<0 | 1 | null> {

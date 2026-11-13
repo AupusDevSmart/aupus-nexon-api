@@ -103,6 +103,9 @@ export class PivosService {
         direcionamento: parametros.direcionamento === 'fisico' ? 'fisico' : 'valvula',
         valvula_ton_id: typeof parametros.valvula_ton_id === 'string' ? parametros.valvula_ton_id : null,
         valvula_bo: num(parametros.valvula_bo),
+        // Horímetro (12/11): conta a partir desta data (histórico antes dela não vale) + horas iniciais
+        horimetro_desde: typeof parametros.horimetro_desde === 'string' ? parametros.horimetro_desde : null,
+        horimetro_base_h: num(parametros.horimetro_base_h),
       },
       unidade_nome: eq.unidade_nome ?? null,
       planta_nome: eq.planta_nome ?? null,
