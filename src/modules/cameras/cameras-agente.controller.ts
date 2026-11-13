@@ -16,7 +16,7 @@ import { memoryStorage } from 'multer';
 import { Public } from '@/core';
 import { CamerasAgenteService } from './cameras-agente.service';
 import type { AgenteInfo } from './cameras.tipos';
-import { EventoAgenteDto, FimEventoDto, HeartbeatDto, MiniaturaDto, ResultadoComandoDto } from './dto/cameras-agente.dto';
+import { ClassificacaoEventoDto, EventoAgenteDto, FimEventoDto, HeartbeatDto, MiniaturaDto, ResultadoComandoDto } from './dto/cameras-agente.dto';
 import { Agente, CameraAgenteGuard } from './guards/camera-agente.guard';
 
 const MB = 1024 * 1024;
@@ -67,9 +67,27 @@ export class CamerasAgenteController {
 
   @Post('eventos/:id/fim')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: '{ fim_em, dados? } — dados entra por merge raso no evento' })
+  @ApiOperation({ summary: '{ fim_em, dados?, tipo?, confianca?, caixas? } — dados entra por merge raso; tipo sobe movimento → classe' })
   fimEvento(@Agente() agente: AgenteInfo, @Param('id') id: string, @Body() dto: FimEventoDto) {
     return this.agentes.fimEvento(agente, id, dto);
+  }
+
+  @Post('eventos/:id/classificacao')
+  @HttpCode(HttpStatus.OK)
+  @ApiConsumes('multipart/form-data', 'application/json')
+  @ApiOperation({
+    summary:
+      'tipo (pessoa|veiculo|animal), confianca 0..1, caixas? + arquivo `snapshot` (JPEG ≤ 3 MB, opcional). ' +
+      'Só sobe de movimento para a classe; se passar a alertar, notifica uma vez. Idempotente.',
+  })
+  @UseInterceptors(upload('snapshot', 3))
+  classificacao(
+    @Agente() agente: AgenteInfo,
+    @Param('id') id: string,
+    @Body() dto: ClassificacaoEventoDto,
+    @UploadedFile() file?: Express.Multer.File,
+  ) {
+    return this.agentes.classificacao(agente, id, dto, file);
   }
 
   @Post('eventos/:id/clipe')

@@ -388,6 +388,51 @@ export function interpretarDados(v: unknown): Record<string, unknown> | null {
   }
 }
 
+/** Classes que o agente pode dar a um evento que nasceu como `movimento` (NEXON-108). */
+export const TIPOS_CLASSE = ['pessoa', 'veiculo', 'animal'] as const;
+export type TipoClasse = (typeof TIPOS_CLASSE)[number];
+export const CAIXAS_MAX = 50;
+
+/**
+ * O agente às vezes só reconhece o objeto alguns quadros depois de abrir o evento (carro longe,
+ * pessoa entrando no quadro). A reclassificação só sobe de `movimento` para uma classe: nunca
+ * rebaixa, nunca troca uma classe por outra, nunca mexe em sem_sinal/foto. `null` = nada a fazer.
+ */
+export function tipoReclassificado(atual: string, novo: unknown): TipoClasse | null {
+  if (atual !== 'movimento') return null;
+  return typeof novo === 'string' && (TIPOS_CLASSE as readonly string[]).includes(novo) ? (novo as TipoClasse) : null;
+}
+
+/**
+ * Decisão de alerta na reclassificação. Refaz decidirEvento com a classe nova e o armamento de
+ * agora; `notificar` só quando passa a alertar e ainda não tinha alertado (alerta sai uma vez).
+ */
+export function decidirReclassificacao(
+  tipo: TipoClasse,
+  jaAlertou: boolean,
+  armado: boolean,
+  analise: Partial<Analise> | null | undefined,
+): DecisaoEvento & { notificar: boolean } {
+  const d = decidirEvento(tipo, armado, analise);
+  // já alertou como movimento: segue alerta, sem novo aviso nem novo clipe
+  if (jaAlertou) return { alerta: true, descartado: false, motivo_descarte: null, enviar_clipe: false, notificar: false };
+  return { ...d, notificar: d.alerta };
+}
+
+/** Caixas normalizadas vindas do agente (objeto JSON ou texto JSON no multipart). Inválido → null. */
+export function interpretarCaixas(v: unknown): Record<string, unknown>[] | null {
+  let lista = v;
+  if (typeof v === 'string') {
+    try {
+      lista = JSON.parse(v);
+    } catch {
+      return null;
+    }
+  }
+  if (!Array.isArray(lista)) return null;
+  return lista.slice(0, CAIXAS_MAX).filter((c): c is Record<string, unknown> => !!c && typeof c === 'object' && !Array.isArray(c));
+}
+
 // ---------------------------------------------------------------------------
 // Agente / mídia
 // ---------------------------------------------------------------------------
