@@ -24,6 +24,7 @@ import {
   horaLocal,
   inicioDaNoite,
   modoVigente,
+  analiseNovaCamera,
   normalizarAnalise,
   STREAM_PEDIDO_S,
 } from './cameras-regras';
@@ -165,7 +166,7 @@ export class CamerasService {
         stream_continuo: dto.stream?.continuo ?? false,
         stream_transcodificar: dto.stream?.transcodificar ?? false,
         stream_bitrate_kbps: dto.stream?.bitrate_kbps ?? 800,
-        analise: normalizarAnalise(dto.analise) as unknown as Prisma.InputJsonValue,
+        analise: analiseNovaCamera(dto.analise) as unknown as Prisma.InputJsonValue,
       },
     });
     await this.auditoria.registrar('camera_cadastro', {

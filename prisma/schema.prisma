@@ -3614,6 +3614,8 @@ model cameras_agentes {
   deleted_at        DateTime?          @db.Timestamp(0)
   cameras           cameras[]
   comandos          cameras_comandos[]
+  pareamentos       cameras_pareamentos[]
+  descobertas       cameras_descobertas[]
 
   @@index([unidade_id])
 }
@@ -3732,4 +3734,48 @@ model cameras_comandos {
   agente            cameras_agentes @relation(fields: [agente_id], references: [id], onDelete: Cascade)
 
   @@index([agente_id, estado])
+}
+
+/// NEXON-108: pedido de pareamento do aparelho (agente sem token). db/manual-migrations/2026-11-13_cameras_pareamento.sql
+model cameras_pareamentos {
+  id            String           @id @db.VarChar(26)
+  /// 6 dígitos, único entre os pedidos não expirados.
+  codigo        String           @db.VarChar(6)
+  /// sha256 hex do segredo devolvido só na criação do pedido.
+  segredo_hash  String           @db.VarChar(64)
+  host          String           @db.VarChar(120)
+  mac           String?          @db.VarChar(17)
+  versao        String?          @db.VarChar(40)
+  ip_publico    String           @db.VarChar(64)
+  ip_local      String?          @db.VarChar(64)
+  criado_em     DateTime         @default(now()) @db.Timestamp(0)
+  expira_em     DateTime         @db.Timestamp(0)
+  agente_id     String?          @db.VarChar(26)
+  /// Token nxcam_ cifrado (AES-256-GCM) até a entrega; depois null.
+  token_cifrado String?
+  vinculado_em  DateTime?        @db.Timestamp(0)
+  entregue_em   DateTime?        @db.Timestamp(0)
+  agente        cameras_agentes? @relation(fields: [agente_id], references: [id], onDelete: SetNull)
+
+  @@index([codigo, expira_em])
+  @@index([ip_publico, expira_em])
+}
+
+/// NEXON-108: câmeras encontradas na rede pelo agente (heartbeat `descobertas`).
+model cameras_descobertas {
+  id           String          @id @db.VarChar(26)
+  agente_id    String          @db.VarChar(26)
+  ip           String          @db.VarChar(64)
+  mac          String?         @db.VarChar(17)
+  fabricante   String?         @db.VarChar(40)
+  modelo       String?         @db.VarChar(80)
+  serial       String?         @db.VarChar(80)
+  porta_http   Int?
+  porta_rtsp   Int?
+  inicializada Boolean?
+  visto_em     DateTime        @default(now()) @db.Timestamp(0)
+  agente       cameras_agentes @relation(fields: [agente_id], references: [id], onDelete: Cascade)
+
+  @@unique([agente_id, ip])
+  @@index([visto_em])
 }

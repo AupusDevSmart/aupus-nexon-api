@@ -42,6 +42,8 @@ export type AcaoAuditoria =
   | 'camera_config'
   | 'camera_agente'
   | 'camera_agente_token'
+  // NEXON-108: aparelho pareado por código (agente criado sem copiar token)
+  | 'camera_agente_pareado'
   | 'camera_evento_lido'
   // NEXON-103 (calibração do ângulo do pivô): gravada na TON e restaurada
   | 'pivo_calibracao'

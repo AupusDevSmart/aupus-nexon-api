@@ -1,6 +1,7 @@
 import { Type } from 'class-transformer';
 import {
   Allow,
+  ArrayMaxSize,
   IsArray,
   IsBoolean,
   IsIn,
@@ -15,7 +16,39 @@ import {
   Min,
   ValidateNested,
 } from 'class-validator';
-import { TIPOS_EVENTO, type TipoEvento } from '../cameras-regras';
+import { DESCOBERTAS_MAX, TIPOS_EVENTO, type TipoEvento } from '../cameras-regras';
+
+/**
+ * Câmera encontrada na rede pelo agente (Dahua/Intelbras UDP 37810, ONVIF WS-Discovery).
+ * Só `ip` é exigido aqui; o resto é saneado por normalizarDescobertas (item ruim é ignorado,
+ * não derruba o heartbeat).
+ */
+export class HeartbeatDescobertaDto {
+  @IsString()
+  @MaxLength(64)
+  ip!: string;
+
+  @Allow()
+  mac?: string;
+
+  @Allow()
+  fabricante?: string;
+
+  @Allow()
+  modelo?: string;
+
+  @Allow()
+  serial?: string;
+
+  @Allow()
+  porta_http?: number;
+
+  @Allow()
+  porta_rtsp?: number;
+
+  @Allow()
+  inicializada?: boolean;
+}
 
 export class HeartbeatCameraDto {
   @IsString()
@@ -54,6 +87,14 @@ export class HeartbeatDto {
   @ValidateNested({ each: true })
   @Type(() => HeartbeatCameraDto)
   cameras!: HeartbeatCameraDto[];
+
+  /** NEXON-108: câmeras encontradas na rede (a cada varredura, ~5 min). Ausente = não mexe. */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(DESCOBERTAS_MAX)
+  @ValidateNested({ each: true })
+  @Type(() => HeartbeatDescobertaDto)
+  descobertas?: HeartbeatDescobertaDto[];
 }
 
 /** multipart: campo camera_id + arquivo `arquivo` (JPEG). */

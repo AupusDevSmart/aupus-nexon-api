@@ -507,3 +507,173 @@ export function emailDoAlerta(a: AlertaParaEmail): { assunto: string; html: stri
   ].filter(Boolean);
   return { assunto, html: `<div style="font-family:Arial,sans-serif;font-size:14px;color:#111827">${linhas.join('')}</div>` };
 }
+
+// ---------------------------------------------------------------------------
+// Câmera nova (NEXON-108): análise simplificada, só movimento na tela
+// ---------------------------------------------------------------------------
+
+/** Câmera nova alerta em qualquer detecção quando armada e não roda classificação (IA). */
+export const CLASSES_ALERTA_NOVA_CAMERA: readonly string[] = ['movimento', 'pessoa', 'veiculo', 'animal'];
+
+/**
+ * Análise da câmera criada agora: o front manda só `{ativa, sensibilidade}`; o que não vier usa
+ * `classes_alerta` = as quatro classes e `classificar = false`. Câmeras existentes não passam aqui.
+ */
+export function analiseNovaCamera(v: unknown): Analise {
+  const o = (v && typeof v === 'object' && !Array.isArray(v) ? v : {}) as Record<string, unknown>;
+  const enviado = Object.fromEntries(Object.entries(o).filter(([, x]) => x !== undefined));
+  return normalizarAnalise({ classificar: false, classes_alerta: [...CLASSES_ALERTA_NOVA_CAMERA], ...enviado });
+}
+
+// ---------------------------------------------------------------------------
+// Pareamento do aparelho (NEXON-108)
+// ---------------------------------------------------------------------------
+
+/** Validade do pedido de pareamento (o código some depois disso). */
+export const PAREAMENTO_VALIDADE_S = 30 * 60;
+/** Limite por IP nas rotas públicas: criar pedido / consultar estado (o agente consulta a cada 5 s). */
+export const PAREAMENTO_LIMITE_CRIAR_MIN = 10;
+export const PAREAMENTO_LIMITE_ESTADO_MIN = 30;
+export const MSG_CODIGO_INVALIDO = 'Código não encontrado ou expirado';
+
+export type EstadoPareamento = 'aguardando' | 'vinculado' | 'expirado';
+
+export interface PareamentoEstadoBase {
+  expira_em: Date;
+  agente_id: string | null;
+  vinculado_em: Date | null;
+}
+
+/**
+ * Vinculado (agente criado) vale mesmo depois do prazo, para o aparelho buscar o token que a pessoa
+ * gerou no último minuto; sem vínculo, passou de expira_em = expirado.
+ */
+export function estadoPareamento(p: PareamentoEstadoBase, agora = new Date()): EstadoPareamento {
+  if (p.agente_id && p.vinculado_em) return 'vinculado';
+  return p.expira_em.getTime() > agora.getTime() ? 'aguardando' : 'expirado';
+}
+
+/** O token só sai uma vez: vinculado, ainda cifrado e nunca entregue. */
+export function deveEntregarToken(
+  p: PareamentoEstadoBase & { token_cifrado: string | null; entregue_em: Date | null },
+  agora = new Date(),
+): boolean {
+  return estadoPareamento(p, agora) === 'vinculado' && !!p.token_cifrado && !p.entregue_em;
+}
+
+/** 6 dígitos (com zeros à esquerda) fora de `emUso`; `sorteio` devolve inteiro em [0, 1_000_000). */
+export function gerarCodigoUnico(emUso: Iterable<string>, sorteio: () => number, tentativas = 50): string {
+  const usados = new Set(emUso);
+  for (let i = 0; i < tentativas; i++) {
+    const c = String(Math.abs(Math.trunc(sorteio())) % 1_000_000).padStart(6, '0');
+    if (!usados.has(c)) return c;
+  }
+  throw new Error('Não foi possível gerar um código de pareamento livre');
+}
+
+/** Código digitado pela pessoa: só os dígitos ("123 456" → "123456"); fora de 6 dígitos → null. */
+export function normalizarCodigo(v: string | null | undefined): string | null {
+  const d = (v ?? '').replace(/\D/g, '');
+  return d.length === 6 ? d : null;
+}
+
+/** IP para comparação: sem `::ffff:`, minúsculo, sem espaços. */
+export function normalizarIp(v: string | null | undefined): string | null {
+  const t = (v ?? '').trim().toLowerCase().replace(/^::ffff:/, '');
+  return t || null;
+}
+
+/** "Aparelho nesta rede": o IP público do pedido é o mesmo de quem está logado. */
+export function mesmoIp(a: string | null | undefined, b: string | null | undefined): boolean {
+  const x = normalizarIp(a);
+  return !!x && x === normalizarIp(b);
+}
+
+/** Limite simples em memória por chave (IP) numa janela deslizante de 60 s. */
+export class LimitadorPorMinuto {
+  private readonly batidas = new Map<string, number[]>();
+
+  constructor(private readonly limite: number, private readonly janelaMs = 60_000) {}
+
+  /** true = pode seguir (e conta a batida); false = passou do limite. */
+  permitir(chave: string, agora = Date.now()): boolean {
+    const desde = agora - this.janelaMs;
+    const lista = (this.batidas.get(chave) ?? []).filter((t) => t > desde);
+    if (lista.length >= this.limite) {
+      this.batidas.set(chave, lista);
+      return false;
+    }
+    lista.push(agora);
+    this.batidas.set(chave, lista);
+    if (this.batidas.size > 10_000) this.limpar(agora);
+    return true;
+  }
+
+  private limpar(agora: number) {
+    const desde = agora - this.janelaMs;
+    for (const [k, v] of this.batidas) if (!v.some((t) => t > desde)) this.batidas.delete(k);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Câmeras encontradas na rede (heartbeat `descobertas`, NEXON-108)
+// ---------------------------------------------------------------------------
+
+export const DESCOBERTAS_MAX = 64;
+/** Descoberta vale 24 h na tela; mais velha que isso é apagada. */
+export const DESCOBERTA_VALIDADE_S = 24 * 60 * 60;
+
+export interface Descoberta {
+  ip: string;
+  mac: string | null;
+  fabricante: string | null;
+  modelo: string | null;
+  serial: string | null;
+  porta_http: number | null;
+  porta_rtsp: number | null;
+  inicializada: boolean | null;
+}
+
+const IPV4 = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
+const MAC = /^[0-9a-f]{2}([:-][0-9a-f]{2}){5}$/;
+
+/**
+ * Saneia o que o agente mandou: só IPv4 válido, um por IP (o último vence), fabricante em
+ * minúsculas, mac normalizado com ":", portas 1–65535, textos cortados no tamanho da coluna,
+ * no máximo DESCOBERTAS_MAX itens. Item inválido é ignorado (não derruba o heartbeat).
+ */
+export function normalizarDescobertas(lista: unknown): Descoberta[] {
+  if (!Array.isArray(lista)) return [];
+  const txt = (x: unknown, max: number) => (typeof x === 'string' && x.trim() ? x.trim().slice(0, max) : null);
+  const porta = (x: unknown) => (typeof x === 'number' && Number.isInteger(x) && x >= 1 && x <= 65535 ? x : null);
+  const porIp = new Map<string, Descoberta>();
+  for (const item of lista) {
+    if (!item || typeof item !== 'object') continue;
+    const o = item as Record<string, unknown>;
+    const ip = typeof o.ip === 'string' ? o.ip.trim() : '';
+    if (!IPV4.test(ip)) continue;
+    const macBruto = typeof o.mac === 'string' ? o.mac.trim().toLowerCase() : '';
+    porIp.set(ip, {
+      ip,
+      mac: MAC.test(macBruto) ? macBruto.replace(/-/g, ':') : null,
+      fabricante: txt(o.fabricante, 40)?.toLowerCase() ?? null,
+      modelo: txt(o.modelo, 80),
+      serial: txt(o.serial, 80),
+      porta_http: porta(o.porta_http),
+      porta_rtsp: porta(o.porta_rtsp),
+      inicializada: typeof o.inicializada === 'boolean' ? o.inicializada : null,
+    });
+  }
+  return [...porIp.values()].slice(0, DESCOBERTAS_MAX);
+}
+
+/** Descobertas recentes (24 h) cujo IP ainda não é de câmera cadastrada na unidade. */
+export function descobertasPendentes<T extends { ip: string; visto_em: Date }>(
+  descobertas: T[],
+  ipsCadastrados: Iterable<string>,
+  agora = new Date(),
+): T[] {
+  const cadastrados = new Set([...ipsCadastrados].map((ip) => normalizarIp(ip)));
+  const desde = agora.getTime() - DESCOBERTA_VALIDADE_S * 1000;
+  return descobertas.filter((d) => d.visto_em.getTime() >= desde && !cadastrados.has(normalizarIp(d.ip)));
+}

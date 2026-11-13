@@ -111,6 +111,12 @@ export class CamerasController {
     return this.agentes.criar(dto, user, cliente);
   }
 
+  @Get('agentes/:id/descobertas')
+  @ApiOperation({ summary: 'Câmeras encontradas na rede pelo agente (24 h) que ainda não estão cadastradas na unidade' })
+  descobertasAgente(@Param('id') id: string, @CurrentUser() user?: Usuario) {
+    return this.agentes.descobertas(id, user);
+  }
+
   @Post('agentes/:id/token')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Gera token novo (o antigo deixa de valer)' })
