@@ -1,4 +1,4 @@
-import { duracaoParadaMs, horasLigado, normalizarIrrigacao, normalizarPercentual, percentualDaLamina, resumoIrrigacao } from './pivo-automacao.util';
+import { duracaoParadaMs, horasLigado, horasLigadoDesde, inicioDoMesSP, normalizarIrrigacao, ultimaIrrigacao, normalizarPercentual, percentualDaLamina, resumoIrrigacao } from './pivo-automacao.util';
 
 /** Tabela iCrop do Pivô 11 (Chimarrão): lâmina 100 % = 3,58 mm. [% da tabela, lâmina impressa] */
 const TABELA: Array<[number, number]> = [
@@ -60,5 +60,23 @@ describe('horímetro do pivô (horasLigado, 12/11)', () => {
     ];
     expect(horasLigado(rows, t(16), true)).toBe(5);    // 3 h + 2 h em curso
     expect(horasLigado(rows, t(16), false)).toBe(3);   // NexON já não tem a irrigação ativa: não infla
+  });
+});
+
+describe('horímetro do mês e da irrigação (12/11)', () => {
+  const t = (d: number, h: number, m = 0) => new Date(Date.UTC(2026, 10, d, h, m));
+  const rows = [
+    { acao: 'girar_direita', status: 'concluida', created_at: t(31 - 31 + 1, 0), finished_at: new Date(Date.UTC(2026, 9, 31, 22)) },   // 31/10 22:00 UTC
+    { acao: 'desligar', status: 'concluida', created_at: t(1, 5), finished_at: t(1, 5) },                                            // 01/11 05:00 UTC
+    { acao: 'girar_direita', status: 'concluida', created_at: t(12, 12), finished_at: t(12, 12) },
+    { acao: 'desligar', status: 'concluida', created_at: t(12, 12, 40), finished_at: t(12, 12, 40) },
+  ];
+  it('mês corta na virada (São Paulo); última irrigação em minutos de precisão', () => {
+    rows[0].created_at = new Date(Date.UTC(2026, 9, 31, 21));
+    const mes = inicioDoMesSP(t(13, 12));
+    expect(mes.toISOString()).toBe('2026-11-01T03:00:00.000Z');
+    // 01/11 03:00 → 05:00 UTC = 2 h + 40 min
+    expect(horasLigadoDesde(rows, mes, t(13, 12), false)).toBeCloseTo(2 + 40 / 60, 3);
+    expect(ultimaIrrigacao(rows, t(13, 12), false)).toEqual({ horas: 0.6667, em_curso: false });
   });
 });

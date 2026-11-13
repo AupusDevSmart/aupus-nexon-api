@@ -7,7 +7,7 @@ import { FUSO_OPERACAO, JanelaComAtivo, janelaValida, momentoEmSaoPaulo } from '
 import { anguloDoEncoder, brutoDoEncoder, parametrosEncoder } from './pivo-posicao.util';
 import { PivoTonService, TXT_FALHA } from './pivo-ton.service';
 import { calibracaoVigente } from './pivo-calibracao.repo';
-import { dentroDaPonta, duracaoParadaMs, horasLigado, fmtPercentual, Irrigacao, leituraMaisAntiga, mudancasConfig, normalizarIrrigacao, normalizarPercentual, OrigemSequencia, percentualDaLamina, resumoIrrigacao } from './pivo-automacao.util';
+import { dentroDaPonta, duracaoParadaMs, horasLigado, horasLigadoDesde, inicioDoMesSP, ultimaIrrigacao, fmtPercentual, Irrigacao, leituraMaisAntiga, mudancasConfig, normalizarIrrigacao, normalizarPercentual, OrigemSequencia, percentualDaLamina, resumoIrrigacao } from './pivo-automacao.util';
 
 /**
  * Sequência do pivô com bombeamento (docs/IOT-PIVO-BOMBEAMENTO.md).
@@ -88,7 +88,7 @@ const SEQ_PADRAO: SequenciaCfg = { pressurizacao_s: 60, confirma_giro_s: 30, con
 const norm = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 
 type PapelComando = 'ligar' | 'valvula' | 'canhao' | 'percentimetro' | 'direita' | 'esquerda' | 'desligar';
-type PapelStatus = 'ligado' | 'canhao' | 'permissivo' | 'pressao' | 'tensao' | 'direita' | 'esquerda' | 'desligado' | 'erro';
+type PapelStatus = 'ligado' | 'canhao' | 'permissivo' | 'pressao' | 'tensao' | 'seguranca' | 'direita' | 'esquerda' | 'desligado' | 'erro';
 type MapaBi = { ton_id: string; bi: number; inv: boolean };
 /** Resultado de comandar o canhão (aplicarCanhao). */
 type ResCanhao = 'ok' | 'ja' | 'sem_ponto' | 'sem_status' | 'sem_leitura' | 'nao_confirmou' | 'enviado';
@@ -122,6 +122,8 @@ const PAPEIS_STATUS: Record<PapelStatus, RegExp> = {
   pressao: /press/,
   // Tensao_ok (BI02 do padrão): painel energizado / tensão presente
   tensao: /tens/,
+  // Seguranca (BI05 do padrão): alinhamento do pivô — 1 = alinhado (ok), 0 = desalinhado/atuou
+  seguranca: /segur|alinh/,
   direita: /direit/,
   esquerda: /esquerd/,
   desligado: /deslig|parad/,
@@ -541,9 +543,10 @@ export class PivoSequenciaService implements OnModuleInit {
         canhao: { comando: !!pts.cmd.canhao, tem_status: !!pts.st.canhao, ligado: await this.canhaoLigado(pts) },
         permissivo: await this.lerStatus(pts.st.permissivo),
         // Pressão OK (BI01) e Tensão OK (BI02), já com a polaridade: 1 = ok, 0 = falta, null = sem ponto/leitura
-        entradas: { pressao: await this.lerStatus(pts.st.pressao), tensao: await this.lerStatus(pts.st.tensao) },
-        // Horímetro: horas com o pivô LIGADO (do ligar confirmado até o desligar), pelo histórico do NexON
-        horimetro_h: await this.horimetro(id, !!ativa).catch(() => null),
+        entradas: { pressao: await this.lerStatus(pts.st.pressao), tensao: await this.lerStatus(pts.st.tensao), alinhamento: await this.lerStatus(pts.st.seguranca) },
+        // Horímetro: horas com o pivô LIGADO (do ligar confirmado até o desligar), pelo histórico do NexON:
+        // total (desde horimetro_desde + base), do mês corrente e da irrigação atual/última
+        ...(await this.horimetro(id, !!ativa).catch(() => ({ horimetro_h: null, horimetro_mes_h: null, irrigacao_h: null }))),
         status: st,
         lido_em: await this.lidoEmPivo(pts),
         // Chave seletora em modo TON (NEXON-103): null = sem leitura; tem_modo_ton false = pivô sem a chave
@@ -1070,7 +1073,7 @@ export class PivoSequenciaService implements OnModuleInit {
    * girar_* concluída) até o próximo desligar/ligar registrado (desligar do operador, parada da
    * TON, ponta…). Conta o tempo inteiro ligado, inclusive o tempo parado do ciclo do percentímetro.
    */
-  async horimetro(id: string, ligadoAgora = true): Promise<number> {
+  async horimetro(id: string, ligadoAgora = true): Promise<{ horimetro_h: number; horimetro_mes_h: number; irrigacao_h: { horas: number; em_curso: boolean } | null }> {
     // pivo_config.parametros: horimetro_desde (ISO; antes disso não conta) + horimetro_base_h (horas iniciais,
     // ex.: o que o horímetro do painel marcava quando o NexON começou a contar)
     const cfg = await this.prisma.$queryRaw<Array<{ desde: string | null; base: string | null }>>`
@@ -1083,7 +1086,13 @@ export class PivoSequenciaService implements OnModuleInit {
       SELECT acao, status, created_at, finished_at FROM pivo_sequencias
       WHERE equipamento_id = ${id}::bpchar AND status NOT IN ('agendada', 'cancelada') AND created_at >= ${desde}
       ORDER BY created_at`;
-    return Math.round((base + horasLigado(rows, new Date(), ligadoAgora)) * 10) / 10;
+    const agora = new Date();
+    const mes = inicioDoMesSP(agora);
+    return {
+      horimetro_h: Math.round((base + horasLigado(rows, agora, ligadoAgora)) * 10000) / 10000,
+      horimetro_mes_h: horasLigadoDesde(rows, mes > desde ? mes : desde, agora, ligadoAgora),
+      irrigacao_h: ultimaIrrigacao(rows, agora, ligadoAgora),
+    };
   }
 
   private async lerStatus(m: MapaBi | undefined): Promise<0 | 1 | null> {
@@ -1779,7 +1788,7 @@ export class PivoSequenciaService implements OnModuleInit {
         // ordem importa: "anti-horário" antes de "horário"
         for (const k of ['valvula', 'canhao', 'ligar', 'percentimetro', 'esquerda', 'direita', 'desligar'] as const) if (PAPEIS_COMANDO[k].test(n)) { if (!cmd[k]) cmd[k] = r.id; break; }
       } else if (r.tipo === 'status' && r.ton_id && r.bi) {
-        for (const k of ['canhao', 'ligado', 'permissivo', 'pressao', 'tensao', 'erro', 'desligado', 'esquerda', 'direita'] as const) if (PAPEIS_STATUS[k].test(n)) { if (!st[k]) st[k] = { ton_id: r.ton_id, bi: r.bi, inv: !!r.inv }; break; }
+        for (const k of ['canhao', 'ligado', 'permissivo', 'pressao', 'tensao', 'seguranca', 'erro', 'desligado', 'esquerda', 'direita'] as const) if (PAPEIS_STATUS[k].test(n)) { if (!st[k]) st[k] = { ton_id: r.ton_id, bi: r.bi, inv: !!r.inv }; break; }
       }
     }
     return { cmd, st, modoTon };

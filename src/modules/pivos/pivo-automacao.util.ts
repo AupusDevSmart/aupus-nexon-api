@@ -224,15 +224,45 @@ export function mudancasConfig(antes: Record<string, unknown>, depois: Record<st
  * confirmado (girar_* concluída: finished_at = pivô girando/irrigando) e fecha na próxima sequência
  * registrada (desligar, parada da TON, novo ligar). Ligado até agora conta até `agora`.
  */
-export function horasLigado(rows: Array<{ acao: string; status: string; created_at: Date | string; finished_at: Date | string | null }>, agora: Date, ligadoAgora = true): number {
-  let total = 0;
+type LinhaSeq = { acao: string; status: string; created_at: Date | string; finished_at: Date | string | null };
+
+/** Trechos com o pivô ligado (ms). `aberto` = ainda ligado (só quando o NexON tem a irrigação ativa). */
+export function intervalosLigado(rows: LinhaSeq[], agora: Date, ligadoAgora = true): Array<{ ini: number; fim: number; aberto: boolean }> {
+  const out: Array<{ ini: number; fim: number; aberto: boolean }> = [];
   let desde: number | null = null;
   for (const r of rows) {
     const criado = new Date(r.created_at).getTime();
-    if (desde != null && criado > desde) { total += criado - desde; desde = null; }
+    if (desde != null && criado > desde) { out.push({ ini: desde, fim: criado, aberto: false }); desde = null; }
     if (/^girar_/.test(r.acao) && r.status === 'concluida' && r.finished_at) desde = new Date(r.finished_at).getTime();
   }
   // Trecho em aberto só conta se o NexON ainda tem a irrigação ativa (parada perdida no rádio não infla o horímetro)
-  if (desde != null && ligadoAgora && agora.getTime() > desde) total += agora.getTime() - desde;
-  return Math.round((total / 3600000) * 10) / 10;
+  if (desde != null && ligadoAgora && agora.getTime() > desde) out.push({ ini: desde, fim: agora.getTime(), aberto: true });
+  return out;
+}
+
+// Precisão de minuto (a tela mostra em min abaixo de 1 h)
+const h1 = (ms: number) => Math.round((Math.round(ms / 60000) / 60) * 10000) / 10000;
+
+export function horasLigado(rows: LinhaSeq[], agora: Date, ligadoAgora = true): number {
+  return h1(intervalosLigado(rows, agora, ligadoAgora).reduce((a, i) => a + (i.fim - i.ini), 0));
+}
+
+/** Horas ligado dentro de [desde, agora] (corta os trechos na borda). */
+export function horasLigadoDesde(rows: LinhaSeq[], desde: Date, agora: Date, ligadoAgora = true): number {
+  const d = desde.getTime();
+  return h1(intervalosLigado(rows, agora, ligadoAgora).reduce((a, i) => a + Math.max(0, i.fim - Math.max(i.ini, d)), 0));
+}
+
+/** Última irrigação (em curso ou a última que terminou): horas e se está em curso. */
+export function ultimaIrrigacao(rows: LinhaSeq[], agora: Date, ligadoAgora = true): { horas: number; em_curso: boolean } | null {
+  const v = intervalosLigado(rows, agora, ligadoAgora);
+  const u = v[v.length - 1];
+  return u ? { horas: h1(u.fim - u.ini), em_curso: u.aberto } : null;
+}
+
+/** 1º dia do mês corrente, 00:00 em São Paulo. */
+export function inicioDoMesSP(agora: Date): Date {
+  const p = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit' }).formatToParts(agora);
+  const y = p.find((x) => x.type === 'year')!.value, m = p.find((x) => x.type === 'month')!.value;
+  return new Date(`${y}-${m}-01T00:00:00-03:00`);
 }
