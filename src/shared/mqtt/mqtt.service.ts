@@ -1419,6 +1419,27 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       const sd_writes = intOrZero(dados.sd_writes);
       const device_name = equipamento.nome.slice(0, 100);
 
+      // Reinício da TON (12/11): o uptime voltou → registra na trilha da TON com o MOTIVO que ela
+      // informa (rr no heartbeat do satélite / reset no diagnóstico): energia, brownout, watchdog,
+      // OTA, comando, rede, relés do pivô… Sem o campo = firmware antigo.
+      if (uptimeNum !== null) {
+        const ant = await this.prisma.iot_dispositivos_online.findUnique({ where: { topico_mqtt: topico }, select: { uptime_sec: true } }).catch(() => null);
+        const upAnt = ant?.uptime_sec != null ? Number(ant.uptime_sec) : null;
+        if (upAnt !== null && uptimeNum + 5 < upAnt) {
+          const bruto = stringOrNull((dados as any).rr ?? (dados as any).reset, 24);
+          const { texto, severidade } = motivoDoReinicio(bruto);
+          await this.prisma.logs_mqtt.create({
+            data: {
+              equipamento_id: equipamento.id,
+              mensagem: `${equipamento.nome.trim()} reiniciou: ${texto}`.slice(0, 500),
+              severidade,
+              valor_lido: Math.trunc(uptimeNum),
+              dados_snapshot: { reinicio: true, motivo: bruto, uptime_anterior_s: upAnt, uptime_s: Math.trunc(uptimeNum) },
+            },
+          }).catch((e) => console.warn(`⚠️ [MQTT] log de reinício falhou (${topico}): ${e?.message ?? e}`));
+        }
+      }
+
       await this.prisma.iot_dispositivos_online.upsert({
         where: { topico_mqtt: topico },
         create: {
@@ -3211,4 +3232,24 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     const avgSquareDiff = this.mean(squareDiffs);
     return Math.sqrt(avgSquareDiff);
   }
+}
+
+/** Motivo do reinício que a TON informa (blackbox: rr/reset) → texto da trilha + severidade. */
+export function motivoDoReinicio(rr: string | null): { texto: string; severidade: string } {
+  if (!rr) return { texto: 'motivo não informado (firmware sem esse dado)', severidade: 'WARN' };
+  const r = rr.toLowerCase();
+  if (r.startsWith('brownout')) return { texto: 'queda de tensão na alimentação (brownout)', severidade: 'ALTA' };
+  if (r.startsWith('watchdog')) return { texto: 'travou e o watchdog reiniciou', severidade: 'ALTA' };
+  if (r.startsWith('panic')) return { texto: 'falha do firmware (panic)', severidade: 'ALTA' };
+  if (r.startsWith('power')) return { texto: 'ligou na energia (estava sem alimentação ou foi religada)', severidade: 'WARN' };
+  if (r.startsWith('sw:')) {
+    const por = r.slice(3);
+    if (por.startsWith('ota')) return { texto: 'atualização de firmware (OTA)', severidade: 'INFO' };
+    if (por.startsWith('cmd')) return { texto: 'comando de reinício', severidade: 'INFO' };
+    if (por.startsWith('rede')) return { texto: 'reinício automático: sem rede/broker', severidade: 'WARN' };
+    if (por.startsWith('reles')) return { texto: 'relés sem controle (proteção do pivô)', severidade: 'ALTA' };
+    return { texto: `reinício por software (${por})`, severidade: 'WARN' };
+  }
+  if (r.startsWith('software')) return { texto: 'reinício por software', severidade: 'WARN' };
+  return { texto: `motivo ${rr}`, severidade: 'WARN' };
 }
