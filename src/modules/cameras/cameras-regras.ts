@@ -513,16 +513,16 @@ export function emailDoAlerta(a: AlertaParaEmail): { assunto: string; html: stri
 // ---------------------------------------------------------------------------
 
 /** Câmera nova alerta em qualquer detecção quando armada e não roda classificação (IA). */
-export const CLASSES_ALERTA_NOVA_CAMERA: readonly string[] = ['movimento', 'pessoa', 'veiculo', 'animal'];
+export const CLASSES_ALERTA_NOVA_CAMERA: readonly string[] = ['pessoa', 'veiculo', 'animal'];
 
 /**
  * Análise da câmera criada agora: o front manda só `{ativa, sensibilidade}`; o que não vier usa
- * `classes_alerta` = as quatro classes e `classificar = false`. Câmeras existentes não passam aqui.
+ * `classes_alerta` = pessoa, veículo e animal e `classificar = true` (movimento puro não avisa). Câmeras existentes não passam aqui.
  */
 export function analiseNovaCamera(v: unknown): Analise {
   const o = (v && typeof v === 'object' && !Array.isArray(v) ? v : {}) as Record<string, unknown>;
   const enviado = Object.fromEntries(Object.entries(o).filter(([, x]) => x !== undefined));
-  return normalizarAnalise({ classificar: false, classes_alerta: [...CLASSES_ALERTA_NOVA_CAMERA], ...enviado });
+  return normalizarAnalise({ classificar: true, classes_alerta: [...CLASSES_ALERTA_NOVA_CAMERA], ...enviado });
 }
 
 // ---------------------------------------------------------------------------

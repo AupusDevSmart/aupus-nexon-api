@@ -22,18 +22,18 @@ const agora = new Date('2026-11-13T12:00:00Z');
 const min = (n: number) => new Date(agora.getTime() + n * 60_000);
 
 describe('analiseNovaCamera (câmera nova: qualquer detecção alerta, sem IA)', () => {
-  it('sem análise no dto → quatro classes e classificar=false', () => {
+  it('sem análise no dto → pessoa/veículo/animal e classificar=true', () => {
     const a = analiseNovaCamera(undefined);
-    expect(a.classes_alerta).toEqual(['movimento', 'pessoa', 'veiculo', 'animal']);
-    expect(a.classificar).toBe(false);
+    expect(a.classes_alerta).toEqual(['pessoa', 'veiculo', 'animal']);
+    expect(a.classificar).toBe(true);
     expect(a.ativa).toBe(true);
   });
 
   it('front manda só {ativa, sensibilidade}; chaves undefined não apagam o padrão', () => {
     const a = analiseNovaCamera({ ativa: true, sensibilidade: 80, classificar: undefined, classes_alerta: undefined });
     expect(a.sensibilidade).toBe(80);
-    expect(a.classificar).toBe(false);
-    expect(a.classes_alerta).toHaveLength(4);
+    expect(a.classificar).toBe(true);
+    expect(a.classes_alerta).toHaveLength(3);
   });
 
   it('o que vier explícito vale', () => {
