@@ -73,7 +73,7 @@ export const ANALISE_PADRAO: Analise = {
   classificar: true,
   classes_alerta: ['pessoa', 'veiculo'],
   clipe_s: 15,
-  pre_s: 15,
+  pre_s: 10,
   zonas: [],
 };
 
