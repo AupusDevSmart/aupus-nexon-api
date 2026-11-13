@@ -31,11 +31,21 @@ export class EstadoPareamentoDto {
   segredo!: string;
 }
 
-/** POST /cameras/pareamento/vincular — a pessoa logada digita o código do aparelho. */
+/**
+ * POST /cameras/pareamento/vincular — `codigo` (digitado do aparelho, de qualquer rede) OU
+ * `pedido_id` (aparelho escolhido em /proximos, só da mesma rede). Exatamente um dos dois.
+ */
 export class VincularPareamentoDto {
+  @IsOptional()
   @IsString()
   @Matches(/^\s*\d{3}\s?\d{3}\s*$/, { message: 'codigo deve ter 6 dígitos' })
-  codigo!: string;
+  codigo?: string;
+
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(26)
+  pedido_id?: string;
 
   @IsString()
   @IsNotEmpty()

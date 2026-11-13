@@ -1,4 +1,12 @@
-import { HttpException, HttpStatus, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  HttpException,
+  HttpStatus,
+  Injectable,
+  Logger,
+  NotFoundException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import { PermissionScopeService, PrismaService } from '@/core';
 import { novoId26, type ClienteInfo } from '@/core/common/cliente-info';
@@ -6,16 +14,24 @@ import { CamerasAgenteService } from './cameras-agente.service';
 import { CamerasAuditoriaService } from './cameras-auditoria.service';
 import { CamerasMidiaService } from './cameras-midia.service';
 import {
+  chaveLimiteIp,
   deveEntregarToken,
   estadoPareamento,
   gerarCodigoUnico,
   LimitadorPorMinuto,
+  mascararCodigo,
+  mesmoIp,
   MSG_CODIGO_INVALIDO,
+  MSG_MUITAS_TENTATIVAS_VINCULAR,
   normalizarCodigo,
   normalizarIp,
   PAREAMENTO_LIMITE_CRIAR_MIN,
   PAREAMENTO_LIMITE_ESTADO_MIN,
+  PAREAMENTO_MAX_PENDENTES,
   PAREAMENTO_VALIDADE_S,
+  VINCULAR_FALHAS_UNIDADE,
+  VINCULAR_FALHAS_USUARIO,
+  VINCULAR_JANELA_MS,
 } from './cameras-regras';
 import type { Usuario } from './cameras.tipos';
 import type { EstadoPareamentoDto, PedirPareamentoDto, VincularPareamentoDto } from './dto/cameras-pareamento.dto';
@@ -32,6 +48,9 @@ export class CamerasPareamentoService {
   private readonly logger = new Logger(CamerasPareamentoService.name);
   private readonly limiteCriar = new LimitadorPorMinuto(PAREAMENTO_LIMITE_CRIAR_MIN);
   private readonly limiteEstado = new LimitadorPorMinuto(PAREAMENTO_LIMITE_ESTADO_MIN);
+  /** Falhas de vincular (código errado, pedido de outra rede): por usuário e por unidade, em 10 min. */
+  private readonly falhasUsuario = new LimitadorPorMinuto(VINCULAR_FALHAS_USUARIO, VINCULAR_JANELA_MS);
+  private readonly falhasUnidade = new LimitadorPorMinuto(VINCULAR_FALHAS_UNIDADE, VINCULAR_JANELA_MS);
 
   constructor(
     private readonly prisma: PrismaService,
@@ -42,8 +61,7 @@ export class CamerasPareamentoService {
   ) {}
 
   private limitar(limitador: LimitadorPorMinuto, cliente?: ClienteInfo) {
-    const chave = normalizarIp(cliente?.ip) ?? 'sem-ip';
-    if (!limitador.permitir(chave)) {
+    if (!limitador.permitir(chaveLimiteIp(cliente?.ip))) {
       throw new HttpException('Muitas tentativas; aguarde um minuto', HttpStatus.TOO_MANY_REQUESTS);
     }
   }
@@ -62,6 +80,14 @@ export class CamerasPareamentoService {
     await this.prisma.cameras_pareamentos.deleteMany({
       where: { expira_em: { lt: new Date(agora.getTime() - 24 * 60 * 60 * 1000) }, agente_id: null },
     });
+    // Teto global: rota pública não pode encher a tabela (nem esgotar os códigos de 6 dígitos).
+    const pendentes = await this.prisma.cameras_pareamentos.count({
+      where: { agente_id: null, vinculado_em: null, expira_em: { gt: agora } },
+    });
+    if (pendentes >= PAREAMENTO_MAX_PENDENTES) {
+      this.logger.warn(`[cameras] pareamento: ${pendentes} pedidos aguardando; novo pedido recusado (503)`);
+      throw new ServiceUnavailableException('Pareamento indisponível no momento; tente de novo em alguns minutos');
+    }
     const emUso = await this.prisma.cameras_pareamentos.findMany({
       where: { expira_em: { gt: agora } },
       select: { codigo: true },
@@ -140,8 +166,9 @@ export class CamerasPareamentoService {
       orderBy: { criado_em: 'desc' },
       take: 20,
     });
+    // Sem `codigo`: quem está na mesma rede escolhe o aparelho por pedido_id (vincular confere o IP de novo).
     return pedidos.map((p) => ({
-      codigo: p.codigo,
+      pedido_id: p.id,
       host: p.host,
       mac: p.mac,
       ip_local: p.ip_local,
@@ -150,28 +177,69 @@ export class CamerasPareamentoService {
     }));
   }
 
-  /** POST /cameras/pareamento/vincular — cria o agente e guarda o token cifrado para o aparelho. */
+  /**
+   * POST /cameras/pareamento/vincular — cria o agente e guarda o token cifrado para o aparelho.
+   * Por `codigo` (digitado do aparelho, de qualquer rede) ou por `pedido_id` (escolhido em /proximos,
+   * só enquanto o IP de quem chama for o ip_publico do pedido). Falha conta no limite por usuário e
+   * por unidade e vai para a trilha como camera_pareamento_falha.
+   */
   async vincular(dto: VincularPareamentoDto, user?: Usuario, cliente?: ClienteInfo, agora = new Date()) {
     this.agentes.exigirCadastroTecnico(user);
-    const codigo = normalizarCodigo(dto.codigo);
-    if (!codigo) throw new NotFoundException(MSG_CODIGO_INVALIDO);
+    const temCodigo = dto.codigo !== undefined && dto.codigo !== null && dto.codigo !== '';
+    const temPedido = !!dto.pedido_id?.trim();
+    if (temCodigo === temPedido) throw new BadRequestException('Informe codigo ou pedido_id (só um dos dois)');
+    const via: 'codigo' | 'pedido_id' = temCodigo ? 'codigo' : 'pedido_id';
     const unidadeId = dto.unidade_id.trim();
+
+    const chaveUsuario = user?.id ? `u:${String(user.id).trim()}` : `ip:${chaveLimiteIp(cliente?.ip)}`;
+    const chaveUnidade = `un:${unidadeId}`;
+    const t = agora.getTime();
+    if (this.falhasUsuario.excedido(chaveUsuario, t) || this.falhasUnidade.excedido(chaveUnidade, t)) {
+      throw new HttpException(MSG_MUITAS_TENTATIVAS_VINCULAR, HttpStatus.TOO_MANY_REQUESTS);
+    }
+
     if (user) await this.scope.assertEntityInScope('unidade', unidadeId, user);
     const ctx = await this.auditoria.contextoUnidade(unidadeId);
     if (!ctx.unidade || !ctx.planta) throw new NotFoundException('Unidade não encontrada');
 
-    const p = await this.prisma.cameras_pareamentos.findFirst({
-      where: { codigo, agente_id: null, vinculado_em: null, expira_em: { gt: agora } },
-      orderBy: { criado_em: 'desc' },
-    });
-    if (!p) throw new NotFoundException(MSG_CODIGO_INVALIDO);
+    const falhar = async (motivo: string): Promise<never> => {
+      this.falhasUsuario.registrar(chaveUsuario, t);
+      this.falhasUnidade.registrar(chaveUnidade, t);
+      const tentado = via === 'codigo' ? mascararCodigo(dto.codigo) : null;
+      await this.auditoria.registrar('camera_pareamento_falha', {
+        mensagem: `Pareamento recusado (${motivo}) por ${via === 'codigo' ? `código ${tentado}` : `pedido ${dto.pedido_id?.trim()}`} de IP ${cliente?.ip ?? '?'} — ${ctx.unidade!.nome} (${ctx.planta!.nome})`,
+        user,
+        cliente,
+        unidade: ctx.unidade,
+        planta: ctx.planta,
+        objetoTipo: 'camera_pareamento',
+        objetoId: via === 'pedido_id' ? (dto.pedido_id?.trim().slice(0, 26) ?? null) : null,
+        resultado: 'negado',
+        extra: { acao: 'vincular', via, motivo, codigo_tentado: tentado, pedido_id: via === 'pedido_id' ? dto.pedido_id?.trim() : null },
+      });
+      throw new NotFoundException(MSG_CODIGO_INVALIDO);
+    };
+
+    const aguardando = { agente_id: null, vinculado_em: null, expira_em: { gt: agora } };
+    let p: Awaited<ReturnType<typeof this.prisma.cameras_pareamentos.findFirst>>;
+    if (via === 'codigo') {
+      const codigo = normalizarCodigo(dto.codigo);
+      if (!codigo) return falhar('código inválido');
+      p = await this.prisma.cameras_pareamentos.findFirst({ where: { codigo, ...aguardando }, orderBy: { criado_em: 'desc' } });
+      if (!p) return falhar('código não encontrado ou expirado');
+    } else {
+      p = await this.prisma.cameras_pareamentos.findFirst({ where: { id: dto.pedido_id!.trim(), ...aguardando } });
+      if (!p) return falhar('pedido não encontrado ou expirado');
+      // Escolher pela lista só vale na mesma rede do aparelho; fora dela, digitar o código.
+      if (!mesmoIp(cliente?.ip, p.ip_publico)) return falhar('pedido de outra rede');
+    }
 
     // Reserva o pedido antes de criar o agente: dois cliques ao mesmo tempo não criam dois agentes.
     const reservado = await this.prisma.cameras_pareamentos.updateMany({
       where: { id: p.id, agente_id: null, vinculado_em: null },
       data: { vinculado_em: agora },
     });
-    if (reservado.count !== 1) throw new NotFoundException(MSG_CODIGO_INVALIDO);
+    if (reservado.count !== 1) return falhar('pedido já vinculado');
 
     let criado: Awaited<ReturnType<CamerasAgenteService['inserirAgente']>>;
     try {
@@ -192,7 +260,7 @@ export class CamerasPareamentoService {
     const a = criado.agente;
 
     await this.auditoria.registrar('camera_agente_pareado', {
-      mensagem: `Aparelho "${p.host}"${p.mac ? ` (MAC ${p.mac})` : ''} pareado pelo código ${p.codigo} de IP ${p.ip_publico}${p.ip_local ? ` / ${p.ip_local}` : ''} como agente de câmeras "${a.nome}" — ${ctx.unidade.nome} (${ctx.planta.nome})`,
+      mensagem: `Aparelho "${p.host}"${p.mac ? ` (MAC ${p.mac})` : ''} pareado pelo código ${p.codigo} (${via === 'codigo' ? 'código digitado' : 'escolhido na lista da mesma rede'}) de IP ${p.ip_publico}${p.ip_local ? ` / ${p.ip_local}` : ''} como agente de câmeras "${a.nome}" — ${ctx.unidade.nome} (${ctx.planta.nome})`,
       user,
       cliente,
       unidade: ctx.unidade,
@@ -202,6 +270,7 @@ export class CamerasPareamentoService {
       extra: {
         agente: { id: a.id, nome: a.nome },
         acao: 'pareado',
+        via,
         pareamento: {
           id: p.id,
           codigo: p.codigo,
