@@ -9,12 +9,11 @@ import { PrismaService } from '../../prisma/prisma.service';
  * - "Existe" = há fonte de dados configurada (tópico MQTT ou vínculo no projeto IoT da TON), não
  *   um símbolo no unifilar. Medidor desenhado sem vínculo IoT não existe.
  * - Existe mas sem leitura recente continua existindo, com `comunicando: false`.
- * - Inversores → Geração. Medidor de entrada → Carga (carga = geração + líquido do medidor; sem
- *   medidor ela é desconhecida). Medidor da concessionária (bidirecional) → Rede.
- * - Medidor que só mede uma carga interna (ligado no IoT a um disjuntor de pivô/motor/carga) não é
- *   de entrada, a menos que esteja na configuração de demanda da unidade.
- * - Grandezas elétricas só de medidor de entrada com tensão/corrente (gateway A966/SSU não tem).
- *   Tensão/corrente de inversor nunca entra: não é o ponto de conexão.
+ * - Quem fala de quê segue a categoria do equipamento (a mesma do gráfico de demanda):
+ *   Inversores → Geração; Power Meter → Carga; medidor da concessionária (Padrão de Energia,
+ *   Gateway, SSU) → Rede. Sem Power Meter a carga é desconhecida, não zero.
+ * - Grandezas elétricas só de medidor (PM ou concessionária) com tensão/corrente (gateway
+ *   A966/SSU não tem). Tensão/corrente de inversor nunca entra: não é o ponto de conexão.
  */
 
 export type FonteCapacidade = 'ton' | 'nuvem' | 'manual' | null;
@@ -45,15 +44,11 @@ export interface EquipamentoCapacidade {
   topico_mqtt: string | null;
   /** Ligado ao projeto IoT de uma TON (iot_componentes). */
   vinculado_iot: boolean;
-  /** Fonte de medição ligada no IoT a um disjuntor de pivô/motor/carga/carregador. */
-  mede_carga: boolean;
   ultima_leitura: Date | string | null;
 }
 
 export interface EntradaCapacidades {
   equipamentos: EquipamentoCapacidade[];
-  /** configuracao_demanda.equipamentos_ids */
-  configurados: string[];
   demandaCarga: number | null;
   demandaGeracao: number | null;
   nuvem: { ativo: boolean; ultima_sync_em: Date | string | null; frequencia_min: number | null } | null;
@@ -65,9 +60,10 @@ export const JANELA_COMUNICACAO_MS = 30 * 60 * 1000;
 
 const RE_TON = /^TON/i;
 const RE_INVERSOR = /INVERSOR/i;
-const RE_MEDIDOR = /(METER|MEDIDOR|M-?160|PD666|A-?966|SSU|EQTL|GATEWAY|PADR[AÃ]O DE ENERGIA)/i;
 const RE_GATEWAY = /(A-?966|SSU|GATEWAY)/i;
-const CATEGORIAS_BIDIRECIONAIS = new Set(['gateway', 'padrão de energia - ramal de entrada', 'medidor ssu']);
+/** Medidor da concessionária: ponto de conexão com a rede (categoria BIDIRECIONAL + SSU). */
+const CATEGORIAS_REDE = new Set(['gateway', 'padrão de energia - ramal de entrada', 'medidor ssu']);
+const CATEGORIAS_CARGA = new Set(['power meter']);
 
 const NAO_EXISTE: Capacidade = { existe: false, fonte: null, comunicando: null, ultima_leitura: null };
 
@@ -87,14 +83,17 @@ export function ehInversor(e: EquipamentoCapacidade): boolean {
   return !ehTon(e) && RE_INVERSOR.test(texto(e));
 }
 
-export function ehMedidor(e: EquipamentoCapacidade): boolean {
-  return !ehTon(e) && !ehInversor(e) && RE_MEDIDOR.test([e.codigo, e.tipo_nome, e.categoria, e.tipo_equipamento].filter(Boolean).join(' '));
+const cat = (e: EquipamentoCapacidade) => (e.categoria ?? '').trim().toLowerCase();
+
+/** Power Meter → Carga. */
+export function ehPowerMeter(e: EquipamentoCapacidade): boolean {
+  return !ehTon(e) && CATEGORIAS_CARGA.has(cat(e));
 }
 
-export function ehBidirecional(e: EquipamentoCapacidade): boolean {
-  if ((e.codigo ?? '').toUpperCase() === 'EQTL001') return true;
-  if (CATEGORIAS_BIDIRECIONAIS.has((e.categoria ?? '').trim().toLowerCase())) return true;
-  return RE_GATEWAY.test([e.codigo, e.tipo_nome, e.tipo_equipamento].filter(Boolean).join(' '));
+/** Medidor da concessionária → Rede. */
+export function ehMedidorConcessionaria(e: EquipamentoCapacidade): boolean {
+  if (ehTon(e) || ehInversor(e)) return false;
+  return (e.codigo ?? '').toUpperCase() === 'EQTL001' || CATEGORIAS_REDE.has(cat(e));
 }
 
 function temGrandezas(e: EquipamentoCapacidade): boolean {
@@ -126,10 +125,11 @@ function porLeitura(eqs: EquipamentoCapacidade[], fonte: FonteCapacidade, agora:
 export function calcularCapacidades(entrada: EntradaCapacidades): CapacidadesUnidade {
   const agora = entrada.agora ?? new Date();
   const comFonte = entrada.equipamentos.filter(temFonteDeDados);
-  const configurados = new Set(entrada.configurados.map((s) => String(s).trim()));
 
   const inversores = comFonte.filter(ehInversor);
-  const medidoresEntrada = comFonte.filter((e) => ehMedidor(e) && (!e.mede_carga || configurados.has(e.id.trim())));
+  const powerMeters = comFonte.filter(ehPowerMeter);
+  const medidoresRede = comFonte.filter(ehMedidorConcessionaria);
+  const medidores = [...powerMeters, ...medidoresRede];
 
   let geracao: Capacidade;
   if (inversores.length) {
@@ -147,15 +147,15 @@ export function calcularCapacidades(entrada: EntradaCapacidades): CapacidadesUni
     geracao = { ...NAO_EXISTE };
   }
 
-  const medicao = porLeitura(medidoresEntrada, 'ton', agora);
+  const medicao = porLeitura(medidores, 'ton', agora);
   const demanda = (entrada.demandaCarga ?? 0) > 0 || (entrada.demandaGeracao ?? 0) > 0;
 
   return {
     geracao,
     medicao_entrada: medicao,
-    carga: { ...medicao },
-    rede: porLeitura(medidoresEntrada.filter(ehBidirecional), 'ton', agora),
-    grandezas_eletricas: porLeitura(medidoresEntrada.filter(temGrandezas), 'ton', agora),
+    carga: porLeitura(powerMeters, 'ton', agora),
+    rede: porLeitura(medidoresRede, 'ton', agora),
+    grandezas_eletricas: porLeitura(medidores.filter(temGrandezas), 'ton', agora),
     demanda_contratada: demanda ? { existe: true, fonte: 'manual', comunicando: null, ultima_leitura: null } : { ...NAO_EXISTE },
   };
 }
@@ -173,16 +173,6 @@ export async function buscarCapacidades(
              SELECT 1 FROM iot_componentes ic
              WHERE ic.equipamento_id = e.id OR TRIM(ic.props->>'equipamento_id') = TRIM(e.id)
            ) AS vinculado_iot,
-           EXISTS (
-             SELECT 1
-             FROM iot_componentes ic
-             JOIN equipamentos dj ON TRIM(dj.id) = ic.props->>'disjuntor_equipamento_id' AND dj.deleted_at IS NULL
-             JOIN equipamentos_conexoes cx ON cx.deleted_at IS NULL AND (cx.equipamento_origem_id = dj.id OR cx.equipamento_destino_id = dj.id)
-             JOIN equipamentos o ON o.id = CASE WHEN cx.equipamento_origem_id = dj.id THEN cx.equipamento_destino_id ELSE cx.equipamento_origem_id END
-             JOIN tipos_equipamentos t2 ON t2.id = o.tipo_equipamento_id
-             WHERE TRIM(ic.props->>'equipamento_id') = TRIM(e.id) AND o.deleted_at IS NULL
-               AND t2.codigo IN ('PIVO', 'MOTOR', 'CARGA', 'CARREGADOR_ELETRICO')
-           ) AS mede_carga,
            (
              SELECT d.timestamp_dados FROM equipamentos_dados d
              WHERE d.equipamento_id = e.id
@@ -196,17 +186,6 @@ export async function buscarCapacidades(
     LEFT JOIN categorias_equipamentos c ON c.id = t.categoria_id
     WHERE e.unidade_id = ${unidadeId}::bpchar AND e.deleted_at IS NULL`;
 
-  let configurados: string[] = [];
-  try {
-    const [cfg] = await prisma.$queryRaw<Array<{ ids: unknown }>>`
-      SELECT equipamentos_ids AS ids FROM configuracao_demanda WHERE unidade_id = ${unidadeId}::bpchar LIMIT 1`;
-    const ids = cfg?.ids;
-    const arr: unknown[] = Array.isArray(ids) ? ids : typeof ids === 'string' ? JSON.parse(ids || '[]') : [];
-    configurados = arr.map((x) => String(x).trim());
-  } catch {
-    configurados = [];
-  }
-
   let nuvem: EntradaCapacidades['nuvem'] = null;
   try {
     const [fv] = await prisma.$queryRaw<Array<{ ativo: boolean; ultima_sync_em: Date | null; frequencia_min: number | null }>>`
@@ -217,5 +196,5 @@ export async function buscarCapacidades(
     nuvem = null;
   }
 
-  return calcularCapacidades({ equipamentos, configurados, demandaCarga, demandaGeracao, nuvem });
+  return calcularCapacidades({ equipamentos, demandaCarga, demandaGeracao, nuvem });
 }
