@@ -2642,6 +2642,10 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       // console.log(`📊 [Buffer] Criado buffer para equipamento ${equipamentoId}`);
     }
 
+    // A janela começa na PRIMEIRA leitura dela, não no último flush. Device que publica só na
+    // mudança (satélite de pivô, 12/11) ficava com a janela "aberta" desde o flush anterior —
+    // horas antes — e a leitura nova era gravada com a hora velha (a tela dizia "sem leitura").
+    if (buffer.leituras.length === 0) buffer.timestamp_inicio = new Date();
     buffer.leituras.push({
       timestamp,
       dados: { ...dados, _qualidade: qualidade },
