@@ -217,3 +217,22 @@ export function mudancasConfig(antes: Record<string, unknown>, depois: Record<st
     .filter((k) => texto(antes[k]) !== texto(depois[k]))
     .map((k) => `${k}: ${texto(antes[k])} → ${texto(depois[k])}`);
 }
+
+
+/**
+ * Horas com o pivô LIGADO a partir do histórico de sequências (ordem de criação): abre no ligar
+ * confirmado (girar_* concluída: finished_at = pivô girando/irrigando) e fecha na próxima sequência
+ * registrada (desligar, parada da TON, novo ligar). Ligado até agora conta até `agora`.
+ */
+export function horasLigado(rows: Array<{ acao: string; status: string; created_at: Date | string; finished_at: Date | string | null }>, agora: Date, ligadoAgora = true): number {
+  let total = 0;
+  let desde: number | null = null;
+  for (const r of rows) {
+    const criado = new Date(r.created_at).getTime();
+    if (desde != null && criado > desde) { total += criado - desde; desde = null; }
+    if (/^girar_/.test(r.acao) && r.status === 'concluida' && r.finished_at) desde = new Date(r.finished_at).getTime();
+  }
+  // Trecho em aberto só conta se o NexON ainda tem a irrigação ativa (parada perdida no rádio não infla o horímetro)
+  if (desde != null && ligadoAgora && agora.getTime() > desde) total += agora.getTime() - desde;
+  return Math.round((total / 3600000) * 10) / 10;
+}

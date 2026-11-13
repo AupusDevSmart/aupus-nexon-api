@@ -1,4 +1,4 @@
-import { duracaoParadaMs, normalizarIrrigacao, normalizarPercentual, percentualDaLamina, resumoIrrigacao } from './pivo-automacao.util';
+import { duracaoParadaMs, horasLigado, normalizarIrrigacao, normalizarPercentual, percentualDaLamina, resumoIrrigacao } from './pivo-automacao.util';
 
 /** Tabela iCrop do Pivô 11 (Chimarrão): lâmina 100 % = 3,58 mm. [% da tabela, lâmina impressa] */
 const TABELA: Array<[number, number]> = [
@@ -46,5 +46,19 @@ describe('parada "Andar X°" (porGraus, 12/11)', () => {
     // 30° = 1/12 de volta; 6 h/volta a 100 % → a 50 % 12 h/volta → 1 h
     expect(duracaoParadaMs(i, 6, null)).toBe(3600000);
     expect(normalizarIrrigacao({ config: {}, parada: { tipo: 'porGraus', graus: 0 } })!.parada).toEqual({ tipo: 'semParar' });
+  });
+});
+
+describe('horímetro do pivô (horasLigado, 12/11)', () => {
+  const t = (h: number) => new Date(Date.UTC(2026, 10, 12, h));
+  it('soma do ligar confirmado até a próxima sequência; ligar que falhou não conta', () => {
+    const rows = [
+      { acao: 'girar_direita', status: 'concluida', created_at: t(8), finished_at: t(9) },   // ligado 9h
+      { acao: 'desligar', status: 'concluida', created_at: t(12), finished_at: t(12) },     // 3 h
+      { acao: 'girar_esquerda', status: 'falhou', created_at: t(13), finished_at: t(13) },  // não liga
+      { acao: 'girar_direita', status: 'concluida', created_at: t(14), finished_at: t(14) }, // ligado 14h
+    ];
+    expect(horasLigado(rows, t(16), true)).toBe(5);    // 3 h + 2 h em curso
+    expect(horasLigado(rows, t(16), false)).toBe(3);   // NexON já não tem a irrigação ativa: não infla
   });
 });

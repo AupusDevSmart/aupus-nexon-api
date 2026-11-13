@@ -7,7 +7,7 @@ import { FUSO_OPERACAO, JanelaComAtivo, janelaValida, momentoEmSaoPaulo } from '
 import { anguloDoEncoder, brutoDoEncoder, parametrosEncoder } from './pivo-posicao.util';
 import { PivoTonService, TXT_FALHA } from './pivo-ton.service';
 import { calibracaoVigente } from './pivo-calibracao.repo';
-import { dentroDaPonta, duracaoParadaMs, fmtPercentual, Irrigacao, leituraMaisAntiga, mudancasConfig, normalizarIrrigacao, normalizarPercentual, OrigemSequencia, percentualDaLamina, resumoIrrigacao } from './pivo-automacao.util';
+import { dentroDaPonta, duracaoParadaMs, horasLigado, fmtPercentual, Irrigacao, leituraMaisAntiga, mudancasConfig, normalizarIrrigacao, normalizarPercentual, OrigemSequencia, percentualDaLamina, resumoIrrigacao } from './pivo-automacao.util';
 
 /**
  * Sequência do pivô com bombeamento (docs/IOT-PIVO-BOMBEAMENTO.md).
@@ -88,7 +88,7 @@ const SEQ_PADRAO: SequenciaCfg = { pressurizacao_s: 60, confirma_giro_s: 30, con
 const norm = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 
 type PapelComando = 'ligar' | 'valvula' | 'canhao' | 'percentimetro' | 'direita' | 'esquerda' | 'desligar';
-type PapelStatus = 'ligado' | 'canhao' | 'permissivo' | 'pressao' | 'direita' | 'esquerda' | 'desligado' | 'erro';
+type PapelStatus = 'ligado' | 'canhao' | 'permissivo' | 'pressao' | 'tensao' | 'direita' | 'esquerda' | 'desligado' | 'erro';
 type MapaBi = { ton_id: string; bi: number; inv: boolean };
 /** Resultado de comandar o canhão (aplicarCanhao). */
 type ResCanhao = 'ok' | 'ja' | 'sem_ponto' | 'sem_status' | 'sem_leitura' | 'nao_confirmou' | 'enviado';
@@ -120,6 +120,8 @@ const PAPEIS_STATUS: Record<PapelStatus, RegExp> = {
   permissivo: /permiss/,
   // Pressostato: água chegou ao pivô (partida espera ele antes de girar)
   pressao: /press/,
+  // Tensao_ok (BI02 do padrão): painel energizado / tensão presente
+  tensao: /tens/,
   direita: /direit/,
   esquerda: /esquerd/,
   desligado: /deslig|parad/,
@@ -538,6 +540,10 @@ export class PivoSequenciaService implements OnModuleInit {
         // Com a sequência na TON, "ligado" = o que a TON comandou (BO06 no status dela); senão, a BI.
         canhao: { comando: !!pts.cmd.canhao, tem_status: !!pts.st.canhao, ligado: await this.canhaoLigado(pts) },
         permissivo: await this.lerStatus(pts.st.permissivo),
+        // Pressão OK (BI01) e Tensão OK (BI02), já com a polaridade: 1 = ok, 0 = falta, null = sem ponto/leitura
+        entradas: { pressao: await this.lerStatus(pts.st.pressao), tensao: await this.lerStatus(pts.st.tensao) },
+        // Horímetro: horas com o pivô LIGADO (do ligar confirmado até o desligar), pelo histórico do NexON
+        horimetro_h: await this.horimetro(id, !!ativa).catch(() => null),
         status: st,
         lido_em: await this.lidoEmPivo(pts),
         // Chave seletora em modo TON (NEXON-103): null = sem leitura; tem_modo_ton false = pivô sem a chave
@@ -1059,6 +1065,19 @@ export class PivoSequenciaService implements OnModuleInit {
   }
 
   /** Status (BI) de um ponto do pivô, respeitando "invertido"; null = sem ponto ou sem leitura. */
+  /**
+   * Horímetro do pivô (decisão 12/11): horas com o pivô LIGADO — do ligar confirmado (sequência
+   * girar_* concluída) até o próximo desligar/ligar registrado (desligar do operador, parada da
+   * TON, ponta…). Conta o tempo inteiro ligado, inclusive o tempo parado do ciclo do percentímetro.
+   */
+  async horimetro(id: string, ligadoAgora = true): Promise<number> {
+    const rows = await this.prisma.$queryRaw<Array<{ acao: string; status: string; created_at: Date; finished_at: Date | null }>>`
+      SELECT acao, status, created_at, finished_at FROM pivo_sequencias
+      WHERE equipamento_id = ${id}::bpchar AND status NOT IN ('agendada', 'cancelada')
+      ORDER BY created_at`;
+    return horasLigado(rows, new Date(), ligadoAgora);
+  }
+
   private async lerStatus(m: MapaBi | undefined): Promise<0 | 1 | null> {
     if (!m) return null;
     const v = (await this.cmd.lerEntradaTon(m.ton_id, m.bi)).valor;
@@ -1752,7 +1771,7 @@ export class PivoSequenciaService implements OnModuleInit {
         // ordem importa: "anti-horário" antes de "horário"
         for (const k of ['valvula', 'canhao', 'ligar', 'percentimetro', 'esquerda', 'direita', 'desligar'] as const) if (PAPEIS_COMANDO[k].test(n)) { if (!cmd[k]) cmd[k] = r.id; break; }
       } else if (r.tipo === 'status' && r.ton_id && r.bi) {
-        for (const k of ['canhao', 'ligado', 'permissivo', 'pressao', 'erro', 'desligado', 'esquerda', 'direita'] as const) if (PAPEIS_STATUS[k].test(n)) { if (!st[k]) st[k] = { ton_id: r.ton_id, bi: r.bi, inv: !!r.inv }; break; }
+        for (const k of ['canhao', 'ligado', 'permissivo', 'pressao', 'tensao', 'erro', 'desligado', 'esquerda', 'direita'] as const) if (PAPEIS_STATUS[k].test(n)) { if (!st[k]) st[k] = { ton_id: r.ton_id, bi: r.bi, inv: !!r.inv }; break; }
       }
     }
     return { cmd, st, modoTon };
