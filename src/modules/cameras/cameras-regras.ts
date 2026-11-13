@@ -535,6 +535,55 @@ export const PAREAMENTO_VALIDADE_S = 30 * 60;
 export const PAREAMENTO_LIMITE_CRIAR_MIN = 10;
 export const PAREAMENTO_LIMITE_ESTADO_MIN = 30;
 export const MSG_CODIGO_INVALIDO = 'Código não encontrado ou expirado';
+/** Tentativas erradas de vincular: por usuário e por unidade, numa janela de 10 min. */
+export const VINCULAR_FALHAS_USUARIO = 5;
+export const VINCULAR_FALHAS_UNIDADE = 20;
+export const VINCULAR_JANELA_MS = 10 * 60_000;
+export const MSG_MUITAS_TENTATIVAS_VINCULAR = 'Muitas tentativas; aguarde alguns minutos';
+/** Teto global de pedidos aguardando (não vinculados, não expirados); passou disso → 503. */
+export const PAREAMENTO_MAX_PENDENTES = 500;
+/** Teto de chaves em memória de cada limitador (IP, usuário, unidade). */
+export const LIMITADOR_MAX_CHAVES = 10_000;
+
+/** Código para a trilha sem revelá-lo: só os 2 últimos dígitos ("123456" → "****56"). */
+export function mascararCodigo(v: string | null | undefined): string | null {
+  const d = (v ?? '').replace(/\s/g, '');
+  if (!d) return null;
+  return d.length <= 2 ? '*'.repeat(d.length) : `${'*'.repeat(d.length - 2)}${d.slice(-2)}`;
+}
+
+/** IPv6 por extenso (8 grupos de 4 hex) ou null se não for IPv6 válido. IPv4 embutido no fim é aceito. */
+export function expandirIpv6(v: string): string[] | null {
+  let t = v.trim().toLowerCase().split('%')[0];
+  if (!t.includes(':')) return null;
+  const v4 = t.match(/(\d+\.\d+\.\d+\.\d+)$/);
+  if (v4) {
+    const o = v4[1].split('.').map(Number);
+    if (o.some((n) => n > 255)) return null;
+    t = t.slice(0, -v4[1].length) + `${((o[0] << 8) | o[1]).toString(16)}:${((o[2] << 8) | o[3]).toString(16)}`;
+  }
+  const partes = t.split('::');
+  if (partes.length > 2) return null;
+  const esq = partes[0] ? partes[0].split(':') : [];
+  const dir = partes.length === 2 && partes[1] ? partes[1].split(':') : [];
+  const faltam = 8 - esq.length - dir.length;
+  if (partes.length === 1 ? faltam !== 0 : faltam < 1) return null;
+  const grupos = [...esq, ...Array(partes.length === 2 ? faltam : 0).fill('0'), ...dir];
+  if (grupos.length !== 8 || grupos.some((g) => !/^[0-9a-f]{1,4}$/.test(g))) return null;
+  return grupos.map((g) => g.padStart(4, '0'));
+}
+
+/**
+ * Chave do limite por origem: IPv4 inteiro; IPv6 pelo prefixo /64 (um cliente IPv6 costuma ter
+ * a /64 inteira e trocaria de endereço a cada pedido). IPv4 mapeado (::ffff:a.b.c.d) vira IPv4.
+ */
+export function chaveLimiteIp(ip: string | null | undefined): string {
+  const t = normalizarIp(ip);
+  if (!t) return 'sem-ip';
+  const g = expandirIpv6(t);
+  if (!g) return t;
+  return `${g.slice(0, 4).join(':')}::/64`;
+}
 
 export type EstadoPareamento = 'aguardando' | 'vinculado' | 'expirado';
 
@@ -589,29 +638,56 @@ export function mesmoIp(a: string | null | undefined, b: string | null | undefin
   return !!x && x === normalizarIp(b);
 }
 
-/** Limite simples em memória por chave (IP) numa janela deslizante de 60 s. */
+/**
+ * Limite em memória por chave numa janela deslizante (padrão 60 s). O mapa tem teto de chaves:
+ * passou do teto, tira as chaves sem batida na janela e, se ainda faltar espaço, as mais antigas.
+ */
 export class LimitadorPorMinuto {
   private readonly batidas = new Map<string, number[]>();
 
-  constructor(private readonly limite: number, private readonly janelaMs = 60_000) {}
+  constructor(
+    private readonly limite: number,
+    private readonly janelaMs = 60_000,
+    private readonly maxChaves = LIMITADOR_MAX_CHAVES,
+  ) {}
+
+  get tamanho(): number {
+    return this.batidas.size;
+  }
+
+  private recentes(chave: string, agora: number): number[] {
+    const desde = agora - this.janelaMs;
+    return (this.batidas.get(chave) ?? []).filter((t) => t > desde);
+  }
+
+  /** Já atingiu o limite? Não conta batida. */
+  excedido(chave: string, agora = Date.now()): boolean {
+    return this.recentes(chave, agora).length >= this.limite;
+  }
+
+  /** Conta uma batida (ex.: uma falha). */
+  registrar(chave: string, agora = Date.now()): void {
+    const lista = this.recentes(chave, agora);
+    lista.push(agora);
+    this.batidas.delete(chave); // reinsere no fim: ordem do Map = mais antiga primeiro
+    this.batidas.set(chave, lista);
+    if (this.batidas.size > this.maxChaves) this.podar(agora);
+  }
 
   /** true = pode seguir (e conta a batida); false = passou do limite. */
   permitir(chave: string, agora = Date.now()): boolean {
-    const desde = agora - this.janelaMs;
-    const lista = (this.batidas.get(chave) ?? []).filter((t) => t > desde);
-    if (lista.length >= this.limite) {
-      this.batidas.set(chave, lista);
-      return false;
-    }
-    lista.push(agora);
-    this.batidas.set(chave, lista);
-    if (this.batidas.size > 10_000) this.limpar(agora);
+    if (this.excedido(chave, agora)) return false;
+    this.registrar(chave, agora);
     return true;
   }
 
-  private limpar(agora: number) {
+  private podar(agora: number) {
     const desde = agora - this.janelaMs;
     for (const [k, v] of this.batidas) if (!v.some((t) => t > desde)) this.batidas.delete(k);
+    for (const k of this.batidas.keys()) {
+      if (this.batidas.size <= this.maxChaves) break;
+      this.batidas.delete(k);
+    }
   }
 }
 
@@ -635,6 +711,16 @@ export interface Descoberta {
 }
 
 const IPV4 = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
+
+/**
+ * Câmera descoberta só pode estar na rede local: IPv4 literal privado (10/8, 172.16/12, 192.168/16)
+ * ou link-local (169.254/16). Qualquer outra coisa (IP público, loopback, nome, IPv6) é descartada.
+ */
+export function ipPrivadoOuLinkLocal(ip: string): boolean {
+  if (!IPV4.test(ip)) return false;
+  const [a, b] = ip.split('.').map(Number);
+  return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
+}
 const MAC = /^[0-9a-f]{2}([:-][0-9a-f]{2}){5}$/;
 
 /**
@@ -651,7 +737,7 @@ export function normalizarDescobertas(lista: unknown): Descoberta[] {
     if (!item || typeof item !== 'object') continue;
     const o = item as Record<string, unknown>;
     const ip = typeof o.ip === 'string' ? o.ip.trim() : '';
-    if (!IPV4.test(ip)) continue;
+    if (!ipPrivadoOuLinkLocal(ip)) continue;
     const macBruto = typeof o.mac === 'string' ? o.mac.trim().toLowerCase() : '';
     porIp.set(ip, {
       ip,

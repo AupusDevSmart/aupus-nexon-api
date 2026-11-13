@@ -2,6 +2,10 @@ import { HttpException, NotFoundException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import {
   analiseNovaCamera,
+  chaveLimiteIp,
+  expandirIpv6,
+  ipPrivadoOuLinkLocal,
+  mascararCodigo,
   deveEntregarToken,
   descobertasPendentes,
   estadoPareamento,
@@ -114,9 +118,72 @@ describe('LimitadorPorMinuto', () => {
     expect(l.permitir('2.2.2.2', t0 + 100)).toBe(true);
     expect(l.permitir('1.1.1.1', t0 + 60_001)).toBe(true);
   });
+
+  it('mapa tem teto: chaves velhas saem primeiro', () => {
+    const l = new LimitadorPorMinuto(1, 60_000, 100);
+    for (let i = 0; i < 500; i++) l.permitir(`ip-${i}`, 1_000 + i);
+    expect(l.tamanho).toBeLessThanOrEqual(100);
+    expect(l.permitir('ip-499', 2_000)).toBe(false); // a mais nova continua contada
+    expect(l.permitir('ip-0', 2_000)).toBe(true); // a mais antiga foi descartada
+  });
+
+  it('excedido/registrar contam só falhas (limite por usuário)', () => {
+    const l = new LimitadorPorMinuto(5, 10 * 60_000);
+    for (let i = 0; i < 5; i++) {
+      expect(l.excedido('u1', i)).toBe(false);
+      l.registrar('u1', i);
+    }
+    expect(l.excedido('u1', 10)).toBe(true);
+    expect(l.excedido('u1', 10 * 60_000 + 10)).toBe(false);
+  });
+});
+
+describe('chave do limite por IP', () => {
+  it('IPv4 inteiro, IPv4 mapeado vira IPv4', () => {
+    expect(chaveLimiteIp('189.1.2.3')).toBe('189.1.2.3');
+    expect(chaveLimiteIp('::ffff:189.1.2.3')).toBe('189.1.2.3');
+    expect(chaveLimiteIp(null)).toBe('sem-ip');
+  });
+
+  it('IPv6 agrupa pelo prefixo /64', () => {
+    const a = chaveLimiteIp('2804:14c:65a1:4000::1');
+    expect(a).toBe('2804:014c:65a1:4000::/64');
+    expect(chaveLimiteIp('2804:14c:65a1:4000:aaaa:bbbb:cccc:dddd')).toBe(a);
+    expect(chaveLimiteIp('2804:14c:65a1:4001::1')).not.toBe(a);
+  });
+
+  it('expandirIpv6 recusa lixo', () => {
+    expect(expandirIpv6('::1')).toEqual(['0000', '0000', '0000', '0000', '0000', '0000', '0000', '0001']);
+    expect(expandirIpv6('1::2::3')).toBeNull();
+    expect(expandirIpv6('1.2.3.4')).toBeNull();
+    expect(expandirIpv6('zz::1')).toBeNull();
+  });
+});
+
+describe('mascararCodigo', () => {
+  it('só os 2 últimos dígitos aparecem', () => {
+    expect(mascararCodigo('123456')).toBe('****56');
+    expect(mascararCodigo('123 456')).toBe('****56');
+    expect(mascararCodigo('7')).toBe('*');
+    expect(mascararCodigo(undefined)).toBeNull();
+  });
 });
 
 describe('descobertas da rede', () => {
+  it('só IPv4 privado ou link-local', () => {
+    for (const ip of ['10.0.0.1', '172.16.0.1', '172.31.255.254', '192.168.1.108', '169.254.10.20']) {
+      expect(ipPrivadoOuLinkLocal(ip)).toBe(true);
+    }
+    for (const ip of ['8.8.8.8', '172.15.0.1', '172.32.0.1', '127.0.0.1', '192.169.0.1', '0.0.0.0', 'fe80::1', 'camera.local', '10.0.0']) {
+      expect(ipPrivadoOuLinkLocal(ip)).toBe(false);
+    }
+  });
+
+  it('normalizarDescobertas descarta IP público, loopback e IPv6', () => {
+    const r = normalizarDescobertas([{ ip: '8.8.8.8' }, { ip: '127.0.0.1' }, { ip: 'fe80::1' }, { ip: '169.254.1.1' }]);
+    expect(r.map((d) => d.ip)).toEqual(['169.254.1.1']);
+  });
+
   it('normalizarDescobertas valida, saneia e deduplica por IP', () => {
     const r = normalizarDescobertas([
       { ip: '192.168.1.108', mac: 'AA-BB-CC-DD-EE-FF', fabricante: 'Intelbras', porta_http: 80, porta_rtsp: 554, inicializada: true },
@@ -168,6 +235,7 @@ describe('CamerasPareamentoService', () => {
     const prisma: any = {
       cameras_pareamentos: {
         deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
+        count: jest.fn().mockResolvedValue(0),
         findMany: jest.fn().mockResolvedValue([]),
         findUnique: jest.fn().mockImplementation(async () => (atual ? { ...atual } : null)),
         findFirst: jest.fn().mockImplementation(async () => (atual ? { ...atual } : null)),
@@ -195,7 +263,7 @@ describe('CamerasPareamentoService', () => {
     };
     const scope: any = { assertEntityInScope: jest.fn() };
     const svc = new CamerasPareamentoService(prisma, scope, midia, agentes, auditoria);
-    return { svc, prisma, agentes, auditoria, atual: () => atual };
+    return { svc, prisma, agentes, auditoria, atual: () => atual, trocar: (p: Record<string, unknown> | null) => (atual = p) };
   }
 
   const cliente: any = { ip: '189.1.2.3', dispositivo: 'Web' };
@@ -268,5 +336,103 @@ describe('CamerasPareamentoService', () => {
   it('pedido sem vínculo depois do prazo → expirado', async () => {
     const { svc } = montar(pedido);
     expect(await svc.estado('pd1', { segredo: 's3gredo' }, cliente, min(31))).toMatchObject({ estado: 'expirado' });
+  });
+
+  it('pedir: mesmo /64 IPv6 divide o limite de 10/min', async () => {
+    const { svc } = montar(null);
+    for (let i = 0; i < 10; i++) await svc.pedir({ host: 'pi' }, { ...cliente, ip: `2804:14c:65a1:4000::${i + 1}` }, agora);
+    await expect(svc.pedir({ host: 'pi' }, { ...cliente, ip: '2804:14c:65a1:4000::ff' }, agora)).rejects.toMatchObject({ status: 429 });
+    await expect(svc.pedir({ host: 'pi' }, { ...cliente, ip: '2804:14c:65a1:4001::1' }, agora)).resolves.toBeTruthy();
+  });
+
+  it('pedir: 500 pedidos aguardando → 503', async () => {
+    const { svc, prisma } = montar(null);
+    prisma.cameras_pareamentos.count.mockResolvedValue(500);
+    await expect(svc.pedir({ host: 'pi' }, { ...cliente, ip: '5.5.5.5' }, agora)).rejects.toMatchObject({ status: 503 });
+    expect(prisma.cameras_pareamentos.create).not.toHaveBeenCalled();
+  });
+
+  it('proximos devolve pedido_id e NÃO devolve codigo', async () => {
+    const { svc, prisma } = montar(pedido);
+    prisma.cameras_pareamentos.findMany.mockResolvedValue([pedido]);
+    const r = await svc.proximos({ id: 'us1' } as any, cliente, agora);
+    expect(r).toEqual([
+      { pedido_id: 'pd1', host: 'pi-portaria', mac: 'aa:bb:cc:dd:ee:ff', ip_local: '192.168.1.50', criado_em: agora, expira_em: min(30) },
+    ]);
+    expect(r[0]).not.toHaveProperty('codigo');
+    expect(prisma.cameras_pareamentos.findMany.mock.calls[0][0].where.ip_publico).toBe('189.1.2.3');
+  });
+
+  it('vincular por pedido_id na mesma rede funciona e audita a via', async () => {
+    const { svc, auditoria, atual } = montar(pedido);
+    const r = await svc.vincular({ pedido_id: 'pd1', unidade_id: 'u1' }, { id: 'us1' } as any, cliente, min(1));
+    expect(r.agente.id).toBe('ag1');
+    expect(atual()).toMatchObject({ agente_id: 'ag1' });
+    const [acao, reg] = auditoria.registrar.mock.calls[0];
+    expect(acao).toBe('camera_agente_pareado');
+    expect(reg.extra.via).toBe('pedido_id');
+  });
+
+  it('vincular por pedido_id de outra rede → 404 e falha auditada', async () => {
+    const { svc, agentes, auditoria } = montar(pedido);
+    await expect(
+      svc.vincular({ pedido_id: 'pd1', unidade_id: 'u1' }, { id: 'us1' } as any, { ...cliente, ip: '200.9.9.9' }, min(1)),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    expect(agentes.inserirAgente).not.toHaveBeenCalled();
+    const [acao, reg] = auditoria.registrar.mock.calls[0];
+    expect(acao).toBe('camera_pareamento_falha');
+    expect(reg).toMatchObject({ resultado: 'negado', user: { id: 'us1' }, extra: { via: 'pedido_id', motivo: 'pedido de outra rede' } });
+    expect(reg.cliente.ip).toBe('200.9.9.9');
+  });
+
+  it('vincular por código funciona de outra rede (código digitado do aparelho)', async () => {
+    const { svc, auditoria } = montar(pedido);
+    await svc.vincular({ codigo: '123456', unidade_id: 'u1' }, { id: 'us1' } as any, { ...cliente, ip: '200.9.9.9' }, min(1));
+    expect(auditoria.registrar.mock.calls[0][0]).toBe('camera_agente_pareado');
+    expect(auditoria.registrar.mock.calls[0][1].extra.via).toBe('codigo');
+  });
+
+  it('codigo e pedido_id juntos (ou nenhum) → 400', async () => {
+    const { svc } = montar(pedido);
+    await expect(svc.vincular({ codigo: '123456', pedido_id: 'pd1', unidade_id: 'u1' }, undefined, cliente, agora)).rejects.toMatchObject({
+      status: 400,
+    });
+    await expect(svc.vincular({ unidade_id: 'u1' }, undefined, cliente, agora)).rejects.toMatchObject({ status: 400 });
+  });
+
+  it('código errado: falha auditada com código mascarado; 5 erros em 10 min → 429 para o usuário', async () => {
+    const { svc, auditoria } = montar(null);
+    const user = { id: 'us-err' } as any;
+    for (let i = 0; i < 5; i++) {
+      await expect(svc.vincular({ codigo: '98765' + i, unidade_id: 'u-a' }, user, cliente, min(i))).rejects.toBeInstanceOf(NotFoundException);
+    }
+    const [acao, reg] = auditoria.registrar.mock.calls[0];
+    expect(acao).toBe('camera_pareamento_falha');
+    expect(reg.extra.codigo_tentado).toBe('****50');
+    expect(reg.mensagem).toContain('****50');
+    expect(reg.mensagem).not.toContain('987650');
+    expect(reg.cliente.ip).toBe('189.1.2.3');
+
+    await expect(svc.vincular({ codigo: '123456', unidade_id: 'u-b' }, user, cliente, min(6))).rejects.toMatchObject({
+      status: 429,
+      message: 'Muitas tentativas; aguarde alguns minutos',
+    });
+    // Outro usuário em outra unidade segue livre; depois de 10 min o mesmo usuário volta.
+    await expect(svc.vincular({ codigo: '123456', unidade_id: 'u-c' }, { id: 'us-ok' } as any, cliente, min(6))).rejects.toMatchObject({
+      status: 404,
+    });
+    await expect(svc.vincular({ codigo: '123456', unidade_id: 'u-b' }, user, cliente, min(15))).rejects.toMatchObject({ status: 404 });
+  });
+
+  it('limite por unidade: 20 falhas de usuários diferentes → 429 na unidade', async () => {
+    const { svc } = montar(null);
+    for (let i = 0; i < 20; i++) {
+      await expect(svc.vincular({ codigo: '111111', unidade_id: 'u-x' }, { id: `us${i}` } as any, cliente, agora)).rejects.toMatchObject({
+        status: 404,
+      });
+    }
+    await expect(svc.vincular({ codigo: '111111', unidade_id: 'u-x' }, { id: 'novo' } as any, cliente, agora)).rejects.toMatchObject({
+      status: 429,
+    });
   });
 });
