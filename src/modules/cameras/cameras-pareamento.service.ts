@@ -208,10 +208,6 @@ export class CamerasPareamentoService {
     if (!this.falhasUsuario.permitir(chaveUsuario, t)) {
       throw new HttpException(MSG_MUITAS_TENTATIVAS_VINCULAR, HttpStatus.TOO_MANY_REQUESTS);
     }
-    if (!this.falhasUnidade.permitir(chaveUnidade, t)) {
-      this.falhasUsuario.desfazer(chaveUsuario, t);
-      throw new HttpException(MSG_MUITAS_TENTATIVAS_VINCULAR, HttpStatus.TOO_MANY_REQUESTS);
-    }
     const devolverTentativa = () => {
       this.falhasUsuario.desfazer(chaveUsuario, t);
       this.falhasUnidade.desfazer(chaveUnidade, t);
@@ -220,6 +216,11 @@ export class CamerasPareamentoService {
     if (user) await this.scope.assertEntityInScope('unidade', unidadeId, user);
     const ctx = await this.auditoria.contextoUnidade(unidadeId);
     if (!ctx.unidade || !ctx.planta) throw new NotFoundException('Unidade não encontrada');
+    // Contador da unidade só depois de provar acesso a ela: quem é de fora não trava a unidade dos outros.
+    if (!this.falhasUnidade.permitir(chaveUnidade, t)) {
+      this.falhasUsuario.desfazer(chaveUsuario, t);
+      throw new HttpException(MSG_MUITAS_TENTATIVAS_VINCULAR, HttpStatus.TOO_MANY_REQUESTS);
+    }
 
     const falhar = async (motivo: string): Promise<never> => {
       const tentado = via === 'codigo' ? mascararCodigo(dto.codigo) : null;
