@@ -28,6 +28,7 @@ import {
   PAREAMENTO_LIMITE_CRIAR_MIN,
   PAREAMENTO_LIMITE_ESTADO_MIN,
   PAREAMENTO_MAX_PENDENTES,
+  PAREAMENTO_MAX_PENDENTES_POR_IP,
   PAREAMENTO_VALIDADE_S,
   VINCULAR_FALHAS_UNIDADE,
   VINCULAR_FALHAS_USUARIO,
@@ -80,6 +81,14 @@ export class CamerasPareamentoService {
     await this.prisma.cameras_pareamentos.deleteMany({
       where: { expira_em: { lt: new Date(agora.getTime() - 24 * 60 * 60 * 1000) }, agente_id: null },
     });
+    // Teto por origem: uma rede só tem alguns aparelhos esperando ao mesmo tempo; quem abusa
+    // esbarra aqui antes de chegar ao teto global.
+    const daOrigem = await this.prisma.cameras_pareamentos.count({
+      where: { ip_publico: ipPublico, agente_id: null, vinculado_em: null, expira_em: { gt: agora } },
+    });
+    if (daOrigem >= PAREAMENTO_MAX_PENDENTES_POR_IP) {
+      throw new HttpException('Muitos aparelhos aguardando vínculo nesta rede; vincule ou aguarde expirar', HttpStatus.TOO_MANY_REQUESTS);
+    }
     // Teto global: rota pública não pode encher a tabela (nem esgotar os códigos de 6 dígitos).
     const pendentes = await this.prisma.cameras_pareamentos.count({
       where: { agente_id: null, vinculado_em: null, expira_em: { gt: agora } },
@@ -194,17 +203,25 @@ export class CamerasPareamentoService {
     const chaveUsuario = user?.id ? `u:${String(user.id).trim()}` : `ip:${chaveLimiteIp(cliente?.ip)}`;
     const chaveUnidade = `un:${unidadeId}`;
     const t = agora.getTime();
-    if (this.falhasUsuario.excedido(chaveUsuario, t) || this.falhasUnidade.excedido(chaveUnidade, t)) {
+    // Conta a tentativa ANTES de qualquer await (sem corrida entre pedidos simultâneos);
+    // só é devolvida se o vínculo der certo.
+    if (!this.falhasUsuario.permitir(chaveUsuario, t)) {
       throw new HttpException(MSG_MUITAS_TENTATIVAS_VINCULAR, HttpStatus.TOO_MANY_REQUESTS);
     }
+    if (!this.falhasUnidade.permitir(chaveUnidade, t)) {
+      this.falhasUsuario.desfazer(chaveUsuario, t);
+      throw new HttpException(MSG_MUITAS_TENTATIVAS_VINCULAR, HttpStatus.TOO_MANY_REQUESTS);
+    }
+    const devolverTentativa = () => {
+      this.falhasUsuario.desfazer(chaveUsuario, t);
+      this.falhasUnidade.desfazer(chaveUnidade, t);
+    };
 
     if (user) await this.scope.assertEntityInScope('unidade', unidadeId, user);
     const ctx = await this.auditoria.contextoUnidade(unidadeId);
     if (!ctx.unidade || !ctx.planta) throw new NotFoundException('Unidade não encontrada');
 
     const falhar = async (motivo: string): Promise<never> => {
-      this.falhasUsuario.registrar(chaveUsuario, t);
-      this.falhasUnidade.registrar(chaveUnidade, t);
       const tentado = via === 'codigo' ? mascararCodigo(dto.codigo) : null;
       await this.auditoria.registrar('camera_pareamento_falha', {
         mensagem: `Pareamento recusado (${motivo}) por ${via === 'codigo' ? `código ${tentado}` : `pedido ${dto.pedido_id?.trim()}`} de IP ${cliente?.ip ?? '?'} — ${ctx.unidade!.nome} (${ctx.planta!.nome})`,
@@ -258,6 +275,7 @@ export class CamerasPareamentoService {
       throw e;
     }
     const a = criado.agente;
+    devolverTentativa();
 
     await this.auditoria.registrar('camera_agente_pareado', {
       mensagem: `Aparelho "${p.host}"${p.mac ? ` (MAC ${p.mac})` : ''} pareado pelo código ${p.codigo} (${via === 'codigo' ? 'código digitado' : 'escolhido na lista da mesma rede'}) de IP ${p.ip_publico}${p.ip_local ? ` / ${p.ip_local}` : ''} como agente de câmeras "${a.nome}" — ${ctx.unidade.nome} (${ctx.planta.nome})`,

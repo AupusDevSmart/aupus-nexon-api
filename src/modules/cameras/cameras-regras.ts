@@ -542,6 +542,8 @@ export const VINCULAR_JANELA_MS = 10 * 60_000;
 export const MSG_MUITAS_TENTATIVAS_VINCULAR = 'Muitas tentativas; aguarde alguns minutos';
 /** Teto global de pedidos aguardando (não vinculados, não expirados); passou disso → 503. */
 export const PAREAMENTO_MAX_PENDENTES = 500;
+/** Pedidos aguardando vínculo por IP público (uma usina tem poucos aparelhos). */
+export const PAREAMENTO_MAX_PENDENTES_POR_IP = 10;
 /** Teto de chaves em memória de cada limitador (IP, usuário, unidade). */
 export const LIMITADOR_MAX_CHAVES = 10_000;
 
@@ -672,6 +674,15 @@ export class LimitadorPorMinuto {
     this.batidas.delete(chave); // reinsere no fim: ordem do Map = mais antiga primeiro
     this.batidas.set(chave, lista);
     if (this.batidas.size > this.maxChaves) this.podar(agora);
+  }
+
+  /** Desfaz uma batida contada em `agora` (tentativa reservada que deu certo). */
+  desfazer(chave: string, agora: number): void {
+    const lista = this.batidas.get(chave);
+    if (!lista) return;
+    const i = lista.lastIndexOf(agora);
+    if (i >= 0) lista.splice(i, 1);
+    if (!lista.length) this.batidas.delete(chave);
   }
 
   /** true = pode seguir (e conta a batida); false = passou do limite. */

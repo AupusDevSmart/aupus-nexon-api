@@ -347,8 +347,15 @@ describe('CamerasPareamentoService', () => {
 
   it('pedir: 500 pedidos aguardando → 503', async () => {
     const { svc, prisma } = montar(null);
-    prisma.cameras_pareamentos.count.mockResolvedValue(500);
+    prisma.cameras_pareamentos.count.mockResolvedValueOnce(0).mockResolvedValueOnce(500);
     await expect(svc.pedir({ host: 'pi' }, { ...cliente, ip: '5.5.5.5' }, agora)).rejects.toMatchObject({ status: 503 });
+    expect(prisma.cameras_pareamentos.create).not.toHaveBeenCalled();
+  });
+
+  it('pedir: 10 pedidos aguardando da mesma rede → 429 (antes do teto global)', async () => {
+    const { svc, prisma } = montar(null);
+    prisma.cameras_pareamentos.count.mockResolvedValueOnce(10);
+    await expect(svc.pedir({ host: 'pi' }, { ...cliente, ip: '6.6.6.6' }, agora)).rejects.toMatchObject({ status: 429 });
     expect(prisma.cameras_pareamentos.create).not.toHaveBeenCalled();
   });
 
@@ -434,5 +441,17 @@ describe('CamerasPareamentoService', () => {
     await expect(svc.vincular({ codigo: '111111', unidade_id: 'u-x' }, { id: 'novo' } as any, cliente, agora)).rejects.toMatchObject({
       status: 429,
     });
+  });
+});
+
+describe('LimitadorPorMinuto.desfazer (NEXON-108)', () => {
+  it('reserva antes do await e devolve a tentativa que deu certo', () => {
+    const { LimitadorPorMinuto } = require('./cameras-regras');
+    const l = new LimitadorPorMinuto(2, 60_000);
+    expect(l.permitir('u', 1000)).toBe(true);
+    expect(l.permitir('u', 1001)).toBe(true);
+    expect(l.permitir('u', 1002)).toBe(false); // corrida: a terceira simultânea já é barrada
+    l.desfazer('u', 1001);
+    expect(l.permitir('u', 1003)).toBe(true);
   });
 });
