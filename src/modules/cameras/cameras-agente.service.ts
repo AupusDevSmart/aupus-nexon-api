@@ -10,10 +10,13 @@ import { CamerasMidiaService } from './cameras-midia.service';
 import {
   agenteOnline,
   caminhoStream,
+  DESCOBERTA_VALIDADE_S,
+  descobertasPendentes,
   ehJpeg,
   estaArmado,
   montarRtsp,
   normalizarAnalise,
+  normalizarDescobertas,
   POLL_S,
   streamAtivo,
   TIPOS_SISTEMA,
@@ -49,7 +52,11 @@ export class CamerasAgenteService {
     if (user && !capacidades(papelCanonico(user.role)).cadastroTecnico) throw new ForbiddenException(MSG_SOMENTE_LEITURA);
   }
 
-  apresentar(a: cameras_agentes, totalCameras: number, agora = new Date()) {
+  exigirCadastroTecnico(user?: Usuario) {
+    this.exigirCadastro(user);
+  }
+
+  apresentar(a: cameras_agentes, totalCameras: number, agora = new Date(), pendentes = 0) {
     return {
       id: a.id,
       unidade_id: a.unidade_id,
@@ -62,6 +69,8 @@ export class CamerasAgenteService {
       ativo: a.ativo,
       /** Número de câmeras ligadas ao agente (nome combinado com o front web). */
       cameras: totalCameras,
+      /** NEXON-108: câmeras encontradas na rede (24 h) que ainda não foram cadastradas. */
+      descobertas_pendentes: pendentes,
       token_gerado_em: a.token_gerado_em,
       created_at: a.created_at,
       updated_at: a.updated_at,
@@ -78,7 +87,79 @@ export class CamerasAgenteService {
       include: { _count: { select: { cameras: { where: { deleted_at: null } } } } },
     });
     const agora = new Date();
-    return agentes.map((a) => this.apresentar(a, a._count.cameras, agora));
+    const pendentes = await this.contarPendentes(unidadeId, agentes.map((a) => a.id), agora);
+    return agentes.map((a) => this.apresentar(a, a._count.cameras, agora, pendentes.get(a.id) ?? 0));
+  }
+
+  /** Descobertas recentes ainda sem câmera cadastrada na unidade, por agente. */
+  private async contarPendentes(unidadeId: string, agenteIds: string[], agora: Date) {
+    const porAgente = new Map<string, number>();
+    if (!agenteIds.length) return porAgente;
+    const [descobertas, ips] = await Promise.all([
+      this.prisma.cameras_descobertas.findMany({
+        where: { agente_id: { in: agenteIds }, visto_em: { gte: new Date(agora.getTime() - DESCOBERTA_VALIDADE_S * 1000) } },
+        select: { agente_id: true, ip: true, visto_em: true },
+      }),
+      this.ipsCadastrados(unidadeId),
+    ]);
+    for (const d of descobertasPendentes(descobertas, ips, agora)) porAgente.set(d.agente_id, (porAgente.get(d.agente_id) ?? 0) + 1);
+    return porAgente;
+  }
+
+  /** IPs das câmeras cadastradas (não excluídas) na unidade. */
+  private async ipsCadastrados(unidadeId: string): Promise<string[]> {
+    const cams = await this.prisma.cameras.findMany({ where: { unidade_id: unidadeId, deleted_at: null }, select: { ip: true } });
+    return cams.map((c) => c.ip);
+  }
+
+  /** GET /cameras/agentes/:id/descobertas — câmeras encontradas na rede (24 h) ainda não cadastradas. */
+  async descobertas(id: string, user?: Usuario, agora = new Date()) {
+    this.exigirCadastro(user);
+    const a = await this.buscarAgente(id, user);
+    const [descobertas, ips] = await Promise.all([
+      this.prisma.cameras_descobertas.findMany({
+        where: { agente_id: a.id, visto_em: { gte: new Date(agora.getTime() - DESCOBERTA_VALIDADE_S * 1000) } },
+        orderBy: { ip: 'asc' },
+      }),
+      this.ipsCadastrados(a.unidade_id),
+    ]);
+    return descobertasPendentes(descobertas, ips, agora).map((d) => ({
+      ip: d.ip,
+      mac: d.mac,
+      fabricante: d.fabricante,
+      modelo: d.modelo,
+      serial: d.serial,
+      porta_http: d.porta_http,
+      porta_rtsp: d.porta_rtsp,
+      inicializada: d.inicializada,
+      visto_em: d.visto_em,
+    }));
+  }
+
+  /**
+   * Grava o agente com token novo (sem auditoria nem checagem de permissão: quem chama já fez).
+   * Usado pelo cadastro manual e pelo pareamento por código.
+   */
+  async inserirAgente(
+    unidadeId: string,
+    plantaId: string,
+    nome: string,
+    extra: { host?: string | null; versao?: string | null } = {},
+  ): Promise<{ agente: cameras_agentes; token: string }> {
+    const { token, hash } = this.midia.gerarTokenAgente();
+    const agente = await this.prisma.cameras_agentes.create({
+      data: {
+        id: novoId26(),
+        unidade_id: unidadeId,
+        planta_id: plantaId,
+        nome: nome.trim().slice(0, 120),
+        token_hash: hash,
+        token_gerado_em: new Date(),
+        host: extra.host?.trim().slice(0, 120) || null,
+        versao: extra.versao?.trim().slice(0, 40) || null,
+      },
+    });
+    return { agente, token };
   }
 
   /** Cria o agente e devolve o token em claro — única vez em que ele aparece. */
@@ -89,17 +170,7 @@ export class CamerasAgenteService {
     const ctx = await this.auditoria.contextoUnidade(unidadeId);
     if (!ctx.unidade || !ctx.planta) throw new NotFoundException('Unidade não encontrada');
 
-    const { token, hash } = this.midia.gerarTokenAgente();
-    const a = await this.prisma.cameras_agentes.create({
-      data: {
-        id: novoId26(),
-        unidade_id: unidadeId,
-        planta_id: ctx.planta.id,
-        nome: dto.nome.trim(),
-        token_hash: hash,
-        token_gerado_em: new Date(),
-      },
-    });
+    const { agente: a, token } = await this.inserirAgente(unidadeId, ctx.planta.id, dto.nome);
     await this.auditoria.registrar('camera_agente', {
       mensagem: `Agente de câmeras "${a.nome}" criado (token gerado) — ${ctx.unidade.nome} (${ctx.planta.nome})`,
       user,
@@ -237,7 +308,40 @@ export class CamerasAgenteService {
       if (hc.online) await this.eventos.marcarOnline(c, agora, { publicando: hc.publicando ?? false });
       else await this.eventos.marcarOffline(c, agora);
     }
+    if (dto.descobertas !== undefined) await this.gravarDescobertas(agente, dto.descobertas, agora);
     return { ok: true, agora: agora.toISOString() };
+  }
+
+  /** Upsert por (agente, ip) do que veio no heartbeat; apaga o que não é visto há mais de 1 dia. */
+  private async gravarDescobertas(agente: AgenteInfo, lista: unknown, agora: Date) {
+    const itens = normalizarDescobertas(lista);
+    try {
+      await this.prisma.$transaction([
+        ...itens.map((d) => {
+          const dados = {
+            mac: d.mac,
+            fabricante: d.fabricante,
+            modelo: d.modelo,
+            serial: d.serial,
+            porta_http: d.porta_http,
+            porta_rtsp: d.porta_rtsp,
+            inicializada: d.inicializada,
+            visto_em: agora,
+          };
+          return this.prisma.cameras_descobertas.upsert({
+            where: { agente_id_ip: { agente_id: agente.id, ip: d.ip } },
+            create: { id: novoId26(), agente_id: agente.id, ip: d.ip, ...dados },
+            update: dados,
+          });
+        }),
+        this.prisma.cameras_descobertas.deleteMany({
+          where: { agente_id: agente.id, visto_em: { lt: new Date(agora.getTime() - DESCOBERTA_VALIDADE_S * 1000) } },
+        }),
+      ]);
+    } catch (e) {
+      // Descoberta é ajuda de cadastro: falha aqui não pode derrubar o heartbeat (status das câmeras).
+      this.logger.warn(`[cameras] agente ${agente.nome}: descobertas não gravadas: ${(e as Error).message}`);
+    }
   }
 
   /** POST /cameras/agente/miniaturas (multipart: camera_id + arquivo JPEG). */

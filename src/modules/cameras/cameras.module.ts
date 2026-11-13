@@ -11,6 +11,8 @@ import { CamerasMidiaController } from './cameras-midia.controller';
 import { CamerasMidiaService } from './cameras-midia.service';
 import { CamerasNotificacaoService } from './cameras-notificacao.service';
 import { CamerasOfflineWorker } from './cameras-offline.worker';
+import { CamerasPareamentoController } from './cameras-pareamento.controller';
+import { CamerasPareamentoService } from './cameras-pareamento.service';
 import { CamerasStorageService } from './cameras-storage.service';
 import { CamerasController } from './cameras.controller';
 import { CamerasService } from './cameras.service';
@@ -25,11 +27,12 @@ import { UsuarioOuTokenMidiaGuard } from './guards/usuario-ou-token-midia.guard'
  */
 @Module({
   imports: [PrismaModule, EquipamentosCmdModule, ChamadosModule],
-  controllers: [CamerasAgenteController, CamerasMidiaController, CamerasController],
+  controllers: [CamerasAgenteController, CamerasPareamentoController, CamerasMidiaController, CamerasController],
   providers: [
     CamerasService,
     CamerasEventosService,
     CamerasAgenteService,
+    CamerasPareamentoService,
     CamerasMidiaService,
     CamerasNotificacaoService,
     CamerasStorageService,

@@ -162,7 +162,9 @@ describe('CamerasService · cadastro e auditoria', () => {
     );
     const data = prisma.cameras.create.mock.calls[0][0].data;
     expect(data).toMatchObject({ unidade_id: 'u1', planta_id: 'p1', nome: 'Arranjo IV3', senha: 'enc:segredo', equipamento_id: 'eq1', ordem: 3 });
-    expect(data.analise.classes_alerta).toEqual(['pessoa', 'veiculo']);
+    // NEXON-108: câmera nova alerta em qualquer detecção e não classifica (IA fora da tela).
+    expect(data.analise.classes_alerta).toEqual(['movimento', 'pessoa', 'veiculo', 'animal']);
+    expect(data.analise.classificar).toBe(false);
     expect((r as any).senha).toBeUndefined();
 
     const reg = auditoria.registrar.mock.calls[0];
