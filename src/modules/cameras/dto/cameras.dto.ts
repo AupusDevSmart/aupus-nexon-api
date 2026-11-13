@@ -74,6 +74,13 @@ export class AnaliseDto {
   @Max(120)
   clipe_s?: number;
 
+  /** Segundos antes do movimento no clipe (0–30). */
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(30)
+  pre_s?: number;
+
   /** Polígonos normalizados (0–1); o agente interpreta. */
   @IsOptional()
   @IsArray()

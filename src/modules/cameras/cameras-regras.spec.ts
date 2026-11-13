@@ -200,7 +200,8 @@ describe('cameras-regras · eventos', () => {
       fps_analise: 4,
       classificar: true,
       classes_alerta: ['pessoa', 'veiculo'],
-      clipe_s: 12,
+      clipe_s: 15,
+      pre_s: 15,
       zonas: [],
     });
     expect(normalizarAnalise({ sensibilidade: 80, classes_alerta: ['pessoa'], lixo: 1 })).toMatchObject({
