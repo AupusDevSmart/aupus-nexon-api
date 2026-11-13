@@ -8,20 +8,23 @@ import { CamerasConfigService, type ConfigUnidade } from './cameras-config.servi
 import { CamerasNotificacaoService } from './cameras-notificacao.service';
 import {
   decidirEvento,
+  decidirReclassificacao,
   ehJpeg,
   ehMp4,
   estaArmado,
   expandirTipos,
   interpretarDados,
+  interpretarCaixas,
   intervaloDoDia,
   normalizarAnalise,
   TIPOS_SISTEMA,
+  tipoReclassificado,
   tituloEvento,
   type TipoEvento,
 } from './cameras-regras';
 import { CamerasStorageService } from './cameras-storage.service';
 import type { Usuario } from './cameras.tipos';
-import type { EventoAgenteDto, FimEventoDto } from './dto/cameras-agente.dto';
+import type { ClassificacaoEventoDto, EventoAgenteDto, FimEventoDto } from './dto/cameras-agente.dto';
 import type { ListarEventosDto, MarcarLidosDto } from './dto/cameras.dto';
 
 /** O que o service precisa saber da câmera para registrar um evento. */
@@ -33,6 +36,8 @@ export type CameraBasica = Pick<
 type EventoRow = Prisma.cameras_eventosGetPayload<{ include: { camera: { select: { nome: true } } } }>;
 
 const t = (v: string | null | undefined) => (v ? v.trim() : null);
+const objeto = (v: unknown): Record<string, unknown> =>
+  v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
 const INCLUDE = { camera: { select: { nome: true } } } as const;
 
 /**
@@ -342,14 +347,89 @@ export class CamerasEventosService {
     return { evento_id: r.id };
   }
 
-  async fim(evento: cameras_eventos, dto: FimEventoDto): Promise<void> {
+  async fim(evento: cameras_eventos, dto: FimEventoDto, camera?: CameraBasica | null, agora = new Date()): Promise<void> {
     const fim = new Date(dto.fim_em);
     if (Number.isNaN(fim.getTime())) throw new BadRequestException('fim_em inválido');
-    const atual = evento.dados && typeof evento.dados === 'object' && !Array.isArray(evento.dados) ? (evento.dados as Record<string, unknown>) : {};
+    const atual = objeto(evento.dados);
     await this.prisma.cameras_eventos.update({
       where: { id: evento.id },
       data: { fim_em: fim, dados: { ...atual, ...(dto.dados ?? {}) } as Prisma.InputJsonValue },
     });
+    // Classe no fim: campos de topo ou, no agente antigo, dentro de `dados` (tipo/confianca/caixas).
+    const extra = dto.dados ?? {};
+    const tipo = dto.tipo ?? extra.tipo;
+    if (!camera || !tipoReclassificado(evento.tipo, tipo)) return;
+    const confianca = Number(dto.confianca ?? extra.confianca);
+    await this.reclassificar(
+      { ...evento, dados: { ...atual, ...extra } as Prisma.JsonValue },
+      camera,
+      {
+        tipo: tipo as ClassificacaoEventoDto['tipo'],
+        confianca: Number.isFinite(confianca) ? Math.min(1, Math.max(0, confianca)) : 0,
+        caixas: dto.caixas ?? extra.caixas,
+      },
+      undefined,
+      agora,
+    );
+  }
+
+  /**
+   * NEXON-108: o agente reconheceu pessoa/veículo/animal num evento aberto como `movimento`.
+   * Sobe a classe (nunca rebaixa), troca caixas e snapshot, refaz a decisão com o armamento de
+   * agora e, se passou a alertar, marca alerta e notifica uma única vez. Idempotente: repetir a
+   * chamada (ou chegar junto com o fim) não altera de novo nem notifica de novo.
+   */
+  async reclassificar(
+    evento: cameras_eventos,
+    camera: CameraBasica,
+    dto: ClassificacaoEventoDto,
+    snapshot?: Buffer,
+    agora = new Date(),
+  ): Promise<{ id: string; tipo: string; alterado: boolean; alerta: boolean; descartado: boolean; motivo_descarte: string | null; enviar_clipe: boolean }> {
+    const sem = {
+      id: evento.id,
+      tipo: evento.tipo,
+      alterado: false,
+      alerta: evento.alerta,
+      descartado: evento.descartado,
+      motivo_descarte: evento.motivo_descarte,
+      enviar_clipe: false,
+    };
+    const tipo = tipoReclassificado(evento.tipo, dto.tipo);
+    if (!tipo) return sem;
+    if (snapshot && !ehJpeg(snapshot)) throw new BadRequestException('snapshot deve ser JPEG');
+    const caixas = dto.caixas === undefined || dto.caixas === null ? undefined : interpretarCaixas(dto.caixas);
+    if (caixas === null) throw new BadRequestException('caixas deve ser uma lista de objetos');
+
+    const config = await this.config.obter(camera.unidade_id, camera.planta_id);
+    const armado = estaArmado(config, agora);
+    const d = decidirReclassificacao(tipo, evento.alerta, armado, normalizarAnalise(camera.analise));
+
+    const snapshotPath = snapshot ? this.storage.caminhoEvento(evento.id, 'jpg') : evento.snapshot_path;
+    if (snapshot && snapshotPath) await this.storage.salvar(snapshotPath, snapshot);
+
+    const dados = { ...objeto(evento.dados), ...(caixas ? { caixas } : {}), reclassificado_em: agora.toISOString() };
+    // where tipo = 'movimento': só uma chamada vence (classificação e fim chegando juntos).
+    const r = await this.prisma.cameras_eventos.updateMany({
+      where: { id: evento.id, tipo: 'movimento' },
+      data: {
+        tipo,
+        confianca: dto.confianca,
+        armado,
+        alerta: d.alerta,
+        descartado: d.descartado,
+        motivo_descarte: d.motivo_descarte,
+        snapshot_path: snapshotPath,
+        dados: dados as Prisma.InputJsonValue,
+      },
+    });
+    if (r.count !== 1) return sem;
+    this.logger.log(
+      `[cameras] evento ${evento.id} reclassificado movimento → ${tipo} (${Math.round(dto.confianca * 100)}%)` +
+        `${d.notificar ? ' — alerta' : d.descartado ? ` — descartado (${d.motivo_descarte})` : ''}`,
+    );
+    if (d.notificar) await this.notificar({ ...evento, tipo, confianca: new Prisma.Decimal(dto.confianca) }, camera, config);
+    return { id: evento.id, tipo, alterado: true, alerta: d.alerta, descartado: d.descartado, motivo_descarte: d.motivo_descarte, enviar_clipe: d.enviar_clipe };
   }
 
   async clipe(evento: cameras_eventos, conteudo: Buffer): Promise<string> {

@@ -23,7 +23,7 @@ import {
 } from './cameras-regras';
 import { CamerasStorageService } from './cameras-storage.service';
 import type { AgenteInfo, Usuario } from './cameras.tipos';
-import type { EventoAgenteDto, FimEventoDto, HeartbeatDto, MiniaturaDto, ResultadoComandoDto } from './dto/cameras-agente.dto';
+import type { ClassificacaoEventoDto, EventoAgenteDto, FimEventoDto, HeartbeatDto, MiniaturaDto, ResultadoComandoDto } from './dto/cameras-agente.dto';
 import type { CriarAgenteDto, ListarAgentesDto } from './dto/cameras.dto';
 
 /**
@@ -372,8 +372,17 @@ export class CamerasAgenteService {
 
   async fimEvento(agente: AgenteInfo, id: string, dto: FimEventoDto) {
     const e = await this.eventoDoAgente(agente, id);
-    await this.eventos.fim(e, dto);
+    // Câmera só é buscada se o fim pode reclassificar (evento ainda `movimento`).
+    const c = e.tipo === 'movimento' ? await this.cameraDoEvento(e.camera_id) : null;
+    await this.eventos.fim(e, dto, c);
     return { ok: true };
+  }
+
+  /** POST /cameras/agente/eventos/:id/classificacao — movimento → pessoa/veículo/animal (NEXON-108). */
+  async classificacao(agente: AgenteInfo, id: string, dto: ClassificacaoEventoDto, file?: Express.Multer.File) {
+    const e = await this.eventoDoAgente(agente, id);
+    const c = await this.cameraDoEvento(e.camera_id);
+    return this.eventos.reclassificar(e, c, dto, file?.buffer?.length ? file.buffer : undefined);
   }
 
   async clipe(agente: AgenteInfo, id: string, file?: Express.Multer.File) {
@@ -417,6 +426,13 @@ export class CamerasAgenteService {
   private async cameraDoAgente(agente: AgenteInfo, cameraId: string) {
     const c = await this.prisma.cameras.findFirst({ where: { id: (cameraId ?? '').trim(), agente_id: agente.id, deleted_at: null } });
     if (!c) throw new NotFoundException('Câmera não encontrada para este agente');
+    return c;
+  }
+
+  /** Câmera do evento (mesmo se removida depois: o evento continua dela). */
+  private async cameraDoEvento(cameraId: string) {
+    const c = await this.prisma.cameras.findFirst({ where: { id: cameraId } });
+    if (!c) throw new NotFoundException('Câmera do evento não encontrada');
     return c;
   }
 

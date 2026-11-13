@@ -16,7 +16,7 @@ import {
   Min,
   ValidateNested,
 } from 'class-validator';
-import { DESCOBERTAS_MAX, TIPOS_EVENTO, type TipoEvento } from '../cameras-regras';
+import { DESCOBERTAS_MAX, TIPOS_CLASSE, TIPOS_EVENTO, type TipoClasse, type TipoEvento } from '../cameras-regras';
 
 /**
  * Câmera encontrada na rede pelo agente (Dahua/Intelbras UDP 37810, ONVIF WS-Discovery).
@@ -134,6 +134,27 @@ export class EventoAgenteDto {
   dados?: unknown;
 }
 
+/**
+ * NEXON-108: classe que o agente reconheceu depois de abrir o evento como `movimento`.
+ * multipart (com arquivo `snapshot`, JPEG ≤ 3 MB, opcional) ou JSON. No multipart `confianca`
+ * chega como texto e `caixas` como texto JSON; caixas são interpretadas no service.
+ */
+export class ClassificacaoEventoDto {
+  @IsIn(TIPOS_CLASSE)
+  tipo!: TipoClasse;
+
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  @Max(1)
+  confianca!: number;
+
+  /** Mesmo formato de dados.caixas do evento (x, y, w, h normalizados, classe, confianca). */
+  @IsOptional()
+  @Allow()
+  caixas?: unknown;
+}
+
 export class FimEventoDto {
   @IsISO8601()
   fim_em!: string;
@@ -142,6 +163,23 @@ export class FimEventoDto {
   @IsOptional()
   @IsObject()
   dados?: Record<string, unknown>;
+
+  /** Opcional: mesma reclassificação da rota /classificacao (agente que só avisa no fim). */
+  @IsOptional()
+  @IsIn(TIPOS_EVENTO)
+  tipo?: TipoEvento;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  @Max(1)
+  confianca?: number;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(50)
+  caixas?: Record<string, unknown>[];
 }
 
 export class ResultadoComandoDto {
