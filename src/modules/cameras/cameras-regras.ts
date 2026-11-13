@@ -58,7 +58,10 @@ export interface Analise {
   fps_analise: number;
   classificar: boolean;
   classes_alerta: string[];
+  /** Segundos depois do início do evento no clipe. */
   clipe_s: number;
+  /** Segundos antes do início (o agente guarda os últimos segundos da câmera). */
+  pre_s: number;
   zonas: unknown[];
 }
 
@@ -69,7 +72,8 @@ export const ANALISE_PADRAO: Analise = {
   fps_analise: 4,
   classificar: true,
   classes_alerta: ['pessoa', 'veiculo'],
-  clipe_s: 12,
+  clipe_s: 15,
+  pre_s: 15,
   zonas: [],
 };
 
@@ -88,6 +92,7 @@ export function normalizarAnalise(v: unknown): Analise {
       ? o.classes_alerta.filter((c): c is string => typeof c === 'string')
       : [...ANALISE_PADRAO.classes_alerta],
     clipe_s: num(o.clipe_s, ANALISE_PADRAO.clipe_s),
+    pre_s: Math.min(30, Math.max(0, num(o.pre_s, ANALISE_PADRAO.pre_s))),
     zonas: Array.isArray(o.zonas) ? o.zonas : [],
   };
 }
