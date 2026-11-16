@@ -2,7 +2,7 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { PrismaService, ClienteInfo, ScopedUser } from '@/core';
 import { EquipamentosCmdService } from '../equipamentos-cmd/equipamentos-cmd.service';
 import { MqttService } from '../../shared/mqtt/mqtt.service';
-import { Irrigacao, duracaoParadaMs } from './pivo-automacao.util';
+import { FaixaCanhao, Irrigacao, duracaoParadaMs } from './pivo-automacao.util';
 import { parametrosEncoder } from './pivo-posicao.util';
 import { calibracaoVigente } from './pivo-calibracao.repo';
 
@@ -140,6 +140,46 @@ export function brutoDoAngulo(angulo: number, enc: { resolucao: number | null; i
   let g = (((angulo - enc.zero) % 360) + 360) % 360;
   if (enc.invertido) g = (360 - g) % 360;
   return Math.round((g * res) / 360) % res;
+}
+
+/** Quantos trechos sem canhão a TON aceita por ordem (MAX_FAIXAS do firmware; cabe no pacote LoRa). */
+export const MAX_TRECHOS_CANHAO = 4;
+
+type Enc = { resolucao: number | null; invertido: boolean; zero: number };
+/** Ângulo calibrado → graus do encoder como a TON enxerga (bruto × 360 / resolução, sem zero nem sentido). */
+const grausDoEncoder = (angulo: number, enc: Enc) => {
+  let g = (((angulo - enc.zero) % 360) + 360) % 360;
+  if (enc.invertido) g = (360 - g) % 360;
+  return Math.round(g) % 360;
+};
+
+/**
+ * Trechos SEM canhão para a TON: o complemento das faixas em que ele fica ligado (a tela guarda as
+ * ligadas, em graus calibrados), já nos graus do encoder e no sentido crescente dele — encoder
+ * invertido troca as pontas. Lista vazia = canhão a volta toda. Mais que MAX_TRECHOS_CANHAO lança.
+ */
+export function trechosSemCanhao(faixasLigadas: FaixaCanhao[] | undefined, enc: Enc): Array<[number, number]> {
+  const fs = [...(faixasLigadas ?? [])].sort((a, b) => a.liga - b.liga);
+  const out: Array<[number, number]> = [];
+  for (let i = 0; i < fs.length; i++) {
+    const ini = fs[i].desliga, fim = fs[(i + 1) % fs.length].liga;   // desliga aqui, liga na próxima
+    if (ini === fim) continue;
+    const a = grausDoEncoder(ini, enc), b = grausDoEncoder(fim, enc);
+    out.push(enc.invertido ? [b, a] : [a, b]);
+  }
+  if (out.length > MAX_TRECHOS_CANHAO) throw new Error(`O canhão aceita até ${MAX_TRECHOS_CANHAO} trechos sem irrigar (marcados: ${out.length}).`);
+  return out;
+}
+
+/**
+ * `pivo canhao <0|1> [f <de> <ate> ...]` — ajuste em operação. `faixasLigadas` undefined = mantém os
+ * trechos que a TON já tem (firmware de 16/11); lista = troca (vazia limpa: canhão a volta toda).
+ */
+export function comandoCanhao(ligar: boolean, faixasLigadas: FaixaCanhao[] | undefined, enc: Enc | null): string {
+  if (!ligar || faixasLigadas === undefined) return `pivo canhao ${ligar ? 1 : 0}`;
+  const t = enc ? trechosSemCanhao(faixasLigadas, enc) : [];
+  if (!enc && faixasLigadas.length) throw new Error('Trechos sem irrigar precisam do encoder calibrado na TON.');
+  return `pivo canhao 1 f${t.map(([a, b]) => ` ${a} ${b}`).join('')}`;
 }
 
 const norm = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
@@ -397,7 +437,7 @@ export class PivoTonService implements OnModuleInit {
   // ------------------------------------------------------------------ plano
 
   /**
-   * `pivo ligar <id8> <d|e> <agua> <permil> <canhao> <g|t> <valor> [f <desliga_em> <liga_em>]`.
+   * `pivo ligar <id8> <d|e> <agua> <permil> <canhao> <g|t> <valor> [f <de> <ate> ...]`.
    * A TON só enxerga GRAUS (decisão 12/11): voltas = 360 × n; ângulo final = graus até lá no sentido.
    * Sem encoder (provisório, até termos um para teste): tempo estimado. "Sem parada" não existe.
    * Lança Error com a mensagem para o operador quando o plano não vale.
@@ -432,11 +472,14 @@ export class PivoTonService implements OnModuleInit {
       tipo = 't'; valor = clamp(s, 60, 7 * 86400); pararEm = new Date(Date.now() + valor * 1000);
       parada = `${p.tipo === 'porVoltas' ? `${p.voltas} volta(s)` : p.tipo === 'porGraus' ? `${p.graus}°` : p.tipo === 'porAngulo' ? `ângulo ${p.angulo}°` : `${p.minutos} min`} por tempo (${Math.round(valor / 60)} min, sem encoder na TON)`;
     }
-    // Faixa do canhão (spec 6.4): a da Irrigação (liga → desliga, em graus calibrados) vira bruto do encoder.
-    // Canhão LIGADO de "liga" até "desliga" ⇒ DESLIGADO dentro de [desliga, liga].
+    // Trechos sem canhão (spec 6.4): o complemento das faixas ligadas da Irrigação, nos graus do encoder.
+    // Sem encoder a TON não sabe onde está: com trechos marcados, recusa (irrigaria onde não pode).
     let faixa = '';
-    const f = canhao && enc ? irr?.config.faixasCanhao?.[0] : undefined;
-    if (f) faixa = ` f ${brutoDoAngulo(f.desliga, enc!) % 360} ${brutoDoAngulo(f.liga, enc!) % 360}`;
+    if (canhao && irr?.config.faixasCanhao?.length) {
+      if (!enc) throw new Error('Trechos sem irrigar precisam do encoder calibrado na TON: tire os trechos ou calibre o encoder.');
+      const t = trechosSemCanhao(irr.config.faixasCanhao, enc);
+      if (t.length) faixa = ` f${t.map(([a, b]) => ` ${a} ${b}`).join('')}`;
+    }
     return { cmd: `pivo ligar ${idCurto(x.seqId)} ${dir} ${agua ? 1 : 0} ${pm} ${canhao} ${tipo} ${valor}${faixa}`, pararEm, parada };
   }
 

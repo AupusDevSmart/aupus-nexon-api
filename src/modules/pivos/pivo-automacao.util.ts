@@ -10,6 +10,12 @@ import { dentroDaJanela, JanelaComAtivo, MomentoLocal, parseHHMM } from '../../s
 
 export type Direcao = 'Avanço' | 'Reverso';
 export interface FaixaCanhao { id?: string; liga: number; desliga: number }
+
+/** Faixas em que o canhão fica LIGADO (graus calibrados) — vindas da tela/API. Não-array = []. */
+export function normalizarFaixasCanhao(v: unknown): FaixaCanhao[] {
+  if (!Array.isArray(v)) return [];
+  return v.slice(0, 8).map((f: any) => ({ liga: norm360(Number(f?.liga) || 0), desliga: norm360(Number(f?.desliga) || 0) }));
+}
 /**
  * percentual = percentímetro (0–100 %, 1 casa): fração de cada ciclo em que o motor de
  * movimento fica ligado (0 = parado irrigando). lamina (mm) = o que o operador pediu;
@@ -73,9 +79,7 @@ export function normalizarIrrigacao(raw: unknown): Irrigacao | null {
     lamina: Number(c.lamina) > 0 ? Math.round(Number(c.lamina) * 100) / 100 : null,
     semAgua: c.semAgua === true,
     canhao: c.canhao === true && c.semAgua !== true,
-    faixasCanhao: Array.isArray(c.faixasCanhao)
-      ? c.faixasCanhao.slice(0, 8).map((f: any) => ({ liga: norm360(Number(f?.liga) || 0), desliga: norm360(Number(f?.desliga) || 0) }))
-      : [],
+    faixasCanhao: normalizarFaixasCanhao(c.faixasCanhao),
   };
   const p = (r.parada ?? {}) as Record<string, any>;
   let parada: Parada = { tipo: 'semParar' };

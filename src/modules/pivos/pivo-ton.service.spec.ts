@@ -1,5 +1,5 @@
 import { BadGatewayException } from '@nestjs/common';
-import { PivoTonService, idCurto } from './pivo-ton.service';
+import { PivoTonService, idCurto, trechosSemCanhao, comandoCanhao, MAX_TRECHOS_CANHAO } from './pivo-ton.service';
 
 /** Sequência na TON (Fase 3, docs/IOT-PIVO-TON-LOCAL.md): mapa de I/O, plano e acompanhamento. */
 
@@ -103,6 +103,39 @@ describe('PivoTonService', () => {
     const f = m('girar_direita', { tipo: 'porVoltas', voltas: 1 }, { canhao: true, faixasCanhao: [{ liga: 200, desliga: 100 }] });
     expect(f).toMatch(/ d 1 600 1 g 360 f 100 200$/);
     expect(f.length).toBeLessThan(60);   // cabe no pacote LoRa com o envelope
+    // a tela do Lab (16/11): sem irrigar 346°–162° = ligado 162 → 346
+    expect(m('girar_direita', { tipo: 'porVoltas', voltas: 1 }, { canhao: true, faixasCanhao: [{ liga: 162, desliga: 346 }] })).toMatch(/ g 360 f 346 162$/);
+    // vários trechos, o pior caso (4 trechos, voltas 50) cabe no envelope LoRa (~118 B + comando ≤ 200)
+    const quatro = [{ liga: 0, desliga: 50 }, { liga: 90, desliga: 140 }, { liga: 180, desliga: 230 }, { liga: 270, desliga: 320 }];
+    const c4 = m('girar_direita', { tipo: 'porVoltas', voltas: 50 }, { canhao: true, percentual: 100, faixasCanhao: quatro });
+    expect(c4).toMatch(/ f 50 90 140 180 230 270 320 0$/);
+    expect(c4.length).toBeLessThanOrEqual(80);
+    // canhão desligado: os trechos não vão
+    expect(m('girar_direita', { tipo: 'porVoltas', voltas: 1 }, { canhao: false, faixasCanhao: quatro })).not.toMatch(/ f /);
+    // trechos sem encoder: recusa (irrigaria onde não pode)
+    const e = exec(id, 'girar_direita', IRR({ tipo: 'porTempo', minutos: 30 }, { canhao: true, faixasCanhao: [{ liga: 10, desliga: 20 }] }));
+    expect(() => svc.montarLigar(e.x as any, null)).toThrow(/encoder calibrado/);
+  });
+
+  it('trechosSemCanhao: complemento das ligadas, nos graus do encoder (zero, sentido, resolução)', () => {
+    expect(trechosSemCanhao([], ENC)).toEqual([]);
+    expect(trechosSemCanhao([{ liga: 300, desliga: 100 }, { liga: 150, desliga: 200 }], ENC)).toEqual([[200, 300], [100, 150]]);
+    // zero 90: ângulo calibrado 100 = 10° do encoder
+    expect(trechosSemCanhao([{ liga: 200, desliga: 100 }], { ...ENC, zero: 90 })).toEqual([[10, 110]]);
+    // invertido: [100, 200] calibrado vira [160, 260] no encoder (sentido crescente dele)
+    expect(trechosSemCanhao([{ liga: 200, desliga: 100 }], { ...ENC, invertido: true })).toEqual([[160, 260]]);
+    // resolução 1024: a TON trabalha em graus (bruto × 360 / res) — não em contagens
+    expect(trechosSemCanhao([{ liga: 200, desliga: 100 }], { ...ENC, resolucao: 1024 })).toEqual([[100, 200]]);
+    const cinco = [0, 60, 120, 180, 240].map((a) => ({ liga: a, desliga: a + 30 }));
+    expect(() => trechosSemCanhao(cinco, ENC)).toThrow(new RegExp(`até ${MAX_TRECHOS_CANHAO} trechos`));
+  });
+
+  it('comandoCanhao: sem faixas mantém os trechos da TON; lista troca; vazia limpa', () => {
+    expect(comandoCanhao(true, undefined, null)).toBe('pivo canhao 1');
+    expect(comandoCanhao(false, [{ liga: 1, desliga: 2 }], ENC)).toBe('pivo canhao 0');
+    expect(comandoCanhao(true, [{ liga: 162, desliga: 346 }], ENC)).toBe('pivo canhao 1 f 346 162');
+    expect(comandoCanhao(true, [], null)).toBe('pivo canhao 1 f');
+    expect(() => comandoCanhao(true, [{ liga: 162, desliga: 346 }], null)).toThrow(/encoder/);
   });
 
   it('montarLigar sem encoder (provisório): tempo estimado; sem parada recusado', () => {

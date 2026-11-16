@@ -5,9 +5,9 @@ import { capacidades, MSG_SOMENTE_LEITURA, papelCanonico } from '../../core/modu
 import { EquipamentosCmdService } from '../equipamentos-cmd/equipamentos-cmd.service';
 import { FUSO_OPERACAO, JanelaComAtivo, janelaValida, momentoEmSaoPaulo } from '../../shared/util/janela-horario';
 import { anguloDoEncoder, brutoDoEncoder, parametrosEncoder } from './pivo-posicao.util';
-import { PivoTonService, TXT_FALHA } from './pivo-ton.service';
+import { PivoTonService, TXT_FALHA, comandoCanhao } from './pivo-ton.service';
 import { calibracaoVigente } from './pivo-calibracao.repo';
-import { dentroDaPonta, duracaoParadaMs, horasLigado, horasLigadoDesde, inicioDoMesSP, ultimaIrrigacao, fmtPercentual, Irrigacao, leituraMaisAntiga, mudancasConfig, normalizarIrrigacao, normalizarPercentual, OrigemSequencia, percentualDaLamina, resumoIrrigacao } from './pivo-automacao.util';
+import { FaixaCanhao, normalizarFaixasCanhao, dentroDaPonta, duracaoParadaMs, horasLigado, horasLigadoDesde, inicioDoMesSP, ultimaIrrigacao, fmtPercentual, Irrigacao, leituraMaisAntiga, mudancasConfig, normalizarIrrigacao, normalizarPercentual, OrigemSequencia, percentualDaLamina, resumoIrrigacao } from './pivo-automacao.util';
 
 /**
  * Sequência do pivô com bombeamento (docs/IOT-PIVO-BOMBEAMENTO.md).
@@ -90,6 +90,13 @@ const norm = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCa
 type PapelComando = 'ligar' | 'valvula' | 'canhao' | 'percentimetro' | 'direita' | 'esquerda' | 'desligar';
 type PapelStatus = 'ligado' | 'canhao' | 'permissivo' | 'pressao' | 'tensao' | 'seguranca' | 'direita' | 'esquerda' | 'desligado' | 'erro';
 type MapaBi = { ton_id: string; bi: number; inv: boolean };
+/** "sem irrigar: 346°–162°, 10°–20°" — o complemento das faixas ligadas (o que o operador marcou). */
+export function textoTrechosSemIrrigar(ligadas: FaixaCanhao[]): string {
+  const fs = [...ligadas].sort((a, b) => a.liga - b.liga);
+  const t = fs.map((f, i) => [f.desliga, fs[(i + 1) % fs.length].liga]).filter(([a, b]) => a !== b).map(([a, b]) => `${Math.round(a)}°–${Math.round(b)}°`);
+  return t.length ? `sem irrigar: ${t.join(', ')}` : 'canhão a volta toda';
+}
+
 /** Resultado de comandar o canhão (aplicarCanhao). */
 type ResCanhao = 'ok' | 'ja' | 'sem_ponto' | 'sem_status' | 'sem_leitura' | 'nao_confirmou' | 'enviado';
 
@@ -1111,14 +1118,19 @@ export class PivoSequenciaService implements OnModuleInit {
     pts: { cmd: Partial<Record<PapelComando, string>>; st: Partial<Record<PapelStatus, MapaBi>> },
     ligar: boolean, user: Autor | undefined, cliente: ClienteInfo | undefined,
     segundos: number, ctl: { cancelar: boolean } = { cancelar: false },
+    faixas?: FaixaCanhao[],   // trechos novos (faixas LIGADAS, calibradas); undefined = a TON mantém os dela
   ): Promise<ResCanhao> {
     if (!pts.cmd.canhao) return 'sem_ponto';
     const alvo = ligar ? 1 : 0;
     // Pivô ligado pela sequência na TON: o canhão é dela ("pivo canhao"); o status só confirma.
     const mCan = this.ton ? await this.boDoPonto(pts.cmd.canhao) : null;
     if (mCan && this.ton?.ligadaNaTon(mCan.ton_id)) {
+      let cmd: string;
       try {
-        await this.cmd.comandoTon({ equipamentoId: id, tonId: mCan.ton_id, cmd: `pivo canhao ${alvo}`, rotulo: ligar ? 'Canhão ligado' : 'Canhão desligado', ackOk: /^pivo_canhao_(on|off)$/ }, user, cliente);
+        cmd = comandoCanhao(ligar, faixas, faixas?.length ? await this.ton.encoderNaTon(id, mCan.ton_id, false) : null);
+      } catch (e: any) { throw new BadRequestException(e?.message ?? 'Trechos sem irrigar inválidos.'); }
+      try {
+        await this.cmd.comandoTon({ equipamentoId: id, tonId: mCan.ton_id, cmd, rotulo: ligar ? 'Canhão ligado' : 'Canhão desligado', ackOk: /^pivo_canhao_(on|off)$/ }, user, cliente);
       } catch (e: any) {
         // "já ligado/desligado" na TON = o pedido já vale (firmware anterior a 12/11 recusava em vez de repetir)
         const m = String(e?.response?.message ?? e?.message ?? '');
@@ -1146,8 +1158,13 @@ export class PivoSequenciaService implements OnModuleInit {
     return ok ? 'ok' : 'nao_confirmou';
   }
 
-  /** Ativar/desativar o canhão pela ficha (pivô ligado com água). */
-  async comandarCanhao(pivoId: string, ligar: boolean, user?: Autor, cliente?: ClienteInfo) {
+  /**
+   * Ativar/desativar o canhão pela ficha (pivô ligado com água). `faixasCanhao` (opcional, faixas em
+   * que o canhão fica LIGADO, graus calibrados) troca os trechos sem irrigar sem desligar o pivô —
+   * só com a sequência na TON; sem o campo, a TON mantém os trechos da ordem.
+   */
+  async comandarCanhao(pivoId: string, ligar: boolean, user?: Autor, cliente?: ClienteInfo, faixasCanhao?: unknown) {
+    const faixas = faixasCanhao === undefined || faixasCanhao === null ? undefined : normalizarFaixasCanhao(faixasCanhao);
     const id = await this.assertPivo(pivoId, user);
     const eq = await this.prisma.equipamentos.findFirst({ where: { id }, select: { nome: true, automacao: true } });
     if (!eq?.automacao) throw new BadRequestException(`"${eq?.nome?.trim()}" não tem automação habilitada.`);
@@ -1163,6 +1180,7 @@ export class PivoSequenciaService implements OnModuleInit {
     // mantém o canhão em OFF (reafirma a cada 1 s). Desligar = já vale; ligar = ligue o pivô antes.
     // Antes caía no caminho da saída mantida e esperava a BI06 — presa em 1 na bancada, o
     // "desligar canhão" nunca confirmava (30 s de erro).
+    if (faixas?.length && !naTon) throw new ConflictException('Trechos sem irrigar só mudam com o pivô girando pela TON.');
     if (mTon && !naTon && this.ton?.statusDaTon(mTon.ton_id)) {
       if (ligar) throw new ConflictException('Ligue o pivô antes de ligar o canhão.');
       this.ton.marcarCanhao(mTon.ton_id, false);
@@ -1181,8 +1199,18 @@ export class PivoSequenciaService implements OnModuleInit {
       if (ativa?.irrigacao?.config?.semAgua) throw new ConflictException('Girando sem água: o canhão fica desligado.');
     }
     const s = (await this.lerConfig(id)).sequencia.confirma_giro_s;
-    const r = await this.aplicarCanhao(id, pts, ligar, user, cliente, s);
-    await this.trilha(id, MSG_CANHAO[r](ligar, s), user?.id?.trim() || null, 'manual', r === 'ok' ? 'INFO' : 'WARN');
+    const r = await this.aplicarCanhao(id, pts, ligar, user, cliente, s, undefined, ligar ? faixas : undefined);
+    const trechos = ligar && faixas ? ` · ${textoTrechosSemIrrigar(faixas)}` : '';
+    await this.trilha(id, `${MSG_CANHAO[r](ligar, s)}${trechos}`, user?.id?.trim() || null, 'manual', r === 'ok' ? 'INFO' : 'WARN');
+    // A irrigação em curso passa a dizer o canhão (e os trechos) de agora: a ficha e o próximo ajuste partem dele.
+    const emCurso = await this.irrigacaoAtiva(id).catch(() => null);
+    if (emCurso?.irrigacao) {
+      const irr = emCurso.irrigacao;
+      irr.config.canhao = ligar;
+      if (ligar && faixas) irr.config.faixasCanhao = faixas;
+      await this.prisma.$executeRaw`UPDATE pivo_sequencias SET irrigacao = ${JSON.stringify(irr)}::jsonb WHERE id = ${emCurso.id}`.catch((e) =>
+        this.logger.warn(`[pivo-canhao] ${id}: irrigação em curso não atualizada: ${(e as Error).message}`));
+    }
     if (r === 'nao_confirmou') throw new ConflictException(`Comando enviado, mas o canhão não confirmou ${ligar ? 'ligado' : 'desligado'} em ${s}s.`);
     return { ok: true, ligado: ligar ? 1 : 0 };
   }

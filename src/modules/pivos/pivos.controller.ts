@@ -49,14 +49,14 @@ export class PivosController {
   @Post(':id/canhao')
   @HttpCode(HttpStatus.OK)
   @Permissions('equipamentos.acionar_ponto')
-  @ApiOperation({ summary: 'Ativa/desativa o canhão final (botão que alterna + status Canhao_ligado). Body: { ligar: boolean }' })
+  @ApiOperation({ summary: 'Ativa/desativa o canhão final (botão que alterna + status Canhao_ligado). Body: { ligar: boolean, faixasCanhao?: [{liga, desliga}] } — faixasCanhao troca os trechos sem irrigar com o pivô girando (TON)' })
   canhao(
     @Param('id') id: string,
-    @Body() body: { ligar?: boolean },
+    @Body() body: { ligar?: boolean; faixasCanhao?: unknown },
     @CurrentUser() user?: any,
     @Cliente() cliente?: ClienteInfo,
   ) {
-    return this.sequencia.comandarCanhao(id, body?.ligar === true, user, cliente);
+    return this.sequencia.comandarCanhao(id, body?.ligar === true, user, cliente, body?.faixasCanhao);
   }
 
   @Post(':id/percentimetro')
