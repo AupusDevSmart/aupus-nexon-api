@@ -17,6 +17,7 @@ import { CamerasDespertarService } from './cameras-despertar.service';
 import { CamerasAuditoriaService } from './cameras-auditoria.service';
 import { CamerasMidiaService } from './cameras-midia.service';
 import {
+  nomeDownload,
   agenteOnline,
   ehMp4,
   ERRO_TRECHO_EXPIRADO,
@@ -150,10 +151,30 @@ export class CamerasTrechosService {
   }
 
   /** GET /cameras/trechos/:comando_id/arquivo (JWT ou ?token=) — MP4 com Range. */
-  async arquivo(comandoId: string, user: Usuario | undefined, req: Request, res: Response): Promise<void> {
+  /** MP4 do trecho. `baixar`: vem como anexo com nome legível e entra no audit log (camera_download). */
+  async arquivo(comandoId: string, user: Usuario | undefined, req: Request, res: Response, baixar = false, cliente?: ClienteInfo): Promise<void> {
     const cmd = await this.buscarComando(comandoId, user);
     if (cmd.estado !== 'ok') throw new NotFoundException('Trecho ainda não disponível');
-    await this.storage.servir(req, res, this.storage.caminhoTrecho(cmd.id), 'video/mp4', 'private, max-age=3600');
+    let nome: string | null = null;
+    if (baixar) {
+      const c = await this.buscarCamera(cmd.camera_id);
+      const p = (cmd.parametros ?? {}) as { inicio?: string; duracao_s?: number };
+      const inicio = p.inicio ? new Date(p.inicio) : cmd.created_at;
+      nome = nomeDownload(c.nome, inicio, `historico-${p.duracao_s ?? ''}s`, 'mp4');
+      const ctx = await this.auditoria.contextoUnidade(c.unidade_id);
+      await this.auditoria.registrar('camera_download', {
+        mensagem: `Trecho do histórico baixado — câmera "${c.nome}" (${c.ip}), ${ctx.unidade?.nome ?? c.unidade_id}${ctx.planta ? ` (${ctx.planta.nome})` : ''}`,
+        user,
+        cliente,
+        unidade: ctx.unidade,
+        planta: ctx.planta,
+        camera: { id: c.id, nome: c.nome, ip: c.ip, unidade_id: c.unidade_id },
+        objetoTipo: 'camera_trecho',
+        objetoId: cmd.id,
+        extra: { arquivo: nome, inicio: inicio.toISOString(), duracao_s: p.duracao_s ?? null },
+      });
+    }
+    await this.storage.servir(req, res, this.storage.caminhoTrecho(cmd.id), 'video/mp4', baixar ? 'private, no-store' : 'private, max-age=3600', nome);
   }
 
   /** POST /cameras/agente/comandos/:id/arquivo — MP4 do trecho (campo `arquivo`). */

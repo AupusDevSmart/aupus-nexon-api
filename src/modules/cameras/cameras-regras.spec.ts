@@ -266,3 +266,11 @@ describe('cameras-regras · agente e mídia', () => {
     expect(html).toContain('sinoptico-ativo/u1');
   });
 });
+
+describe('nomeDownload', () => {
+  it('nome legível, sem acento, na hora de Brasília', () => {
+    const { nomeDownload: n } = jest.requireActual('./cameras-regras');
+    expect(n('Câmera Portão #2', new Date('2026-11-16T17:32:10Z'), 'pessoa', 'mp4')).toBe('camera-portao-2_2026-11-16_14h32_pessoa.mp4');
+    expect(n('', new Date('2026-01-01T02:05:00Z'), 'historico-60s', 'jpg')).toBe('camera_2025-12-31_23h05_historico-60s.jpg');
+  });
+});

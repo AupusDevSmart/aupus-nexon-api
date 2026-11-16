@@ -2,6 +2,7 @@ import { PartialType } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
+  ArrayMinSize,
   IsArray,
   IsBoolean,
   IsEmail,
@@ -357,6 +358,14 @@ export class ListarEventosDto {
   @Min(1)
   @Max(100)
   limit?: number = 20;
+}
+
+export class ExcluirEventosDto {
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(500)
+  @IsString({ each: true })
+  ids!: string[];
 }
 
 export class MarcarLidosDto {

@@ -1,4 +1,5 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { papelCanonico } from '@/core/modules/auth/papeis';
 import type { Request, Response } from 'express';
 import { Prisma, type cameras, type cameras_eventos } from '@prisma/client';
 import { PermissionScopeService, PrismaService } from '@/core';
@@ -7,6 +8,7 @@ import { CamerasAuditoriaService } from './cameras-auditoria.service';
 import { CamerasConfigService, type ConfigUnidade } from './cameras-config.service';
 import { CamerasNotificacaoService } from './cameras-notificacao.service';
 import {
+  nomeDownload,
   decidirEvento,
   decidirReclassificacao,
   ehJpeg,
@@ -25,7 +27,7 @@ import {
 import { CamerasStorageService } from './cameras-storage.service';
 import type { Usuario } from './cameras.tipos';
 import type { ClassificacaoEventoDto, EventoAgenteDto, FimEventoDto } from './dto/cameras-agente.dto';
-import type { ListarEventosDto, MarcarLidosDto } from './dto/cameras.dto';
+import type { ExcluirEventosDto, ListarEventosDto, MarcarLidosDto } from './dto/cameras.dto';
 
 /** O que o service precisa saber da câmera para registrar um evento. */
 export type CameraBasica = Pick<
@@ -125,10 +127,38 @@ export class CamerasEventosService {
   }
 
   /** Snapshot (JPEG) ou clipe (MP4, com Range) direto no `res`. 404 se o evento não tem o arquivo. */
-  async arquivo(id: string, tipo: 'snapshot' | 'clipe', user: Usuario | undefined, req: Request, res: Response): Promise<void> {
+  /** Foto/clipe do evento. `baixar`: vem como anexo com nome legível e entra no audit log (camera_download). */
+  async arquivo(
+    id: string,
+    tipo: 'snapshot' | 'clipe',
+    user: Usuario | undefined,
+    req: Request,
+    res: Response,
+    baixar = false,
+    cliente?: ClienteInfo,
+  ): Promise<void> {
     const e = await this.buscarVisivel(id, user);
-    if (tipo === 'snapshot') return this.storage.servir(req, res, e.snapshot_path, 'image/jpeg', 'private, max-age=86400');
-    return this.storage.servir(req, res, e.clipe_path, 'video/mp4', 'private, max-age=86400');
+    const rel = tipo === 'snapshot' ? e.snapshot_path : e.clipe_path;
+    let nome: string | null = null;
+    if (baixar && rel) {
+      nome = nomeDownload(e.camera?.nome ?? 'camera', e.inicio_em, e.tipo, tipo === 'snapshot' ? 'jpg' : 'mp4');
+      const ctx = await this.auditoria.contextoUnidade(e.unidade_id);
+      const cam = await this.prisma.cameras.findFirst({ where: { id: e.camera_id }, select: { id: true, nome: true, ip: true, unidade_id: true } });
+      await this.auditoria.registrar('camera_download', {
+        mensagem: `${tipo === 'snapshot' ? 'Foto' : 'Clipe'} do evento baixado — câmera "${cam?.nome ?? e.camera_id}"${cam ? ` (${cam.ip})` : ''}, ${ctx.unidade?.nome ?? e.unidade_id}${ctx.planta ? ` (${ctx.planta.nome})` : ''}`,
+        user,
+        cliente,
+        unidade: ctx.unidade,
+        planta: ctx.planta,
+        camera: cam,
+        objetoTipo: 'camera_evento',
+        objetoId: e.id,
+        extra: { arquivo: nome, evento: { id: e.id, tipo: e.tipo, inicio_em: e.inicio_em.toISOString() } },
+      });
+    }
+    const cache = baixar ? 'private, no-store' : 'private, max-age=86400';
+    if (tipo === 'snapshot') return this.storage.servir(req, res, rel, 'image/jpeg', cache, nome);
+    return this.storage.servir(req, res, rel, 'video/mp4', cache, nome);
   }
 
   async marcarLido(id: string, user?: Usuario) {
@@ -170,6 +200,57 @@ export class CamerasEventosService {
       extra: { marcados: r.count },
     });
     return { marcados: r.count };
+  }
+
+  /**
+   * Admin apaga eventos (um ou vários): linha, foto e clipe. Audit log por câmera com a lista dos
+   * eventos (id, tipo, início, alerta), para achar depois quem apagou o quê.
+   */
+  async excluir(dto: ExcluirEventosDto, user?: Usuario, cliente?: ClienteInfo) {
+    if (!user || papelCanonico(user.role) !== 'admin') throw new ForbiddenException('Só o administrador apaga eventos');
+    const ids = [...new Set(dto.ids.map((i) => i.trim()).filter(Boolean))];
+    const eventos = await this.prisma.cameras_eventos.findMany({
+      where: { id: { in: ids } },
+      select: {
+        id: true,
+        camera_id: true,
+        unidade_id: true,
+        tipo: true,
+        inicio_em: true,
+        alerta: true,
+        snapshot_path: true,
+        clipe_path: true,
+        camera: { select: { id: true, nome: true, ip: true, unidade_id: true } },
+      },
+    });
+    if (eventos.length === 0) return { excluidos: 0 };
+    for (const u of new Set(eventos.map((e) => e.unidade_id))) await this.scope.assertEntityInScope('unidade', u, user);
+    const r = await this.prisma.cameras_eventos.deleteMany({ where: { id: { in: eventos.map((e) => e.id) } } });
+    for (const e of eventos) {
+      await this.storage.remover(e.snapshot_path);
+      await this.storage.remover(e.clipe_path);
+    }
+    const porCamera = new Map<string, typeof eventos>();
+    for (const e of eventos) porCamera.set(e.camera_id, [...(porCamera.get(e.camera_id) ?? []), e]);
+    for (const lista of porCamera.values()) {
+      const cam = lista[0].camera;
+      const ctx = await this.auditoria.contextoUnidade(lista[0].unidade_id);
+      await this.auditoria.registrar('camera_evento_exclusao', {
+        mensagem: `${lista.length} evento(s) apagado(s) da câmera "${cam.nome}" (${cam.ip}) — ${ctx.unidade?.nome ?? lista[0].unidade_id}${ctx.planta ? ` (${ctx.planta.nome})` : ''}`,
+        user,
+        cliente,
+        unidade: ctx.unidade,
+        planta: ctx.planta,
+        camera: cam,
+        objetoTipo: 'camera',
+        objetoId: cam.id,
+        extra: {
+          excluidos: lista.length,
+          eventos: lista.map((e) => ({ id: e.id, tipo: e.tipo, inicio_em: e.inicio_em.toISOString(), alerta: e.alerta })),
+        },
+      });
+    }
+    return { excluidos: r.count };
   }
 
   // ---------------------------------------------------------------------------

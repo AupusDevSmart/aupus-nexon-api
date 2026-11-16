@@ -108,7 +108,14 @@ export class CamerasStorageService {
    * Envia o arquivo (200) ou um trecho (206, `Range: bytes=a-b`). Lança 404 se não existe.
    * Responde direto no `res` (fora do ResponseInterceptor).
    */
-  async servir(req: Request, res: Response, rel: string | null | undefined, contentType: string, cacheControl = 'private, max-age=60'): Promise<void> {
+  async servir(
+    req: Request,
+    res: Response,
+    rel: string | null | undefined,
+    contentType: string,
+    cacheControl = 'private, max-age=60',
+    baixarComo?: string | null,
+  ): Promise<void> {
     if (!rel) throw new NotFoundException('Arquivo não disponível');
     let abs: string;
     let tamanho: number;
@@ -128,6 +135,10 @@ export class CamerasStorageService {
     res.setHeader('Cache-Control', cacheControl);
     res.setHeader('Last-Modified', modificado.toUTCString());
     res.setHeader('X-Content-Type-Options', 'nosniff');
+    if (baixarComo) {
+      // salvar na máquina (o atributo download do <a> não vale entre domínios)
+      res.setHeader('Content-Disposition', `attachment; filename="${baixarComo.replace(/[^\w.-]/g, '_')}"; filename*=UTF-8''${encodeURIComponent(baixarComo)}`);
+    }
 
     const range = typeof req.headers.range === 'string' ? req.headers.range : null;
     let inicio = 0;
