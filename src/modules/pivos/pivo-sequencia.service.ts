@@ -988,7 +988,12 @@ export class PivoSequenciaService implements OnModuleInit {
       return { fonte: 'telemetria', angulo: ok ? v : null, angulo_sem_zero: null, bruto: null, lido_em: lidoEm, motivo: ok ? null : 'Sem posição na telemetria do pivô', encoder: null, sem_calibracao: false, calibracao: null };
     }
     const cal = await calibracaoVigente(this.prisma, id);
-    const calibracao = cal ? { id: cal.id, az_cal: cal.az_cal, bruto_cal: cal.bruto_cal, sentido: cal.sentido, criado_em: cal.criado_em } : null;
+    // Centro e ponta do pivô pelo GPS da calibração: a ficha desenha o mapa de satélite por baixo.
+    const temGeo = !!cal && [cal.centro_lat, cal.centro_lon, cal.ponta_lat, cal.ponta_lon].every((v) => Number.isFinite(v) && v !== 0);
+    const calibracao = cal ? {
+      id: cal.id, az_cal: cal.az_cal, bruto_cal: cal.bruto_cal, sentido: cal.sentido, criado_em: cal.criado_em,
+      geo: temGeo ? { centro: { lat: cal.centro_lat, lon: cal.centro_lon }, ponta: { lat: cal.ponta_lat, lon: cal.ponta_lon } } : null,
+    } : null;
     const encoder = { equipamento_id: enc.equipamentoId, resolucao: enc.resolucao, invertido: enc.invertido, zero: enc.zero };
     const bruto = brutoDoEncoder(ult?.dados);
     const semAngulo = (motivo: string) => ({ fonte: 'encoder' as const, angulo: null, angulo_sem_zero: null, bruto, lido_em: lidoEm, motivo, encoder, sem_calibracao: !cal, calibracao });
