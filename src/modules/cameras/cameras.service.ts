@@ -5,6 +5,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { Prisma, type cameras } from '@prisma/client';
@@ -14,6 +15,7 @@ import { novoId26, type ClienteInfo } from '@/core/common/cliente-info';
 import { EquipamentosCmdService } from '../equipamentos-cmd/equipamentos-cmd.service';
 import { CamerasAuditoriaService } from './cameras-auditoria.service';
 import { CamerasConfigService } from './cameras-config.service';
+import { CamerasDespertarService } from './cameras-despertar.service';
 import { CamerasEventosService } from './cameras-eventos.service';
 import { CamerasMidiaService } from './cameras-midia.service';
 import {
@@ -68,6 +70,7 @@ export class CamerasService {
     private readonly auditoria: CamerasAuditoriaService,
     private readonly storage: CamerasStorageService,
     private readonly config: CamerasConfigService,
+    @Optional() private readonly despertar?: CamerasDespertarService,
   ) {}
 
   private exigir(user: Usuario | undefined, cap: Capacidade) {
@@ -293,12 +296,23 @@ export class CamerasService {
     await this.storage.servir(req, res, this.storage.caminhoMiniatura(c.id), 'image/jpeg', 'private, max-age=30');
   }
 
-  /** Marca a câmera como assistida (90 s) e devolve o HLS com token de mídia do usuário. */
+  /**
+   * Marca a câmera como assistida (90 s) e devolve o HLS com token de mídia do usuário.
+   * `estado` vem do servidor de mídia (o vídeo já chegou?), não do último heartbeat (até 30 s atrasado):
+   * o player só abre o HLS quando ele existe. Pedido novo acorda o agente na hora (sem esperar a consulta de 5 s).
+   */
   async stream(id: string, user?: Usuario) {
     const c = await this.buscar(id, user);
     const agora = new Date();
+    const pedidoRecente = !!c.stream_pedido_em && agora.getTime() - c.stream_pedido_em.getTime() < STREAM_PEDIDO_S * 1000;
     await this.prisma.cameras.update({ where: { id: c.id }, data: { stream_pedido_em: agora } });
-    const estado = c.publicando ? 'publicando' : c.status === 'offline' || !c.ativa ? 'offline' : 'aguardando';
+    const pronto = await this.midia.pathPronto(caminhoStream(c.id));
+    if (!pedidoRecente || pronto === false) this.despertar?.despertar(c.agente_id);
+    let estado: 'publicando' | 'offline' | 'aguardando';
+    if (pronto === true) estado = 'publicando';
+    else if (c.status === 'offline' || !c.ativa) estado = 'offline';
+    else if (pronto === false) estado = 'aguardando';
+    else estado = c.publicando ? 'publicando' : 'aguardando';
     const { token } = this.midia.gerarTokenMidia(user ?? {}, agora);
     return {
       hls_url: this.midia.hlsUrl(caminhoStream(c.id), token),
@@ -338,6 +352,7 @@ export class CamerasService {
     const cmd = await this.prisma.cameras_comandos.create({
       data: { id: novoId26(), camera_id: c.id, agente_id: agente.id, tipo: 'foto', parametros: {}, solicitado_por_id: t(user?.id) },
     });
+    this.despertar?.despertar(agente.id);
     await this.auditoria.registrar('camera_comando', {
       mensagem: `Foto pedida à câmera "${c.nome}" (${c.ip}) — ${ctx.unidade?.nome ?? c.unidade_id}${ctx.planta ? ` (${ctx.planta.nome})` : ''}`,
       user,
