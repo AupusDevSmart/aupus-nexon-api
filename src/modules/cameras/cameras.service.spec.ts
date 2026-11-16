@@ -1,4 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
+import { CamerasDespertarService } from './cameras-despertar.service';
 import { CamerasService } from './cameras.service';
 
 const camera = {
@@ -77,6 +78,7 @@ function montar(opts: { escopo?: string[] | null; camera?: Partial<typeof camera
   };
   const midia: any = {
     cifrar: jest.fn().mockImplementation((s: string) => `enc:${s}`),
+    pathPronto: jest.fn().mockResolvedValue(null),
     gerarTokenMidia: jest.fn().mockReturnValue({ token: 'tok.en', valido_ate: 'x' }),
     hlsUrl: jest.fn().mockImplementation((caminho: string, token: string) => `https://m/hls/${caminho}/index.m3u8?token=${token}`),
   };
@@ -141,6 +143,47 @@ describe('CamerasService · escopo', () => {
     expect(prisma.cameras.update.mock.calls[0][0].data.stream_pedido_em).toBeInstanceOf(Date);
     expect(r.hls_url).toBe('https://m/hls/cam-c1/index.m3u8?token=tok.en');
     expect(r.estado).toBe('aguardando');
+  });
+
+  it('stream: estado vem do servidor de mídia e pedido novo acorda o agente', async () => {
+    const { service, prisma, midia } = montar();
+    const despertar = new CamerasDespertarService();
+    (service as any).despertar = despertar;
+    const base = await prisma.cameras.findFirst();
+    prisma.cameras.findFirst.mockResolvedValue({ ...base, agente_id: 'ag1' });
+    midia.pathPronto.mockResolvedValueOnce(true);
+    expect((await service.stream('c1', admin)).estado).toBe('publicando');
+    midia.pathPronto.mockResolvedValueOnce(false);
+    expect((await service.stream('c1', admin)).estado).toBe('aguardando');
+    expect(despertar.seq('ag1')).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('CamerasDespertarService', () => {
+  it('despertar solta quem espera; sinal anterior à espera volta na hora', async () => {
+    const d = new CamerasDespertarService();
+    const t0 = Date.now();
+    const espera = d.aguardar('a1', 5, d.seq('a1'));
+    d.despertar('a1');
+    await espera;
+    expect(Date.now() - t0).toBeLessThan(1000);
+    // sinal já chegou (seq mudou): não espera
+    const t1 = Date.now();
+    await d.aguardar('a1', 5, 0);
+    expect(Date.now() - t1).toBeLessThan(200);
+    expect(d.seq('a1')).toBe(1);
+  });
+
+  it('sem sinal, espera o tempo pedido (teto 25 s)', async () => {
+    jest.useFakeTimers();
+    const d = new CamerasDespertarService();
+    let solto = false;
+    void d.aguardar('a2', 99, 0).then(() => (solto = true));
+    await jest.advanceTimersByTimeAsync(24_000);
+    expect(solto).toBe(false);
+    await jest.advanceTimersByTimeAsync(1_100);
+    expect(solto).toBe(true);
+    jest.useRealTimers();
   });
 });
 

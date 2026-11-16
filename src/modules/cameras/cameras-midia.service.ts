@@ -186,6 +186,23 @@ export class CamerasMidiaService {
     return (process.env.MIDIA_PUBLICAR_BASE || 'rtsp://localhost:8554').replace(/\/$/, '');
   }
 
+  /**
+   * O vídeo do caminho já chegou ao servidor de mídia? Pergunta à API local do MediaMTX (`MIDIA_API_URL`,
+   * padrão http://127.0.0.1:9997). `null` quando não deu para saber (MediaMTX fora, ambiente local).
+   */
+  async pathPronto(caminho: string): Promise<boolean | null> {
+    const base = (process.env.MIDIA_API_URL || 'http://127.0.0.1:9997').replace(/\/$/, '');
+    try {
+      const r = await fetch(`${base}/v3/paths/get/${encodeURIComponent(caminho)}`, { signal: AbortSignal.timeout(800) });
+      if (r.status === 404) return false;
+      if (!r.ok) return null;
+      const d = (await r.json()) as { ready?: boolean };
+      return d.ready === true;
+    } catch {
+      return null;
+    }
+  }
+
   hlsUrl(caminho: string, token: string): string {
     return `${this.publicUrl()}/hls/${caminho}/index.m3u8?token=${encodeURIComponent(token)}`;
   }

@@ -6,6 +6,7 @@ import {
   HttpStatus,
   Param,
   Post,
+  Query,
   UploadedFile,
   UseGuards,
   UseInterceptors,
@@ -15,6 +16,7 @@ import { ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { memoryStorage } from 'multer';
 import { Public } from '@/core';
 import { CamerasAgenteService } from './cameras-agente.service';
+import { CamerasDespertarService } from './cameras-despertar.service';
 import { TRECHO_ARQUIVO_MAX_MB } from './cameras-regras';
 import { CamerasTrechosService } from './cameras-trechos.service';
 import type { AgenteInfo } from './cameras.tipos';
@@ -39,12 +41,23 @@ export class CamerasAgenteController {
   constructor(
     private readonly agentes: CamerasAgenteService,
     private readonly trechos: CamerasTrechosService,
+    private readonly despertar: CamerasDespertarService,
   ) {}
 
   @Get('config')
-  @ApiOperation({ summary: 'Configuração completa do agente: câmeras com RTSP, armado, análise e stream' })
-  config(@Agente() agente: AgenteInfo) {
-    return this.agentes.configDoAgente(agente);
+  @ApiOperation({
+    summary: 'Configuração completa do agente: câmeras com RTSP, armado, análise e stream',
+    description:
+      'Com `aguardar` (s, até 25) e `seq` (o último recebido), a resposta espera até haver trabalho novo (vídeo pedido, comando) ou o tempo acabar.',
+  })
+  async config(@Agente() agente: AgenteInfo, @Query('aguardar') aguardar?: string, @Query('seq') seq?: string) {
+    const espera = Number(aguardar);
+    if (Number.isFinite(espera) && espera > 0) {
+      const visto = seq !== undefined && seq !== '' && Number.isFinite(Number(seq)) ? Number(seq) : undefined;
+      await this.despertar.aguardar(agente.id, espera, visto);
+    }
+    const sinal = this.despertar.seq(agente.id);
+    return { ...(await this.agentes.configDoAgente(agente)), seq: sinal };
   }
 
   @Post('heartbeat')

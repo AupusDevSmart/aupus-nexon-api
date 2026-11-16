@@ -6,12 +6,14 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import type { cameras, cameras_comandos } from '@prisma/client';
 import type { Request, Response } from 'express';
 import { PermissionScopeService, PrismaService } from '@/core';
 import { novoId26, type ClienteInfo } from '@/core/common/cliente-info';
+import { CamerasDespertarService } from './cameras-despertar.service';
 import { CamerasAuditoriaService } from './cameras-auditoria.service';
 import { CamerasMidiaService } from './cameras-midia.service';
 import {
@@ -52,6 +54,7 @@ export class CamerasTrechosService {
     private readonly midia: CamerasMidiaService,
     private readonly storage: CamerasStorageService,
     private readonly auditoria: CamerasAuditoriaService,
+    @Optional() private readonly despertar?: CamerasDespertarService,
   ) {}
 
   /** POST /cameras/:id/trechos */
@@ -101,6 +104,7 @@ export class CamerasTrechosService {
     const cmd = await this.prisma.cameras_comandos.create({
       data: { id: novoId26(), camera_id: c.id, agente_id: agente.id, tipo: TIPO, parametros, solicitado_por_id: t(user?.id) },
     });
+    this.despertar?.despertar(agente.id);
     await this.auditoria.registrar('camera_trecho_pedido', {
       mensagem:
         `Trecho do histórico pedido à câmera "${c.nome}" (${c.ip}): ${horaLocal(inicio)}, ${dto.duracao_s} s — ` +
