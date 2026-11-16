@@ -186,6 +186,12 @@ describe('calibração do ângulo do pivô', () => {
       expect(rodar('E', [2, 1, 0, 359, 358, 357])).toBe(false);
     });
 
+    it('salto grande entre amostras (leitura ruim, emulador mexido) não é giro (bancada 13/11)', () => {
+      expect(rodar('D', [245, 130])).toBe(false);
+      expect(rodar('D', [245, 130, 131, 132])).toBe(false);   // segue a partir do novo ponto
+      expect(rodar('D', [245, 130, 129, 128, 127])).toBe(true); // giro de verdade ao contrário ainda alarma
+    });
+
     it('ruído de ±1 em volta do mesmo ponto não acumula', () => {
       expect(rodar('D', [100, 99, 100, 99, 100, 99, 100, 99])).toBe(false);
     });

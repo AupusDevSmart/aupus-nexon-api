@@ -184,6 +184,8 @@ export function lerAckEncoder(msg: string): { leituras: number[]; erros: number 
 
 /** Ângulo andando mais que isto no sentido contrário ao do comando = sentido invertido. */
 export const SENTIDO_INVERTIDO_GRAUS = 2;
+/** Passo entre amostras acima disto = salto (leitura ruim), não giro — o mesmo filtro da TON. */
+export const SALTO_SENTIDO_GRAUS = 30;
 /** Pivô girando com o ângulo parado por este tempo = travado (padrão; `travado_min` da Configuração). */
 export const TRAVADO_MIN_PADRAO = 10;
 export const TRAVADO_MIN_FAIXA = { min: 1, max: 240 } as const;
@@ -207,7 +209,12 @@ export function passoSentido(
 ): { estado: AcompanhaSentido | null; invertido: boolean; contrario: number } {
   if (!dir || angulo == null) return { estado: null, invertido: false, contrario: 0 };
   if (!ant || ant.dir !== dir) return { estado: { dir, ultimo: angulo, acumulado: 0 }, invertido: false, contrario: 0 };
-  const acumulado = ant.acumulado + deltaCircular(ant.ultimo, angulo);
+  // Salto maior que SALTO_SENTIDO_GRAUS entre duas amostras (30 s) não é giro: leitura ruim ou
+  // emulador/encoder mexido à mão (13/11: 245° → 130° na bancada abriu "sentido invertido").
+  // A TON descarta o mesmo salto; aqui só reposiciona a referência, sem somar.
+  const passo = deltaCircular(ant.ultimo, angulo);
+  if (Math.abs(passo) > SALTO_SENTIDO_GRAUS) return { estado: { dir, ultimo: angulo, acumulado: ant.acumulado }, invertido: false, contrario: 0 };
+  const acumulado = ant.acumulado + passo;
   const contrario = dir === 'D' ? -acumulado : acumulado;
   return { estado: { dir, ultimo: angulo, acumulado }, invertido: contrario > SENTIDO_INVERTIDO_GRAUS, contrario: arred(Math.max(0, contrario), 1) };
 }
