@@ -348,21 +348,21 @@ export function decidirEvento(tipo: string, armado: boolean, analise: Partial<An
   let descartado = false;
   let motivo: MotivoDescarte | null = null;
 
-  if ((TIPOS_DETECCAO as readonly string[]).includes(tipo)) {
-    if (!armado) {
-      descartado = true;
-      motivo = 'desarmado';
-    } else if (!a.classes_alerta.includes(tipo)) {
+  // Detecção roda 24 h: classe escolhida sempre vira evento com foto e clipe. Armar só decide
+  // o ALERTA (aviso, alarme, chamado, sirene); desarmado o evento fica na lista sem alerta.
+  const deteccao = (TIPOS_DETECCAO as readonly string[]).includes(tipo);
+  if (deteccao) {
+    if (!a.classes_alerta.includes(tipo)) {
       descartado = true;
       motivo = 'classe_ignorada';
     } else {
-      alerta = true;
+      alerta = armado;
     }
   } else if (tipo === 'sem_sinal') {
     alerta = true;
   }
 
-  const enviar_clipe = alerta && (TIPOS_DETECCAO as readonly string[]).includes(tipo) && a.clipe_s > 0;
+  const enviar_clipe = deteccao && !descartado && a.clipe_s > 0;
   return { alerta, descartado, motivo_descarte: motivo, enviar_clipe };
 }
 

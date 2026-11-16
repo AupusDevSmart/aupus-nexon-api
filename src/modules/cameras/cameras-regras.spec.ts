@@ -164,8 +164,9 @@ describe('cameras-regras · eventos', () => {
     expect(decidirEvento('veiculo', true, { clipe_s: 0 }).enviar_clipe).toBe(false);
   });
 
-  it('desarmado e classe ignorada descartam', () => {
-    expect(decidirEvento('pessoa', false, null)).toMatchObject({ alerta: false, descartado: true, motivo_descarte: 'desarmado' });
+  it('desarmado guarda o evento (com clipe) sem alerta; classe ignorada descarta', () => {
+    expect(decidirEvento('pessoa', false, null)).toMatchObject({ alerta: false, descartado: false, motivo_descarte: null, enviar_clipe: true });
+    expect(decidirEvento('pessoa', true, null)).toMatchObject({ alerta: true, descartado: false, enviar_clipe: true });
     expect(decidirEvento('animal', true, null)).toMatchObject({ descartado: true, motivo_descarte: 'classe_ignorada' });
     expect(decidirEvento('movimento', true, { classes_alerta: ['movimento'] })).toMatchObject({ alerta: true, descartado: false });
   });

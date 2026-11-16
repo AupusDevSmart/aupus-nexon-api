@@ -35,9 +35,9 @@ describe('decidirReclassificacao', () => {
     });
   });
 
-  it('desarmado → descartado, sem aviso', () => {
+  it('desarmado → evento guardado, sem aviso', () => {
     const d = decidirReclassificacao('pessoa', false, false, analise);
-    expect(d).toMatchObject({ alerta: false, descartado: true, motivo_descarte: 'desarmado', notificar: false });
+    expect(d).toMatchObject({ alerta: false, descartado: false, motivo_descarte: null, notificar: false });
   });
 
   it('classe fora de classes_alerta → classe_ignorada', () => {
@@ -162,10 +162,10 @@ describe('CamerasEventosService.reclassificar', () => {
     expect(m.notificacao.alertar).toHaveBeenCalledTimes(1);
   });
 
-  it('desarmado: sobe a classe mas fica descartado e não avisa', async () => {
+  it('desarmado: sobe a classe, fica na lista e não avisa', async () => {
     const m = montar({ armado: false });
     const r = await m.svc.reclassificar(m.linha(), camera, { tipo: 'pessoa', confianca: 0.8 });
-    expect(r).toMatchObject({ alterado: true, alerta: false, descartado: true, motivo_descarte: 'desarmado' });
+    expect(r).toMatchObject({ alterado: true, alerta: false, descartado: false, motivo_descarte: null });
     expect(m.notificacao.alertar).not.toHaveBeenCalled();
   });
 
