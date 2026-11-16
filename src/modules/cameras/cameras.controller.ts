@@ -32,6 +32,7 @@ import {
   EditarCameraDto,
   ListarAgentesDto,
   ListarCamerasDto,
+  ExcluirEventosDto,
   ListarEventosDto,
   MarcarLidosDto,
   PedirTrechoDto,
@@ -72,6 +73,19 @@ export class CamerasController {
     return this.eventos.marcarLidos(dto, user, cliente);
   }
 
+  @Post('eventos/excluir')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Admin apaga eventos (ids, até 500): registro, foto e clipe; audit log por câmera' })
+  excluirEventos(@Body() dto: ExcluirEventosDto, @CurrentUser() user?: Usuario, @Cliente() cliente?: ClienteInfo) {
+    return this.eventos.excluir(dto, user, cliente);
+  }
+
+  @Delete('eventos/:id')
+  @ApiOperation({ summary: 'Admin apaga um evento (registro, foto e clipe)' })
+  excluirEvento(@Param('id') id: string, @CurrentUser() user?: Usuario, @Cliente() cliente?: ClienteInfo) {
+    return this.eventos.excluir({ ids: [id] }, user, cliente);
+  }
+
   @Get('eventos/:id')
   detalheEvento(@Param('id') id: string, @CurrentUser() user?: Usuario) {
     return this.eventos.detalhe(id, user);
@@ -81,16 +95,30 @@ export class CamerasController {
   @UseGuards(UsuarioOuTokenMidiaGuard)
   @Get('eventos/:id/snapshot')
   @ApiOperation({ summary: 'JPEG do evento (JWT ou ?token=)' })
-  snapshot(@Param('id') id: string, @CurrentUser() user: Usuario, @Req() req: Request, @Res() res: Response) {
-    return this.eventos.arquivo(id, 'snapshot', user, req, res);
+  snapshot(
+    @Param('id') id: string,
+    @CurrentUser() user: Usuario,
+    @Req() req: Request,
+    @Res() res: Response,
+    @Query('baixar') baixar?: string,
+    @Cliente() cliente?: ClienteInfo,
+  ) {
+    return this.eventos.arquivo(id, 'snapshot', user, req, res, baixar === '1', cliente);
   }
 
   @Public()
   @UseGuards(UsuarioOuTokenMidiaGuard)
   @Get('eventos/:id/clipe')
-  @ApiOperation({ summary: 'MP4 do evento com Range (JWT ou ?token=)' })
-  clipe(@Param('id') id: string, @CurrentUser() user: Usuario, @Req() req: Request, @Res() res: Response) {
-    return this.eventos.arquivo(id, 'clipe', user, req, res);
+  @ApiOperation({ summary: 'MP4 do evento com Range (JWT ou ?token=); ?baixar=1 = anexo com nome legível (audit log)' })
+  clipe(
+    @Param('id') id: string,
+    @CurrentUser() user: Usuario,
+    @Req() req: Request,
+    @Res() res: Response,
+    @Query('baixar') baixar?: string,
+    @Cliente() cliente?: ClienteInfo,
+  ) {
+    return this.eventos.arquivo(id, 'clipe', user, req, res, baixar === '1', cliente);
   }
 
   @Post('eventos/:id/lido')
@@ -113,8 +141,15 @@ export class CamerasController {
   @UseGuards(UsuarioOuTokenMidiaGuard)
   @Get('trechos/:comandoId/arquivo')
   @ApiOperation({ summary: 'MP4 do trecho com Range (JWT ou ?token=); apagado 24 h depois' })
-  arquivoTrecho(@Param('comandoId') comandoId: string, @CurrentUser() user: Usuario, @Req() req: Request, @Res() res: Response) {
-    return this.trechos.arquivo(comandoId, user, req, res);
+  arquivoTrecho(
+    @Param('comandoId') comandoId: string,
+    @CurrentUser() user: Usuario,
+    @Req() req: Request,
+    @Res() res: Response,
+    @Query('baixar') baixar?: string,
+    @Cliente() cliente?: ClienteInfo,
+  ) {
+    return this.trechos.arquivo(comandoId, user, req, res, baixar === '1', cliente);
   }
 
   // ---------------------------------------------------------------------------

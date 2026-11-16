@@ -46,6 +46,10 @@ export type AcaoAuditoria =
   | 'camera_agente_pareado'
   | 'camera_pareamento_falha'
   | 'camera_evento_lido'
+  // NEXON-108: admin apaga eventos (foto e clipe saem do disco)
+  | 'camera_evento_exclusao'
+  // NEXON-108: vídeo/foto de câmera baixado para a máquina (clipe de evento ou trecho do histórico)
+  | 'camera_download'
   // NEXON-108: pedido de trecho do histórico gravado no aparelho
   | 'camera_trecho_pedido'
   // NEXON-103 (calibração do ângulo do pivô): gravada na TON e restaurada

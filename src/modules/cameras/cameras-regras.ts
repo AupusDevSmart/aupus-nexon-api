@@ -935,3 +935,31 @@ export function trechoVencido(c: { created_at: Date; entregue_em: Date | null },
   const base = (c.entregue_em ?? c.created_at).getTime();
   return agora.getTime() - base > TRECHO_EXPIRA_S * 1000;
 }
+
+/**
+ * Nome do arquivo baixado: `portao_2026-11-16_14h32_pessoa.mp4` (hora de Brasília, sem acento nem espaço).
+ */
+export function nomeDownload(camera: string, quando: Date, sufixo: string, ext: 'mp4' | 'jpg'): string {
+  const limpo = (v: string) =>
+    v
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 40) || 'camera';
+  const p = Object.fromEntries(
+    new Intl.DateTimeFormat('en-CA', {
+      timeZone: FUSO,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    })
+      .formatToParts(quando)
+      .map((x) => [x.type, x.value]),
+  );
+  return `${limpo(camera)}_${p.year}-${p.month}-${p.day}_${p.hour}h${p.minute}_${limpo(sufixo)}.${ext}`;
+}
