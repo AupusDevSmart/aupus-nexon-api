@@ -14,6 +14,7 @@ import { CamerasOfflineWorker } from './cameras-offline.worker';
 import { CamerasPareamentoController } from './cameras-pareamento.controller';
 import { CamerasPareamentoService } from './cameras-pareamento.service';
 import { CamerasStorageService } from './cameras-storage.service';
+import { CamerasTrechosService } from './cameras-trechos.service';
 import { CamerasController } from './cameras.controller';
 import { CamerasService } from './cameras.service';
 import { CameraAgenteGuard } from './guards/camera-agente.guard';
@@ -39,6 +40,7 @@ import { UsuarioOuTokenMidiaGuard } from './guards/usuario-ou-token-midia.guard'
     CamerasConfigService,
     CamerasAuditoriaService,
     CamerasOfflineWorker,
+    CamerasTrechosService,
     CameraAgenteGuard,
     UsuarioOuTokenMidiaGuard,
   ],

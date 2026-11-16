@@ -18,7 +18,19 @@ import {
   Min,
   ValidateNested,
 } from 'class-validator';
-import { DISPOSITIVOS, MODOS_ARMAMENTO, TIPOS_DETECCAO, type Dispositivo, type ModoArmamento } from '../cameras-regras';
+import {
+  DISPOSITIVOS,
+  GRAVACAO_DIAS_MAX,
+  GRAVACAO_DIAS_MIN,
+  MODOS_ARMAMENTO,
+  STREAMS_GRAVACAO,
+  TIPOS_DETECCAO,
+  TRECHO_DURACAO_MAX_S,
+  TRECHO_DURACAO_MIN_S,
+  type Dispositivo,
+  type ModoArmamento,
+  type StreamGravacao,
+} from '../cameras-regras';
 
 /**
  * Flag de query (`?somente_nao_lidos=1`). Lê o valor cru: com enableImplicitConversion o
@@ -104,6 +116,35 @@ export class StreamDto {
   bitrate_kbps?: number;
 }
 
+/** NEXON-108: gravação contínua no aparelho (vai ao agente em GET config → `gravacao`). */
+export class GravacaoDto {
+  @IsOptional()
+  @IsBoolean()
+  ativa?: boolean;
+
+  @IsOptional()
+  @IsInt()
+  @Min(GRAVACAO_DIAS_MIN)
+  @Max(GRAVACAO_DIAS_MAX)
+  dias?: number;
+
+  /** secundario = leve (sub-stream); principal = alta. */
+  @IsOptional()
+  @IsIn(STREAMS_GRAVACAO)
+  stream?: StreamGravacao;
+}
+
+/** NEXON-108: POST /cameras/:id/trechos — pedaço do histórico gravado no aparelho. */
+export class PedirTrechoDto {
+  @IsISO8601()
+  inicio!: string;
+
+  @IsInt()
+  @Min(TRECHO_DURACAO_MIN_S)
+  @Max(TRECHO_DURACAO_MAX_S)
+  duracao_s!: number;
+}
+
 export class CriarCameraDto {
   @IsString()
   @IsNotEmpty()
@@ -178,6 +219,11 @@ export class CriarCameraDto {
   @ValidateNested()
   @Type(() => AnaliseDto)
   analise?: AnaliseDto;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => GravacaoDto)
+  gravacao?: GravacaoDto;
 
   @IsOptional()
   @IsInt()

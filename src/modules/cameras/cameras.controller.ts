@@ -20,6 +20,7 @@ import { CurrentUser, Public } from '@/core';
 import { Cliente, type ClienteInfo } from '@/core/common/cliente-info';
 import { CamerasAgenteService } from './cameras-agente.service';
 import { CamerasEventosService } from './cameras-eventos.service';
+import { CamerasTrechosService } from './cameras-trechos.service';
 import { CamerasService } from './cameras.service';
 import type { Usuario } from './cameras.tipos';
 import {
@@ -33,6 +34,7 @@ import {
   ListarCamerasDto,
   ListarEventosDto,
   MarcarLidosDto,
+  PedirTrechoDto,
 } from './dto/cameras.dto';
 import { UsuarioOuTokenMidiaGuard } from './guards/usuario-ou-token-midia.guard';
 
@@ -50,6 +52,7 @@ export class CamerasController {
     private readonly cameras: CamerasService,
     private readonly eventos: CamerasEventosService,
     private readonly agentes: CamerasAgenteService,
+    private readonly trechos: CamerasTrechosService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -94,6 +97,24 @@ export class CamerasController {
   @HttpCode(HttpStatus.OK)
   marcarLido(@Param('id') id: string, @CurrentUser() user?: Usuario) {
     return this.eventos.marcarLido(id, user);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Histórico gravado no aparelho (NEXON-108)
+  // ---------------------------------------------------------------------------
+
+  @Get('trechos/:comandoId')
+  @ApiOperation({ summary: 'Estado do trecho pedido: pendente | pronto (url com ?token=) | erro | expirado (3 min sem resposta)' })
+  estadoTrecho(@Param('comandoId') comandoId: string, @CurrentUser() user?: Usuario) {
+    return this.trechos.estado(comandoId, user);
+  }
+
+  @Public()
+  @UseGuards(UsuarioOuTokenMidiaGuard)
+  @Get('trechos/:comandoId/arquivo')
+  @ApiOperation({ summary: 'MP4 do trecho com Range (JWT ou ?token=); apagado 24 h depois' })
+  arquivoTrecho(@Param('comandoId') comandoId: string, @CurrentUser() user: Usuario, @Req() req: Request, @Res() res: Response) {
+    return this.trechos.arquivo(comandoId, user, req, res);
   }
 
   // ---------------------------------------------------------------------------
@@ -216,5 +237,11 @@ export class CamerasController {
   @ApiOperation({ summary: 'Pede uma foto agora ao agente; 409 CAMERA_SEM_AGENTE' })
   foto(@Param('id') id: string, @CurrentUser() user?: Usuario, @Cliente() cliente?: ClienteInfo) {
     return this.cameras.foto(id, user, cliente);
+  }
+
+  @Post(':id/trechos')
+  @ApiOperation({ summary: 'Pede ao aparelho um trecho do histórico { inicio, duracao_s 10..300 }; 409 CAMERA_SEM_AGENTE, 429 TRECHOS_DEMAIS' })
+  pedirTrecho(@Param('id') id: string, @Body() dto: PedirTrechoDto, @CurrentUser() user?: Usuario, @Cliente() cliente?: ClienteInfo) {
+    return this.trechos.pedir(id, dto, user, cliente);
   }
 }

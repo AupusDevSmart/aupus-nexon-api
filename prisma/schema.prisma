@@ -3652,6 +3652,9 @@ model cameras {
   stream_bitrate_kbps   Int                @default(800)
   /// { ativa, sensibilidade, area_minima_pct, fps_analise, classificar, classes_alerta, clipe_s, zonas }
   analise               Json               @default("{}")
+  /// NEXON-108 histórico: { config: { ativa, dias, stream }, status: { ativa, de, ate, uso_gb, livre_gb, em } }
+  /// config vai ao agente no GET config; status vem do heartbeat. db/manual-migrations/2026-11-16_cameras_gravacao.sql
+  gravacao              Json               @default("{}")
   created_at            DateTime           @default(now()) @db.Timestamp(0)
   updated_at            DateTime           @default(now()) @updatedAt @db.Timestamp(0)
   deleted_at            DateTime?          @db.Timestamp(0)

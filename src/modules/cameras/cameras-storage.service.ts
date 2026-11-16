@@ -1,7 +1,7 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { createReadStream } from 'node:fs';
-import { mkdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { dirname, join, relative, resolve } from 'node:path';
 
@@ -25,6 +25,36 @@ export class CamerasStorageService {
 
   caminhoEvento(eventoId: string, ext: 'jpg' | 'mp4'): string {
     return `eventos/${this.idSeguro(eventoId)}.${ext}`;
+  }
+
+  /** NEXON-108: trecho do histórico enviado pelo agente (apagado em 24 h). */
+  caminhoTrecho(comandoId: string): string {
+    return `trechos/${this.idSeguro(comandoId)}.mp4`;
+  }
+
+  /** Apaga arquivos de `pasta` modificados há mais de `maxIdadeMs`. Devolve quantos apagou. */
+  async limparAntigos(pasta: string, maxIdadeMs: number, agora = new Date()): Promise<number> {
+    let nomes: string[];
+    try {
+      nomes = await readdir(this.absoluto(pasta));
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return 0;
+      throw e;
+    }
+    let n = 0;
+    for (const nome of nomes) {
+      const rel = `${pasta}/${nome}`;
+      try {
+        const s = await stat(this.absoluto(rel));
+        if (s.isFile() && agora.getTime() - s.mtime.getTime() > maxIdadeMs) {
+          await unlink(this.absoluto(rel));
+          n++;
+        }
+      } catch (e) {
+        this.logger.warn(`[cameras] limpeza de ${rel}: ${(e as Error).message}`);
+      }
+    }
+    return n;
   }
 
   /** Caminho absoluto, garantido dentro da pasta de storage. */

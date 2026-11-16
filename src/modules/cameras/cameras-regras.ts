@@ -824,3 +824,114 @@ export function descobertasPendentes<T extends { ip: string; visto_em: Date }>(
   const desde = agora.getTime() - DESCOBERTA_VALIDADE_S * 1000;
   return descobertas.filter((d) => d.visto_em.getTime() >= desde && !cadastrados.has(normalizarIp(d.ip)));
 }
+
+// ---------------------------------------------------------------------------
+// NEXON-108 — Histórico gravado no aparelho (jsonb `cameras.gravacao`) e trechos
+// ---------------------------------------------------------------------------
+
+export const STREAMS_GRAVACAO = ['secundario', 'principal'] as const;
+export type StreamGravacao = (typeof STREAMS_GRAVACAO)[number];
+
+export interface GravacaoConfig {
+  ativa: boolean;
+  dias: number;
+  stream: StreamGravacao;
+}
+
+export interface GravacaoStatus {
+  ativa: boolean;
+  de: string | null;
+  ate: string | null;
+  uso_gb: number | null;
+  livre_gb: number | null;
+  /** Quando o agente informou (heartbeat). */
+  em: string | null;
+}
+
+export const GRAVACAO_CONFIG_PADRAO: GravacaoConfig = { ativa: true, dias: 7, stream: 'secundario' };
+export const GRAVACAO_DIAS_MIN = 1;
+export const GRAVACAO_DIAS_MAX = 30;
+
+/** Trecho: duração aceita (s), pedidos abertos por câmera, prazo sem resposta, vida do arquivo. */
+export const TRECHO_DURACAO_MIN_S = 10;
+export const TRECHO_DURACAO_MAX_S = 300;
+export const TRECHO_PENDENTES_MAX = 3;
+export const TRECHO_EXPIRA_S = 180;
+export const TRECHO_ARQUIVO_VIDA_S = 24 * 60 * 60;
+/** nginx do servidor aceita 50M de corpo; 45 MB deixa folga para o multipart. */
+export const TRECHO_ARQUIVO_MAX_MB = 45;
+/** Marca gravada em `cameras_comandos.erro` quando o pedido expira (o CHECK de estado só tem pendente/entregue/ok/erro). */
+export const ERRO_TRECHO_EXPIRADO = 'expirado';
+
+const objeto = (v: unknown): Record<string, unknown> =>
+  (v && typeof v === 'object' && !Array.isArray(v) ? v : {}) as Record<string, unknown>;
+
+export function normalizarGravacaoConfig(v: unknown): GravacaoConfig {
+  const o = objeto(v);
+  const dias = typeof o.dias === 'number' && Number.isFinite(o.dias) ? Math.round(o.dias) : GRAVACAO_CONFIG_PADRAO.dias;
+  return {
+    ativa: typeof o.ativa === 'boolean' ? o.ativa : GRAVACAO_CONFIG_PADRAO.ativa,
+    dias: Math.min(GRAVACAO_DIAS_MAX, Math.max(GRAVACAO_DIAS_MIN, dias)),
+    stream: (STREAMS_GRAVACAO as readonly unknown[]).includes(o.stream) ? (o.stream as StreamGravacao) : GRAVACAO_CONFIG_PADRAO.stream,
+  };
+}
+
+/** Status vindo do heartbeat; data inválida vira null, número negativo/NaN vira null. */
+export function normalizarGravacaoStatus(v: unknown, em?: Date | string | null): GravacaoStatus {
+  const o = objeto(v);
+  const data = (x: unknown) => {
+    if (typeof x !== 'string' && !(x instanceof Date)) return null;
+    const d = new Date(x);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  };
+  const gb = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) && x >= 0 ? Math.round(x * 10) / 10 : null);
+  return {
+    ativa: o.ativa === true,
+    de: data(o.de),
+    ate: data(o.ate),
+    uso_gb: gb(o.uso_gb),
+    livre_gb: gb(o.livre_gb),
+    em: data(em !== undefined ? em : o.em),
+  };
+}
+
+/** Lê a coluna inteira (`{ config, status }`). */
+export function lerGravacao(v: unknown): { config: GravacaoConfig; status: GravacaoStatus | null } {
+  const o = objeto(v);
+  return {
+    config: normalizarGravacaoConfig(o.config),
+    status: o.status && typeof o.status === 'object' ? normalizarGravacaoStatus(o.status) : null,
+  };
+}
+
+/**
+ * Objeto `gravacao` das listas/detalhe: status do último heartbeat (ativa, de, ate, uso_gb,
+ * livre_gb, em) + `config` (o que foi pedido ao agente).
+ */
+export function apresentarGravacao(v: unknown) {
+  const { config, status } = lerGravacao(v);
+  const s = status ?? { ativa: false, de: null, ate: null, uso_gb: null, livre_gb: null, em: null };
+  return { ...s, config };
+}
+
+export type EstadoTrecho = 'pendente' | 'pronto' | 'erro' | 'expirado';
+
+/**
+ * Estado do pedido de trecho visto pelo usuário. Pendente (não entregue ou entregue sem resposta)
+ * expira TRECHO_EXPIRA_S depois do último passo (criação ou entrega ao agente).
+ * `ok` sem arquivo (já apagado pela limpeza de 24 h) também é expirado.
+ */
+export function estadoTrecho(
+  c: { estado: string; erro: string | null; created_at: Date; entregue_em: Date | null },
+  arquivoExiste: boolean,
+  agora = new Date(),
+): EstadoTrecho {
+  if (c.estado === 'ok') return arquivoExiste ? 'pronto' : 'expirado';
+  if (c.estado === 'erro') return c.erro === ERRO_TRECHO_EXPIRADO ? 'expirado' : 'erro';
+  return trechoVencido(c, agora) ? 'expirado' : 'pendente';
+}
+
+export function trechoVencido(c: { created_at: Date; entregue_em: Date | null }, agora = new Date()): boolean {
+  const base = (c.entregue_em ?? c.created_at).getTime();
+  return agora.getTime() - base > TRECHO_EXPIRA_S * 1000;
+}

@@ -50,6 +50,32 @@ export class HeartbeatDescobertaDto {
   inicializada?: boolean;
 }
 
+/** NEXON-108: estado da gravação contínua no disco do aparelho. */
+export class HeartbeatGravacaoDto {
+  @IsBoolean()
+  ativa!: boolean;
+
+  /** Gravação mais antiga ainda no disco. */
+  @IsOptional()
+  @IsISO8601()
+  de?: string;
+
+  /** Gravação mais recente. */
+  @IsOptional()
+  @IsISO8601()
+  ate?: string;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  uso_gb?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  livre_gb?: number;
+}
+
 export class HeartbeatCameraDto {
   @IsString()
   @IsNotEmpty()
@@ -70,6 +96,12 @@ export class HeartbeatCameraDto {
   @IsString()
   @MaxLength(500)
   erro?: string;
+
+  /** NEXON-108: ausente = não mexe no último estado gravado. */
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => HeartbeatGravacaoDto)
+  gravacao?: HeartbeatGravacaoDto;
 }
 
 export class HeartbeatDto {

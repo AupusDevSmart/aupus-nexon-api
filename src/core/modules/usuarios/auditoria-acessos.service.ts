@@ -46,6 +46,8 @@ export type AcaoAuditoria =
   | 'camera_agente_pareado'
   | 'camera_pareamento_falha'
   | 'camera_evento_lido'
+  // NEXON-108: pedido de trecho do histórico gravado no aparelho
+  | 'camera_trecho_pedido'
   // NEXON-103 (calibração do ângulo do pivô): gravada na TON e restaurada
   | 'pivo_calibracao'
   | 'pivo_calibracao_restaurada';

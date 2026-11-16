@@ -25,7 +25,10 @@ import {
   inicioDaNoite,
   modoVigente,
   analiseNovaCamera,
+  apresentarGravacao,
+  lerGravacao,
   normalizarAnalise,
+  normalizarGravacaoConfig,
   STREAM_PEDIDO_S,
 } from './cameras-regras';
 import { CamerasStorageService } from './cameras-storage.service';
@@ -127,6 +130,8 @@ export class CamerasService {
         bitrate_kbps: c.stream_bitrate_kbps,
       },
       analise: normalizarAnalise(c.analise),
+      /** NEXON-108: histórico no aparelho (último heartbeat + config). */
+      gravacao: apresentarGravacao(c.gravacao),
       created_at: c.created_at,
       updated_at: c.updated_at,
     };
@@ -167,6 +172,7 @@ export class CamerasService {
         stream_transcodificar: dto.stream?.transcodificar ?? false,
         stream_bitrate_kbps: dto.stream?.bitrate_kbps ?? 800,
         analise: analiseNovaCamera(dto.analise) as unknown as Prisma.InputJsonValue,
+        gravacao: { config: normalizarGravacaoConfig(dto.gravacao) } as unknown as Prisma.InputJsonValue,
       },
     });
     await this.auditoria.registrar('camera_cadastro', {
@@ -225,6 +231,14 @@ export class CamerasService {
     if (dto.stream?.bitrate_kbps !== undefined) dados.stream_bitrate_kbps = dto.stream.bitrate_kbps;
     if (dto.analise !== undefined) {
       dados.analise = normalizarAnalise({ ...normalizarAnalise(atual.analise), ...dto.analise }) as unknown as Prisma.InputJsonValue;
+    }
+    if (dto.gravacao !== undefined) {
+      const g = lerGravacao(atual.gravacao);
+      const atualBruto = (atual.gravacao && typeof atual.gravacao === 'object' ? atual.gravacao : {}) as Record<string, unknown>;
+      dados.gravacao = {
+        ...atualBruto,
+        config: normalizarGravacaoConfig({ ...g.config, ...dto.gravacao }),
+      } as unknown as Prisma.InputJsonValue;
     }
     if (dto.ativa === false) dados.publicando = false;
 

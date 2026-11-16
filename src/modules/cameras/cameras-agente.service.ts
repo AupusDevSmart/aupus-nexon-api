@@ -1,5 +1,5 @@
 import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import type { cameras_agentes } from '@prisma/client';
+import { Prisma, type cameras_agentes } from '@prisma/client';
 import { PermissionScopeService, PrismaService } from '@/core';
 import { capacidades, MSG_SOMENTE_LEITURA, papelCanonico } from '@/core/modules/auth/papeis';
 import { novoId26, type ClienteInfo } from '@/core/common/cliente-info';
@@ -14,10 +14,14 @@ import {
   descobertasPendentes,
   ehJpeg,
   estaArmado,
+  lerGravacao,
   montarRtsp,
   normalizarAnalise,
   normalizarDescobertas,
+  normalizarGravacaoStatus,
   POLL_S,
+  TRECHO_ARQUIVO_MAX_MB,
+  TRECHO_DURACAO_MAX_S,
   streamAtivo,
   TIPOS_SISTEMA,
 } from './cameras-regras';
@@ -274,6 +278,12 @@ export class CamerasAgenteService {
           rtsp_secundario: montarRtsp(base, senha, 1),
           armado,
           analise: normalizarAnalise(c.analise),
+          /**
+           * NEXON-108: gravação contínua no disco do aparelho. Trechos pedidos chegam como comando
+           * `trecho` { inicio, duracao_s ≤ TRECHO_DURACAO_MAX_S } e voltam em
+           * POST /cameras/agente/comandos/:id/arquivo (MP4 ≤ TRECHO_ARQUIVO_MAX_MB, campo `arquivo`).
+           */
+          gravacao: { ...lerGravacao(c.gravacao).config, trecho_max_s: TRECHO_DURACAO_MAX_S, trecho_max_mb: TRECHO_ARQUIVO_MAX_MB },
           stream: {
             caminho: caminhoStream(c.id),
             continuo: c.stream_continuo,
@@ -307,9 +317,23 @@ export class CamerasAgenteService {
       if (hc.erro) this.logger.warn(`[cameras] agente ${agente.nome} · câmera ${c.nome}: ${hc.erro}`);
       if (hc.online) await this.eventos.marcarOnline(c, agora, { publicando: hc.publicando ?? false });
       else await this.eventos.marcarOffline(c, agora);
+      if (hc.gravacao) await this.gravarStatusGravacao(c, hc.gravacao, agora);
     }
     if (dto.descobertas !== undefined) await this.gravarDescobertas(agente, dto.descobertas, agora);
     return { ok: true, agora: agora.toISOString() };
+  }
+
+  /** NEXON-108: guarda o último estado da gravação no aparelho em cameras.gravacao.status (não mexe na config). */
+  private async gravarStatusGravacao(c: { id: string; nome: string; gravacao?: unknown }, g: unknown, agora: Date) {
+    const atual = (c.gravacao && typeof c.gravacao === 'object' && !Array.isArray(c.gravacao) ? c.gravacao : {}) as Record<string, unknown>;
+    try {
+      await this.prisma.cameras.update({
+        where: { id: c.id },
+        data: { gravacao: { ...atual, status: normalizarGravacaoStatus(g, agora) } as unknown as Prisma.InputJsonValue },
+      });
+    } catch (e) {
+      this.logger.warn(`[cameras] câmera ${c.nome}: estado da gravação não gravado: ${(e as Error).message}`);
+    }
   }
 
   /** Upsert por (agente, ip) do que veio no heartbeat; apaga o que não é visto há mais de 1 dia. */

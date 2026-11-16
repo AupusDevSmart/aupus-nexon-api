@@ -15,6 +15,8 @@ import { ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { memoryStorage } from 'multer';
 import { Public } from '@/core';
 import { CamerasAgenteService } from './cameras-agente.service';
+import { TRECHO_ARQUIVO_MAX_MB } from './cameras-regras';
+import { CamerasTrechosService } from './cameras-trechos.service';
 import type { AgenteInfo } from './cameras.tipos';
 import { ClassificacaoEventoDto, EventoAgenteDto, FimEventoDto, HeartbeatDto, MiniaturaDto, ResultadoComandoDto } from './dto/cameras-agente.dto';
 import { Agente, CameraAgenteGuard } from './guards/camera-agente.guard';
@@ -34,7 +36,10 @@ const upload = (campo: string, maxMb: number) =>
 @UseGuards(CameraAgenteGuard)
 @Controller('cameras/agente')
 export class CamerasAgenteController {
-  constructor(private readonly agentes: CamerasAgenteService) {}
+  constructor(
+    private readonly agentes: CamerasAgenteService,
+    private readonly trechos: CamerasTrechosService,
+  ) {}
 
   @Get('config')
   @ApiOperation({ summary: 'Configuração completa do agente: câmeras com RTSP, armado, análise e stream' })
@@ -103,6 +108,19 @@ export class CamerasAgenteController {
   @ApiOperation({ summary: 'Comandos pendentes (ficam marcados como entregues)' })
   comandos(@Agente() agente: AgenteInfo) {
     return this.agentes.comandos(agente);
+  }
+
+  @Post('comandos/:id/arquivo')
+  @HttpCode(HttpStatus.OK)
+  @ApiConsumes('multipart/form-data')
+  @ApiOperation({
+    summary:
+      `NEXON-108: MP4 do comando \`trecho\` no campo \`arquivo\` (≤ ${TRECHO_ARQUIVO_MAX_MB} MB — nginx aceita 50M; ` +
+      'até 300 s no sub-stream). Falha: POST comandos/:id/resultado { ok: false, erro }.',
+  })
+  @UseInterceptors(upload('arquivo', TRECHO_ARQUIVO_MAX_MB))
+  arquivo(@Agente() agente: AgenteInfo, @Param('id') id: string, @UploadedFile() file?: Express.Multer.File) {
+    return this.trechos.receber(agente, id, file);
   }
 
   @Post('comandos/:id/resultado')
