@@ -52,6 +52,10 @@ export type AcaoAuditoria =
   | 'camera_download'
   // NEXON-108: o agente achou a câmera (mesmo MAC) em outro IP e a API atualizou o cadastro
   | 'camera_ip_atualizado'
+  // NEXON-108: admin viu a senha da câmera (gerada pelo cadastro automático ou digitada)
+  | 'camera_senha_vista'
+  // NEXON-108: atualizar / reiniciar / ler registros do aparelho pela web
+  | 'camera_agente_comando'
   // NEXON-108: pedido de trecho do histórico gravado no aparelho
   | 'camera_trecho_pedido'
   // NEXON-103 (calibração do ângulo do pivô): gravada na TON e restaurada

@@ -7,15 +7,19 @@ import {
   Param,
   Post,
   Query,
+  Req,
+  Res,
   UploadedFile,
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
+import type { Request, Response } from 'express';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { memoryStorage } from 'multer';
 import { Public } from '@/core';
 import { CamerasAgenteService } from './cameras-agente.service';
+import { CamerasAparelhoService } from './cameras-aparelho.service';
 import { CamerasDespertarService } from './cameras-despertar.service';
 import { TRECHO_ARQUIVO_MAX_MB } from './cameras-regras';
 import { CamerasTrechosService } from './cameras-trechos.service';
@@ -42,7 +46,20 @@ export class CamerasAgenteController {
     private readonly agentes: CamerasAgenteService,
     private readonly trechos: CamerasTrechosService,
     private readonly despertar: CamerasDespertarService,
+    private readonly aparelho: CamerasAparelhoService,
   ) {}
+
+  @Get('atualizacao')
+  @ApiOperation({ summary: 'Versão publicada do programa do aparelho: { versao, sha256, tamanho }' })
+  atualizacao(@Agente() agente: AgenteInfo) {
+    return this.aparelho.infoAgente(agente);
+  }
+
+  @Get('atualizacao/arquivo')
+  @ApiOperation({ summary: 'Pacote (tar.gz) da versão publicada; o aparelho confere o sha256' })
+  atualizacaoArquivo(@Agente() agente: AgenteInfo, @Req() req: Request, @Res() res: Response) {
+    return this.aparelho.arquivoAgente(agente, req, res);
+  }
 
   @Get('config')
   @ApiOperation({

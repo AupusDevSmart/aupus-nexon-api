@@ -226,4 +226,9 @@ export class ResultadoComandoDto {
   @IsOptional()
   @IsString()
   evento_id?: string;
+
+  /** Resposta do aparelho (ex.: { versao, linhas } no comando logs). */
+  @IsOptional()
+  @IsObject()
+  dados?: Record<string, unknown>;
 }

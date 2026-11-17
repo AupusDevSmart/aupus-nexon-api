@@ -157,7 +157,7 @@ export class CamerasTrechosService {
     if (cmd.estado !== 'ok') throw new NotFoundException('Trecho ainda não disponível');
     let nome: string | null = null;
     if (baixar) {
-      const c = await this.buscarCamera(cmd.camera_id);
+      const c = await this.buscarCamera(cmd.camera_id ?? '');
       const p = (cmd.parametros ?? {}) as { inicio?: string; duracao_s?: number };
       const inicio = p.inicio ? new Date(p.inicio) : cmd.created_at;
       nome = nomeDownload(c.nome, inicio, `historico-${p.duracao_s ?? ''}s`, 'mp4');
@@ -235,7 +235,7 @@ export class CamerasTrechosService {
   private async buscarComando(id: string, user?: Usuario): Promise<cameras_comandos> {
     const cmd = await this.prisma.cameras_comandos.findFirst({ where: { id: (id ?? '').trim(), tipo: TIPO } });
     if (!cmd) throw new NotFoundException('Pedido de trecho não encontrado');
-    await this.buscarCamera(cmd.camera_id, user);
+    await this.buscarCamera(cmd.camera_id ?? '', user);
     return cmd;
   }
 }

@@ -29,6 +29,7 @@ export class CamerasConfigService {
       sirene_ponto_id: null,
       abrir_chamado: false,
       notificar_emails: [],
+      auto_cadastrar: true,
       updated_at: new Date(),
       updated_por_id: null,
     };
@@ -63,6 +64,7 @@ export class CamerasConfigService {
           : null,
       abrir_chamado: c.abrir_chamado,
       notificar_emails: c.notificar_emails,
+      auto_cadastrar: c.auto_cadastrar,
       updated_at: c.updated_at,
     };
   }
@@ -120,6 +122,7 @@ export class CamerasConfigService {
       sirene_ponto_id: sirene.ponto,
       abrir_chamado: dto.abrir_chamado ?? atual.abrir_chamado,
       notificar_emails: emails,
+      auto_cadastrar: dto.auto_cadastrar ?? atual.auto_cadastrar,
       updated_por_id: userId,
     };
     return this.prisma.cameras_unidade_config.upsert({

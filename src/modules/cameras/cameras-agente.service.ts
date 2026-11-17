@@ -9,6 +9,9 @@ import { CamerasEventosService } from './cameras-eventos.service';
 import { CamerasMidiaService } from './cameras-midia.service';
 import {
   agenteOnline,
+  analiseNovaCamera,
+  gerarSenhaCamera,
+  normalizarGravacaoConfig,
   caminhoStream,
   DESCOBERTA_VALIDADE_S,
   descobertasPendentes,
@@ -367,9 +370,78 @@ export class CamerasAgenteService {
       this.logger.warn(`[cameras] agente ${agente.nome}: descobertas não gravadas: ${(e as Error).message}`);
     }
     try {
+      await this.autoCadastrar(agente, itens);
+    } catch (e) {
+      this.logger.warn(`[cameras] agente ${agente.nome}: cadastro automático falhou: ${(e as Error).message}`);
+    }
+    try {
       await this.seguirMac(agente, itens);
     } catch (e) {
       this.logger.warn(`[cameras] agente ${agente.nome}: IP das câmeras não conferido: ${(e as Error).message}`);
+    }
+  }
+
+  /**
+   * Câmera Intelbras/Dahua de fábrica (sem senha) achada pelo aparelho entra sozinha no NexON: nome "Câmera N",
+   * usuário admin e senha forte gerada (cifrada). O aparelho vê a câmera na config e grava essa senha nela
+   * (DevInit). Desliga por usina em cameras_unidade_config.auto_cadastrar. Audit camera_cadastro (automático).
+   */
+  private async autoCadastrar(
+    agente: AgenteInfo,
+    itens: { ip: string; mac: string | null; fabricante: string | null; modelo: string | null; serial: string | null; porta_http: number | null; inicializada: boolean | null }[],
+  ) {
+    const novas = itens.filter(
+      (d) => d.inicializada === false && d.mac && (!d.fabricante || ['intelbras', 'dahua'].includes(d.fabricante.toLowerCase())),
+    );
+    if (novas.length === 0 || !agente.unidade_id || !agente.planta_id) return;
+    const cfg = await this.config.obter(agente.unidade_id, agente.planta_id);
+    if (cfg.auto_cadastrar === false) return;
+    const macs = novas.map((d) => d.mac!.toLowerCase());
+    const existentes = await this.prisma.cameras.findMany({
+      where: { deleted_at: null, OR: [{ agente_id: agente.id, ip: { in: novas.map((d) => d.ip) } }, { mac: { in: macs } }] },
+      select: { ip: true, mac: true },
+    });
+    const ja = new Set(existentes.flatMap((c) => [c.ip, (c.mac ?? '').toLowerCase()]));
+    let total = await this.prisma.cameras.count({ where: { unidade_id: agente.unidade_id, deleted_at: null } });
+    const ctx = await this.auditoria.contextoUnidade(agente.unidade_id);
+    for (const d of novas) {
+      const mac = d.mac!.toLowerCase();
+      if (ja.has(d.ip) || ja.has(mac)) continue;
+      total += 1;
+      const c = await this.prisma.cameras.create({
+        data: {
+          id: novoId26(),
+          unidade_id: agente.unidade_id,
+          planta_id: agente.planta_id,
+          agente_id: agente.id,
+          nome: `Câmera ${total}`,
+          fabricante: (d.fabricante ?? 'intelbras').toLowerCase(),
+          modelo: d.modelo,
+          ip: d.ip,
+          mac,
+          porta_rtsp: 554,
+          porta_http: d.porta_http ?? 80,
+          usuario: 'admin',
+          senha: this.midia.cifrar(gerarSenhaCamera()),
+          canal: 1,
+          ordem: total,
+          analise: analiseNovaCamera({}) as unknown as Prisma.InputJsonValue,
+          gravacao: { config: normalizarGravacaoConfig(undefined) } as unknown as Prisma.InputJsonValue,
+        },
+      });
+      ja.add(d.ip);
+      ja.add(mac);
+      this.logger.log(`[cameras] agente ${agente.nome}: câmera de fábrica ${d.ip} (${mac}) cadastrada sozinha como "${c.nome}"`);
+      await this.auditoria.registrar('camera_cadastro', {
+        mensagem: `Câmera "${c.nome}" (${c.ip}) cadastrada sozinha pelo aparelho ${agente.nome} (nova de fábrica; senha criada pelo aparelho) — ${ctx.unidade?.nome ?? agente.unidade_id}${ctx.planta ? ` (${ctx.planta.nome})` : ''}`,
+        user: null,
+        unidade: ctx.unidade,
+        planta: ctx.planta,
+        camera: { id: c.id, nome: c.nome, ip: c.ip, unidade_id: c.unidade_id },
+        objetoTipo: 'camera',
+        objetoId: c.id,
+        extra: { automatico: true, mac, serial: d.serial, modelo: d.modelo, agente: { id: agente.id, nome: agente.nome } },
+      });
     }
   }
 
@@ -485,6 +557,7 @@ export class CamerasAgenteService {
         estado: dto.ok ? 'ok' : 'erro',
         erro: dto.ok ? null : (dto.erro?.trim() || 'erro no agente').slice(0, 500),
         evento_id: dto.evento_id?.trim() || null,
+        ...(dto.dados ? { resultado: dto.dados as Prisma.InputJsonValue } : {}),
         concluido_em: new Date(),
       },
     });
