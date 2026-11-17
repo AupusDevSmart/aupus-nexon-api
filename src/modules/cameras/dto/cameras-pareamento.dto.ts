@@ -21,6 +21,12 @@ export class PedirPareamentoDto {
   @IsString()
   @MaxLength(64)
   ip_local?: string;
+
+  /** Chave do instalador (vín.…): o aparelho entra sozinho na usina dela. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(600)
+  vinculo?: string;
 }
 
 /** POST /cameras/pareamento/:id/estado — o aparelho prova que é dono do pedido. */

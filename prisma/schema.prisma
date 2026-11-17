@@ -3767,6 +3767,8 @@ model cameras_pareamentos {
   entregue_em   DateTime?        @db.Timestamp(0)
   agente        cameras_agentes? @relation(fields: [agente_id], references: [id], onDelete: SetNull)
 
+  /// NEXON-108: chave do instalador já usada (vínculo automático, uso único)
+  vinculo_nonce String?   @unique @db.VarChar(32)
   @@index([codigo, expira_em])
   @@index([ip_publico, expira_em])
 }

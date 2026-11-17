@@ -121,7 +121,76 @@ export class CamerasPareamentoService {
         expira_em: expiraEm,
       },
     });
+    if (dto.vinculo) await this.vincularPeloInstalador(p, dto.vinculo, cliente, agora);
     return { pedido_id: p.id, segredo, codigo, expira_em: p.expira_em };
+  }
+
+  /**
+   * Raspberry instalado pelo computador traz a chave da usina (gravada no SD pelo instalador): vincula na hora,
+   * sem ninguém digitar código. Chave inválida, vencida ou já usada: segue o pareamento normal (por código) e
+   * registra a recusa na auditoria. Nunca derruba o pedido.
+   */
+  private async vincularPeloInstalador(
+    p: { id: string; codigo: string; host: string; mac: string | null; versao: string | null; ip_publico: string; ip_local: string | null },
+    chave: string,
+    cliente: ClienteInfo | undefined,
+    agora: Date,
+  ) {
+    const v = this.midia.lerVinculo(chave, agora);
+    const ctx = v ? await this.auditoria.contextoUnidade(v.un) : { unidade: null, planta: null };
+    const recusar = async (motivo: string) => {
+      await this.auditoria.registrar('camera_pareamento_falha', {
+        mensagem: `Vínculo automático do instalador recusado (${motivo}) para o aparelho "${p.host}" de IP ${p.ip_publico}${ctx.unidade ? ` — ${ctx.unidade.nome}` : ''}`,
+        cliente,
+        unidade: ctx.unidade,
+        planta: ctx.planta,
+        objetoTipo: 'camera_pareamento',
+        objetoId: p.id,
+        resultado: 'negado',
+        extra: { acao: 'vincular', via: 'instalador', motivo, host: p.host, mac: p.mac },
+      });
+    };
+    if (!v) return recusar('chave inválida ou vencida');
+    if (!ctx.unidade || !ctx.planta) return recusar('usina não encontrada');
+    try {
+      const reservado = await this.prisma.cameras_pareamentos.updateMany({
+        where: { id: p.id, agente_id: null, vinculado_em: null },
+        data: { vinculado_em: agora, vinculo_nonce: v.n },
+      });
+      if (reservado.count !== 1) return recusar('pedido já vinculado');
+    } catch {
+      return recusar('chave já usada');
+    }
+    let criado: Awaited<ReturnType<CamerasAgenteService['inserirAgente']>>;
+    try {
+      criado = await this.agentes.inserirAgente(v.un, ctx.planta.id, p.host, { host: p.host, versao: p.versao });
+      await this.prisma.cameras_pareamentos.update({
+        where: { id: p.id },
+        data: { agente_id: criado.agente.id, token_cifrado: this.midia.cifrar(criado.token) },
+      });
+    } catch (e) {
+      await this.prisma.cameras_pareamentos
+        .updateMany({ where: { id: p.id, agente_id: null }, data: { vinculado_em: null, vinculo_nonce: null } })
+        .catch(() => undefined);
+      this.logger.warn(`[cameras] vínculo do instalador falhou: ${(e as Error).message}`);
+      return;
+    }
+    const a = criado.agente;
+    await this.auditoria.registrar('camera_agente_pareado', {
+      mensagem: `Aparelho "${p.host}"${p.mac ? ` (MAC ${p.mac})` : ''} vinculado sozinho pelo instalador de IP ${p.ip_publico}${p.ip_local ? ` / ${p.ip_local}` : ''} como agente de câmeras "${a.nome}" — ${ctx.unidade.nome} (${ctx.planta.nome})`,
+      cliente,
+      unidade: ctx.unidade,
+      planta: ctx.planta,
+      objetoTipo: 'camera_agente',
+      objetoId: a.id,
+      extra: {
+        agente: { id: a.id, nome: a.nome },
+        acao: 'pareado',
+        via: 'instalador',
+        instalador: { pedido_por_id: v.by, nonce: v.n },
+        pareamento: { id: p.id, codigo: p.codigo, host: p.host, mac: p.mac, versao: p.versao, ip_publico: p.ip_publico, ip_local: p.ip_local },
+      },
+    });
   }
 
   /** POST /cameras/pareamento/:id/estado — token só na primeira consulta depois de vinculado. */
