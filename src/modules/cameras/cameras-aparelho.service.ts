@@ -28,7 +28,7 @@ export interface ManifestoAgente {
 export function semSegredos<T>(v: T): T {
   if (typeof v === 'string') {
     return v
-      .replace(/([a-z][a-z0-9+.-]*:\/\/[^:/\s]*:)[^\s/]*@/gi, '$1***@')
+      .replace(/([a-z][a-z0-9+.-]*:\/\/[^:/\s@]*:)\S*@(?=[^\s@]*(?:[\s/]|$))/gi, '$1***@')
       .replace(/([?&](?:token|access_token|api_key|key|secret|auth|senha|password|pwd)=)[^&\s"']+/gi, '$1***')
       .replace(/(authorization:\s*(?:bearer|basic)\s+)\S+/gi, '$1***') as T;
   }
