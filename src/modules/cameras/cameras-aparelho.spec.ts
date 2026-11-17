@@ -50,3 +50,12 @@ describe('aparelho pela web', () => {
     expect(await montar().svc.disponivel()).toEqual({ versao: null });
   });
 });
+
+describe('registros sem segredos', () => {
+  it('mascara senha de URL e token', () => {
+    const { semSegredos } = jest.requireActual('./cameras-aparelho.service');
+    expect(semSegredos({ linhas: ['rtsp://admin:S3nh4@192.168.1.13:554/x', 'GET /hls?token=abc.def&x=1'] })).toEqual({
+      linhas: ['rtsp://admin:***@192.168.1.13:554/x', 'GET /hls?token=***&x=1'],
+    });
+  });
+});

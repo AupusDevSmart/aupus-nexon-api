@@ -37,6 +37,10 @@ import type { CriarAgenteDto, ListarAgentesDto } from './dto/cameras.dto';
  * Agentes locais (nexon-camera-agent): cadastro pelo admin (cadastroTecnico) e as rotas que o
  * próprio agente chama com o token (config, heartbeat, miniaturas, eventos, clipes, comandos).
  */
+/** Limites do cadastro automático de câmera de fábrica. */
+const AUTO_CADASTRO_POR_VEZ = 4;
+const AUTO_CADASTRO_MAX_UNIDADE = 64;
+
 @Injectable()
 export class CamerasAgenteService {
   private readonly logger = new Logger(CamerasAgenteService.name);
@@ -390,9 +394,11 @@ export class CamerasAgenteService {
     agente: AgenteInfo,
     itens: { ip: string; mac: string | null; fabricante: string | null; modelo: string | null; serial: string | null; porta_http: number | null; inicializada: boolean | null }[],
   ) {
-    const novas = itens.filter(
-      (d) => d.inicializada === false && d.mac && (!d.fabricante || ['intelbras', 'dahua'].includes(d.fabricante.toLowerCase())),
-    );
+    // Só Intelbras/Dahua declarada pela descoberta, com MAC; no máximo AUTO_CADASTRO_POR_VEZ por heartbeat e
+    // AUTO_CADASTRO_MAX_UNIDADE câmeras na usina (aparelho com problema não enche o cadastro).
+    const novas = itens
+      .filter((d) => d.inicializada === false && d.mac && !!d.fabricante && ['intelbras', 'dahua'].includes(d.fabricante.toLowerCase()))
+      .slice(0, AUTO_CADASTRO_POR_VEZ);
     if (novas.length === 0 || !agente.unidade_id || !agente.planta_id) return;
     const cfg = await this.config.obter(agente.unidade_id, agente.planta_id);
     if (cfg.auto_cadastrar === false) return;
@@ -403,10 +409,11 @@ export class CamerasAgenteService {
     });
     const ja = new Set(existentes.flatMap((c) => [c.ip, (c.mac ?? '').toLowerCase()]));
     let total = await this.prisma.cameras.count({ where: { unidade_id: agente.unidade_id, deleted_at: null } });
+    if (total >= AUTO_CADASTRO_MAX_UNIDADE) return;
     const ctx = await this.auditoria.contextoUnidade(agente.unidade_id);
     for (const d of novas) {
       const mac = d.mac!.toLowerCase();
-      if (ja.has(d.ip) || ja.has(mac)) continue;
+      if (ja.has(d.ip) || ja.has(mac) || total >= AUTO_CADASTRO_MAX_UNIDADE) continue;
       total += 1;
       const c = await this.prisma.cameras.create({
         data: {
