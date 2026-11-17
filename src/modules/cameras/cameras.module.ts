@@ -9,6 +9,7 @@ import { CamerasConfigService } from './cameras-config.service';
 import { CamerasEventosService } from './cameras-eventos.service';
 import { CamerasMidiaController } from './cameras-midia.controller';
 import { CamerasAparelhoService } from './cameras-aparelho.service';
+import { CamerasInstaladorService } from './cameras-instalador.service';
 import { CamerasDespertarService } from './cameras-despertar.service';
 import { CamerasMidiaService } from './cameras-midia.service';
 import { CamerasNotificacaoService } from './cameras-notificacao.service';
@@ -39,6 +40,7 @@ import { UsuarioOuTokenMidiaGuard } from './guards/usuario-ou-token-midia.guard'
     CamerasMidiaService,
     CamerasDespertarService,
     CamerasAparelhoService,
+    CamerasInstaladorService,
     CamerasNotificacaoService,
     CamerasStorageService,
     CamerasConfigService,

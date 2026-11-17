@@ -56,6 +56,8 @@ export type AcaoAuditoria =
   | 'camera_senha_vista'
   // NEXON-108: atualizar / reiniciar / ler registros do aparelho pela web
   | 'camera_agente_comando'
+  // NEXON-108: instalador do Raspberry novo (imagem + script do PC) pedido
+  | 'camera_instalador'
   // NEXON-108: pedido de trecho do histórico gravado no aparelho
   | 'camera_trecho_pedido'
   // NEXON-103 (calibração do ângulo do pivô): gravada na TON e restaurada

@@ -21,6 +21,7 @@ import { Cliente, type ClienteInfo } from '@/core/common/cliente-info';
 import { CamerasAgenteService } from './cameras-agente.service';
 import { CamerasEventosService } from './cameras-eventos.service';
 import { CamerasAparelhoService } from './cameras-aparelho.service';
+import { CamerasInstaladorService } from './cameras-instalador.service';
 import { CamerasTrechosService } from './cameras-trechos.service';
 import { CamerasService } from './cameras.service';
 import type { Usuario } from './cameras.tipos';
@@ -57,6 +58,7 @@ export class CamerasController {
     private readonly agentes: CamerasAgenteService,
     private readonly trechos: CamerasTrechosService,
     private readonly aparelho: CamerasAparelhoService,
+    private readonly instaladorSvc: CamerasInstaladorService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -158,6 +160,28 @@ export class CamerasController {
   // ---------------------------------------------------------------------------
   // Agentes (cadastroTecnico)
   // ---------------------------------------------------------------------------
+
+  @Get('instalador')
+  @ApiOperation({ summary: 'Instalador do Raspberry novo: versão, link da imagem e comando do Terminal (token 2 h). Audit camera_instalador' })
+  instalador(@CurrentUser() user: Usuario, @Req() req: Request, @Cliente() cliente?: ClienteInfo) {
+    return this.instaladorSvc.info(user, req, cliente);
+  }
+
+  @Public()
+  @UseGuards(UsuarioOuTokenMidiaGuard)
+  @Get('instalador/imagem')
+  @ApiOperation({ summary: 'Imagem do NexON para Raspberry (.img.gz; JWT ou ?token=)' })
+  instaladorImagem(@CurrentUser() user: Usuario, @Req() req: Request, @Res() res: Response) {
+    return this.instaladorSvc.imagem(user, req, res);
+  }
+
+  @Public()
+  @UseGuards(UsuarioOuTokenMidiaGuard)
+  @Get('instalador/script')
+  @ApiOperation({ summary: 'Script do PC que grava o SD do Raspberry pelo cabo USB-C (JWT ou ?token=)' })
+  instaladorScript(@CurrentUser() user: Usuario, @Req() req: Request, @Res() res: Response) {
+    return this.instaladorSvc.script(user, req, res);
+  }
 
   @Get('atualizacao')
   @ApiOperation({ summary: 'Versão do programa do aparelho publicada (para atualizar pela web)' })
