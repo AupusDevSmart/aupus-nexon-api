@@ -201,6 +201,12 @@ export class CamerasController {
     return this.aparelho.estado(id, comandoId, user);
   }
 
+  @Get('agentes/todos')
+  @ApiOperation({ summary: 'Todos os aparelhos de todas as usinas (só administrador): versão, contato, câmeras' })
+  listarTodosAgentes(@CurrentUser() user?: Usuario) {
+    return this.agentes.listarTodos(user);
+  }
+
   @Get('agentes')
   listarAgentes(@Query() q: ListarAgentesDto, @CurrentUser() user?: Usuario) {
     return this.agentes.listar(q, user);

@@ -102,6 +102,37 @@ export class CamerasAgenteService {
     return agentes.map((a) => this.apresentar(a, a._count.cameras, agora, pendentes.get(a.id) ?? 0));
   }
 
+  /**
+   * GET /cameras/agentes/todos — todos os aparelhos de todas as usinas (NEXON-108), só administrador:
+   * registro e controle das instalações (versão, contato, câmeras), para atualizar e reiniciar pela web.
+   */
+  async listarTodos(user?: Usuario) {
+    if (user && papelCanonico(user.role) !== 'admin') throw new ForbiddenException('Só o administrador vê todos os aparelhos');
+    const agentes = await this.prisma.cameras_agentes.findMany({
+      where: { deleted_at: null },
+      orderBy: { created_at: 'asc' },
+      include: { _count: { select: { cameras: { where: { deleted_at: null } } } } },
+    });
+    const ids = [...new Set(agentes.map((a) => a.unidade_id.trim()))];
+    const unidades = ids.length
+      ? await this.prisma.unidades.findMany({
+          where: { id: { in: ids } },
+          select: { id: true, nome: true, deleted_at: true, planta: { select: { id: true, nome: true } } },
+        })
+      : [];
+    const porId = new Map(unidades.map((u) => [u.id.trim(), u]));
+    const agora = new Date();
+    return agentes.map((a) => {
+      const u = porId.get(a.unidade_id.trim());
+      return {
+        ...this.apresentar(a, a._count.cameras, agora),
+        unidade_nome: u?.nome ?? null,
+        unidade_excluida: !!u?.deleted_at,
+        planta_nome: u?.planta?.nome ?? null,
+      };
+    });
+  }
+
   /** Descobertas recentes ainda sem câmera cadastrada na unidade, por agente. */
   private async contarPendentes(unidadeId: string, agenteIds: string[], agora: Date) {
     const porAgente = new Map<string, number>();
