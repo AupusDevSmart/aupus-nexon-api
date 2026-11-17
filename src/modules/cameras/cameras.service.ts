@@ -178,14 +178,18 @@ export class CamerasService {
         gravacao: { config: normalizarGravacaoConfig(dto.gravacao) } as unknown as Prisma.InputJsonValue,
       },
     });
+    // Câmera de fábrica (descoberta sem senha): o aparelho cria no admin a senha digitada aqui.
+    const deFabrica = c.agente_id
+      ? !!(await this.prisma.cameras_descobertas.findFirst({ where: { agente_id: c.agente_id, ip: c.ip, inicializada: false } }))
+      : false;
     await this.auditoria.registrar('camera_cadastro', {
-      mensagem: `Câmera "${c.nome}" (${c.ip}) cadastrada — ${ctx.unidade.nome} (${ctx.planta.nome})`,
+      mensagem: `Câmera "${c.nome}" (${c.ip}) cadastrada${deFabrica ? ' (de fábrica: o aparelho cria a senha do admin)' : ''} — ${ctx.unidade.nome} (${ctx.planta.nome})`,
       user,
       cliente,
       unidade: ctx.unidade,
       planta: ctx.planta,
       camera: { id: c.id, nome: c.nome, ip: c.ip, unidade_id: c.unidade_id },
-      extra: { camera_dados: this.semSenha(c) },
+      extra: { camera_dados: this.semSenha(c), senha_de_fabrica_criada_pelo_aparelho: deFabrica },
     });
     return this.apresentar(c);
   }
