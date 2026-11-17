@@ -54,9 +54,10 @@ export class CamerasMidiaService {
     return `${p}.${sig}`;
   }
 
-  /** Chave de vínculo do instalador: a usina onde o Raspberry entra sozinho (uso único, 7 dias). */
+  /** Chave de vínculo do instalador: a usina onde o Raspberry entra sozinho (uso único, 48 h). */
   gerarVinculo(unidadeId: string, userId: string | null, agora = new Date()): { chave: string; nonce: string; valido_ate: string } {
-    const e = agora.getTime() + 7 * 24 * 60 * 60 * 1000;
+    // 48 h: instala hoje e liga na usina até depois de amanhã; uso único (vinculo_nonce)
+    const e = agora.getTime() + 48 * 60 * 60 * 1000;
     const nonce = randomBytes(12).toString('hex');
     const chave = `vin.${this.assinar({ t: 'vinculo', un: unidadeId, by: userId, n: nonce, e })}`;
     return { chave, nonce, valido_ate: new Date(e).toISOString() };

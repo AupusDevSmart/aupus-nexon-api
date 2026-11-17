@@ -152,6 +152,22 @@ export class CamerasPareamentoService {
     };
     if (!v) return recusar('chave inválida ou vencida');
     if (!ctx.unidade || !ctx.planta) return recusar('usina não encontrada');
+    // Quem gerou a chave ainda pode cadastrar aparelho nesta usina? (usuário removido, desativado ou que perdeu
+    // o acesso depois de gerar não vincula nada)
+    const autor = v.by
+      ? await this.prisma.usuarios.findFirst({
+          where: { id: v.by, deleted_at: null, is_active: true },
+          select: { id: true, role: true, nome: true },
+        })
+      : null;
+    if (!autor) return recusar('quem gerou a chave não está mais ativo');
+    const usuarioAutor = { id: autor.id.trim(), role: autor.role, nome: autor.nome } as Usuario;
+    try {
+      this.agentes.exigirCadastroTecnico(usuarioAutor);
+      await this.scope.assertEntityInScope('unidade', v.un, usuarioAutor);
+    } catch {
+      return recusar('quem gerou a chave não tem mais acesso a esta usina');
+    }
     try {
       const reservado = await this.prisma.cameras_pareamentos.updateMany({
         where: { id: p.id, agente_id: null, vinculado_em: null },

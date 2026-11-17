@@ -60,8 +60,10 @@ export class CamerasInstaladorService {
     const m = await this.manifesto();
     const { token, valido_ate } = this.midia.gerarTokenMidia(user ?? {});
     const base = this.base(req);
-    let q = `token=${encodeURIComponent(token)}`;
-    // Com a usina: o Raspberry instalado por este comando entra sozinho nela (chave de uso único, 7 dias).
+    const qImagem = `token=${encodeURIComponent(token)}`;
+    let q = qImagem;
+    // Com a usina: o Raspberry instalado por este comando entra sozinho nela (chave de uso único, 48 h).
+    // A chave vai só no comando do Terminal (não no link da imagem).
     let vinculo: { valido_ate: string } | null = null;
     let ctx: Awaited<ReturnType<CamerasAuditoriaService['contextoUnidade']>> = { unidade: null, planta: null };
     if (unidadeId?.trim()) {
@@ -88,7 +90,7 @@ export class CamerasInstaladorService {
       tamanho: m.tamanho,
       publicado_em: m.publicado_em ?? null,
       valido_ate,
-      url_imagem: `${base}/imagem?${q}`,
+      url_imagem: `${base}/imagem?${qImagem}`,
       comando: `curl -fsSL '${base}/script?${q}' | bash`,
       vinculo_automatico: vinculo,
       usina: ctx.unidade?.nome ?? null,
