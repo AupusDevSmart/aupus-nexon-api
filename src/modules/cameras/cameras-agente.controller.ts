@@ -24,7 +24,7 @@ import { CamerasDespertarService } from './cameras-despertar.service';
 import { TRECHO_ARQUIVO_MAX_MB } from './cameras-regras';
 import { CamerasTrechosService } from './cameras-trechos.service';
 import type { AgenteInfo } from './cameras.tipos';
-import { ClassificacaoEventoDto, EventoAgenteDto, FimEventoDto, HeartbeatDto, MiniaturaDto, ResultadoComandoDto } from './dto/cameras-agente.dto';
+import { ClassificacaoEventoDto, EventoAgenteDto, SenhaConhecidaDto, FimEventoDto, HeartbeatDto, MiniaturaDto, ResultadoComandoDto } from './dto/cameras-agente.dto';
 import { Agente, CameraAgenteGuard } from './guards/camera-agente.guard';
 
 const MB = 1024 * 1024;
@@ -75,6 +75,13 @@ export class CamerasAgenteController {
     }
     const sinal = this.despertar.seq(agente.id);
     return { ...(await this.agentes.configDoAgente(agente)), seq: sinal };
+  }
+
+  @Post('descobertas/senha-conhecida')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Câmera da rede aceitou a senha de outra câmera da usina: cadastra sozinha (copia a senha cifrada)' })
+  senhaConhecida(@Agente() agente: AgenteInfo, @Body() dto: SenhaConhecidaDto) {
+    return this.agentes.senhaConhecida(agente, dto.ip, dto.camera_id);
   }
 
   @Post('heartbeat')

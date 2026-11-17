@@ -232,3 +232,15 @@ export class ResultadoComandoDto {
   @IsObject()
   dados?: Record<string, unknown>;
 }
+
+export class SenhaConhecidaDto {
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(64)
+  ip!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(26)
+  camera_id!: string;
+}

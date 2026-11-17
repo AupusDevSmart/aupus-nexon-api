@@ -390,6 +390,64 @@ export class CamerasAgenteService {
    * usuário admin e senha forte gerada (cifrada). O aparelho vê a câmera na config e grava essa senha nela
    * (DevInit). Desliga por usina em cameras_unidade_config.auto_cadastrar. Audit camera_cadastro (automático).
    */
+  /**
+   * POST /cameras/agente/descobertas/senha-conhecida { ip, camera_id }: o aparelho achou na rede uma câmera com
+   * senha que não está no NexON e conseguiu entrar nela com a senha de outra câmera da usina (`camera_id`).
+   * Cadastra sozinha copiando usuário e senha (cifrada) dessa câmera; a senha nunca trafega.
+   * Mesmas travas do cadastro automático (opção da usina, Intelbras/Dahua, 64 por usina, sem duplicar IP/MAC).
+   */
+  async senhaConhecida(agente: AgenteInfo, ip: string, cameraId: string) {
+    const ref = await this.cameraDoAgente(agente, cameraId);
+    const d = await this.prisma.cameras_descobertas.findFirst({ where: { agente_id: agente.id, ip: ip.trim() } });
+    if (!d || !d.mac || !d.fabricante || !['intelbras', 'dahua'].includes(d.fabricante.toLowerCase())) {
+      return { cadastrada: false, motivo: 'descoberta_invalida' };
+    }
+    const cfg = await this.config.obter(agente.unidade_id, agente.planta_id);
+    if (cfg.auto_cadastrar === false) return { cadastrada: false, motivo: 'auto_cadastro_desligado' };
+    const mac = d.mac.toLowerCase();
+    const existe = await this.prisma.cameras.findFirst({
+      where: { deleted_at: null, OR: [{ agente_id: agente.id, ip: d.ip }, { mac }] },
+      select: { id: true },
+    });
+    if (existe) return { cadastrada: false, motivo: 'ja_cadastrada' };
+    const total = await this.prisma.cameras.count({ where: { unidade_id: agente.unidade_id, deleted_at: null } });
+    if (total >= AUTO_CADASTRO_MAX_UNIDADE) return { cadastrada: false, motivo: 'limite' };
+    const c = await this.prisma.cameras.create({
+      data: {
+        id: novoId26(),
+        unidade_id: agente.unidade_id,
+        planta_id: agente.planta_id,
+        agente_id: agente.id,
+        nome: `Câmera ${total + 1}`,
+        fabricante: d.fabricante.toLowerCase(),
+        modelo: d.modelo,
+        ip: d.ip,
+        mac,
+        porta_rtsp: d.porta_rtsp ?? 554,
+        porta_http: d.porta_http ?? 80,
+        usuario: ref.usuario,
+        senha: ref.senha,
+        canal: 1,
+        ordem: total + 1,
+        analise: analiseNovaCamera({}) as unknown as Prisma.InputJsonValue,
+        gravacao: { config: normalizarGravacaoConfig(undefined) } as unknown as Prisma.InputJsonValue,
+      },
+    });
+    this.logger.log(`[cameras] agente ${agente.nome}: câmera ${d.ip} (${mac}) cadastrada sozinha com a senha de "${ref.nome}"`);
+    const ctx = await this.auditoria.contextoUnidade(agente.unidade_id);
+    await this.auditoria.registrar('camera_cadastro', {
+      mensagem: `Câmera "${c.nome}" (${c.ip}) cadastrada sozinha pelo aparelho ${agente.nome} (mesma senha da câmera "${ref.nome}") — ${ctx.unidade?.nome ?? agente.unidade_id}${ctx.planta ? ` (${ctx.planta.nome})` : ''}`,
+      user: null,
+      unidade: ctx.unidade,
+      planta: ctx.planta,
+      camera: { id: c.id, nome: c.nome, ip: c.ip, unidade_id: c.unidade_id },
+      objetoTipo: 'camera',
+      objetoId: c.id,
+      extra: { automatico: true, origem: 'senha_conhecida', senha_de: { id: ref.id, nome: ref.nome }, mac, serial: d.serial, modelo: d.modelo },
+    });
+    return { cadastrada: true, camera_id: c.id };
+  }
+
   private async autoCadastrar(
     agente: AgenteInfo,
     itens: { ip: string; mac: string | null; fabricante: string | null; modelo: string | null; serial: string | null; porta_http: number | null; inicializada: boolean | null }[],
