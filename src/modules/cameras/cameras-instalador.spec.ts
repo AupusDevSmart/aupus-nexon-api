@@ -1,4 +1,4 @@
-import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -67,6 +67,15 @@ describe('instalador do Raspberry', () => {
     expect(texto).toContain("$E = 'https://api.exemplo/api/v1/cameras/instalador/script?token=tk.1&vinculo=vin.abc.def&so=windows'");
     expect(texto).toContain(sha);
     expect(texto).not.toContain('__NEXON_');
+  });
+
+  it('recusa token ou host que poderiam virar código dentro do script', async () => {
+    const m = montar();
+    const res: any = { setHeader: jest.fn(), send: jest.fn() };
+    await expect(m.svc.script(admin, { ...req, query: { token: "a.b'; Remove-Item C:\\ #", so: 'windows' } }, res)).rejects.toBeInstanceOf(BadRequestException);
+    await expect(m.svc.script(admin, { ...req, get: () => "x'y.com", query: { token: 'tk.1', so: 'windows' } }, res)).rejects.toBeInstanceOf(BadRequestException);
+    await expect(m.svc.info(admin, { ...req, headers: { 'x-forwarded-proto': 'javascript' } })).rejects.toBeInstanceOf(BadRequestException);
+    expect(res.send).not.toHaveBeenCalled();
   });
 
   it('sem permissão ou sem publicação recusa', async () => {

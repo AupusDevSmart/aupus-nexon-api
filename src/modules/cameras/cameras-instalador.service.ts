@@ -1,4 +1,4 @@
-import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { readFile } from 'node:fs/promises';
 import type { Request, Response } from 'express';
 import { PermissionScopeService } from '@/core';
@@ -49,9 +49,12 @@ export class CamerasInstaladorService {
     }
   }
 
+  /** Endereço do instalador. Vai dentro de scripts (bash e PowerShell): só aceita host e protocolo limpos. */
   private base(req: Request): string {
-    const proto = String(req.headers['x-forwarded-proto'] ?? req.protocol ?? 'https').split(',')[0];
-    return `${proto}://${req.get('host')}/api/v1/cameras/instalador`;
+    const proto = String(req.headers['x-forwarded-proto'] ?? req.protocol ?? 'https').split(',')[0].trim();
+    const host = String(req.get('host') ?? '');
+    if (!/^https?$/.test(proto) || !/^[A-Za-z0-9.-]+(:\d{1,5})?$/.test(host)) throw new BadRequestException('Endereço inválido');
+    return `${proto}://${host}/api/v1/cameras/instalador`;
   }
 
   /** GET /cameras/instalador — versão, links com token (2 h) e o comando para colar no Terminal. */
@@ -118,6 +121,8 @@ export class CamerasInstaladorService {
       throw new NotFoundException('Script do instalador não publicado');
     }
     const token = String(req.query.token ?? '');
+    // O token vai dentro do script: só o formato que a API gera (base64url.base64url).
+    if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token)) throw new BadRequestException('Token inválido');
     const url = `${this.base(req)}/imagem?token=${encodeURIComponent(token)}`;
     const vinculo = String(req.query.vinculo ?? '');
     const vinculoOk = /^vin\.[\w.-]+$/.test(vinculo) ? vinculo : '';
@@ -130,6 +135,8 @@ export class CamerasInstaladorService {
       .replace('__NEXON_IMAGEM_SHA__', m.sha256)
       .replace('__NEXON_VINCULO__', vinculoOk)
       .replace('__NEXON_SCRIPT_URL__', self);
+    // Defesa extra: no .ps1 os valores ficam entre aspas simples.
+    if (windows && /'/.test(url + self + vinculoOk)) throw new BadRequestException('Endereço inválido');
     if (windows) {
       res.setHeader('Content-Type', 'text/plain; charset=utf-8');
       res.setHeader('Cache-Control', 'private, no-store');
