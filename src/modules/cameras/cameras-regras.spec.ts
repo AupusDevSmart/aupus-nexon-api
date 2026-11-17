@@ -274,3 +274,34 @@ describe('nomeDownload', () => {
     expect(n('', new Date('2026-01-01T02:05:00Z'), 'historico-60s', 'jpg')).toBe('camera_2025-12-31_23h05_historico-60s.jpg');
   });
 });
+
+describe('janelasDoPeriodo', () => {
+  const { janelasDoPeriodo: j } = jest.requireActual('./cameras-regras');
+  const iso = (d: Date) => d.toISOString();
+  it('sem faixa: um intervalo do começo de "de" ao fim de "ate" (hora de Brasília)', () => {
+    const r = j('2026-11-15', '2026-11-17');
+    expect(r).toHaveLength(1);
+    expect(iso(r[0].inicio)).toBe('2026-11-15T03:00:00.000Z');
+    expect(iso(r[0].fim)).toBe('2026-11-18T03:00:00.000Z');
+  });
+  it('faixa do dia: uma janela por dia', () => {
+    const r = j('2026-11-16', '2026-11-17', '08:00', '12:30');
+    expect(r.map((x: any) => [iso(x.inicio), iso(x.fim)])).toEqual([
+      ['2026-11-16T11:00:00.000Z', '2026-11-16T15:30:00.000Z'],
+      ['2026-11-17T11:00:00.000Z', '2026-11-17T15:30:00.000Z'],
+    ]);
+  });
+  it('faixa que vira a noite (18:00 → 06:00) termina na manhã seguinte', () => {
+    const r = j('2026-11-16', '2026-11-16', '18:00', '06:00');
+    expect([iso(r[0].inicio), iso(r[0].fim)]).toEqual(['2026-11-16T21:00:00.000Z', '2026-11-17T09:00:00.000Z']);
+  });
+  it('só hora_de: vai até o fim do dia', () => {
+    const r = j('2026-11-16', '2026-11-16', '22:00', null);
+    expect([iso(r[0].inicio), iso(r[0].fim)]).toEqual(['2026-11-17T01:00:00.000Z', '2026-11-17T03:00:00.000Z']);
+  });
+  it('inválido: ate antes de de, mais de 92 dias, hora ruim', () => {
+    expect(j('2026-11-17', '2026-11-16')).toBeNull();
+    expect(j('2026-01-01', '2026-12-31')).toBeNull();
+    expect(j('2026-11-16', '2026-11-16', '25:00')).toBeNull();
+  });
+});
