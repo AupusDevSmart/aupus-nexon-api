@@ -92,6 +92,8 @@ export class CamerasInstaladorService {
       valido_ate,
       url_imagem: `${base}/imagem?${qImagem}`,
       comando: `curl -fsSL '${base}/script?${q}' | bash`,
+      // Windows: PowerShell; o script pede administrador sozinho (abre outra janela).
+      comando_windows: `powershell -ExecutionPolicy Bypass -Command "irm '${base}/script?${q}&so=windows' | iex"`,
       vinculo_automatico: vinculo,
       usina: ctx.unidade?.nome ?? null,
     };
@@ -104,23 +106,36 @@ export class CamerasInstaladorService {
     await this.storage.servir(req, res, `${PASTA}/${m.arquivo}`, 'application/gzip', 'private, no-store', m.arquivo);
   }
 
-  /** GET /cameras/instalador/script?token= — instalar-pelo-pc.sh com o endereço da imagem e o sha256. */
+  /** GET /cameras/instalador/script?token=[&so=windows] — instalar-pelo-pc.sh (ou .ps1) com o endereço da imagem e o sha256. */
   async script(user: Usuario | undefined, req: Request, res: Response) {
     this.exigir(user);
     const m = await this.manifesto();
+    const windows = req.query.so === 'windows';
     let texto: string;
     try {
-      texto = await readFile(this.storage.absoluto(`${PASTA}/instalar-pelo-pc.sh`), 'utf8');
+      texto = await readFile(this.storage.absoluto(`${PASTA}/${windows ? 'instalar-pelo-pc.ps1' : 'instalar-pelo-pc.sh'}`), 'utf8');
     } catch {
       throw new NotFoundException('Script do instalador não publicado');
     }
     const token = String(req.query.token ?? '');
     const url = `${this.base(req)}/imagem?token=${encodeURIComponent(token)}`;
     const vinculo = String(req.query.vinculo ?? '');
+    const vinculoOk = /^vin\.[\w.-]+$/.test(vinculo) ? vinculo : '';
+    // O .ps1 se baixa de novo como administrador: leva o próprio endereço (mesmo token e chave).
+    let self = `${this.base(req)}/script?token=${encodeURIComponent(token)}`;
+    if (vinculoOk) self += `&vinculo=${encodeURIComponent(vinculoOk)}`;
+    self += '&so=windows';
     texto = texto
       .replace('__NEXON_IMAGEM_URL__', url)
       .replace('__NEXON_IMAGEM_SHA__', m.sha256)
-      .replace('__NEXON_VINCULO__', /^vin\.[\w.-]+$/.test(vinculo) ? vinculo : '');
+      .replace('__NEXON_VINCULO__', vinculoOk)
+      .replace('__NEXON_SCRIPT_URL__', self);
+    if (windows) {
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('Cache-Control', 'private, no-store');
+      res.send(texto);
+      return;
+    }
     res.setHeader('Content-Type', 'text/x-shellscript; charset=utf-8');
     res.setHeader('Cache-Control', 'private, no-store');
     res.send(texto);

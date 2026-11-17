@@ -11,6 +11,7 @@ function montar(publicado = true) {
   if (publicado) {
     mkdirSync(join(dir, 'instalador'));
     writeFileSync(join(dir, 'instalador', 'atual.json'), JSON.stringify({ versao: '2026.11.17', arquivo: 'nexon-cam-pi5.img.gz', sha256: sha, tamanho: 10 }));
+    writeFileSync(join(dir, 'instalador', 'instalar-pelo-pc.ps1'), "$U = '__NEXON_IMAGEM_URL__'\n$S = '__NEXON_IMAGEM_SHA__'\n$V = '__NEXON_VINCULO__'\n$E = '__NEXON_SCRIPT_URL__'\n");
     writeFileSync(join(dir, 'instalador', 'instalar-pelo-pc.sh'), 'URL="${X:-__NEXON_IMAGEM_URL__}"\nSHA="${Y:-__NEXON_IMAGEM_SHA__}"\nVIN="${Z:-__NEXON_VINCULO__}"\n');
   }
   const storage: any = { absoluto: (rel: string) => join(dir, rel), servir: jest.fn() };
@@ -51,6 +52,21 @@ describe('instalador do Raspberry', () => {
     const res2: any = { setHeader: jest.fn(), send: jest.fn() };
     await m.svc.script(admin, { ...req, query: { token: 'tk.1', vinculo: 'x"; rm -rf /' } }, res2);
     expect(res2.send.mock.calls[0][0]).toContain('VIN="${Z:-}"');
+  });
+
+  it('Windows: comando do PowerShell e .ps1 com o próprio endereço para pedir administrador', async () => {
+    const m = montar();
+    const r = await m.svc.info(admin, req, undefined, 'u1');
+    expect(r.comando_windows).toBe(
+      `powershell -ExecutionPolicy Bypass -Command "irm 'https://api.exemplo/api/v1/cameras/instalador/script?token=tk.1&vinculo=vin.abc.def&so=windows' | iex"`,
+    );
+    const res: any = { setHeader: jest.fn(), send: jest.fn() };
+    await m.svc.script(admin, { ...req, query: { token: 'tk.1', vinculo: 'vin.abc.def', so: 'windows' } }, res);
+    const texto = res.send.mock.calls[0][0];
+    expect(texto).toContain("$V = 'vin.abc.def'");
+    expect(texto).toContain("$E = 'https://api.exemplo/api/v1/cameras/instalador/script?token=tk.1&vinculo=vin.abc.def&so=windows'");
+    expect(texto).toContain(sha);
+    expect(texto).not.toContain('__NEXON_');
   });
 
   it('sem permissão ou sem publicação recusa', async () => {
