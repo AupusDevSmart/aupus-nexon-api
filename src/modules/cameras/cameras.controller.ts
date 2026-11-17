@@ -163,8 +163,8 @@ export class CamerasController {
 
   @Get('instalador')
   @ApiOperation({ summary: 'Instalador do Raspberry novo: versão, link da imagem e comando do Terminal (token 2 h). Audit camera_instalador' })
-  instalador(@CurrentUser() user: Usuario, @Req() req: Request, @Cliente() cliente?: ClienteInfo) {
-    return this.instaladorSvc.info(user, req, cliente);
+  instalador(@CurrentUser() user: Usuario, @Req() req: Request, @Cliente() cliente?: ClienteInfo, @Query('unidade_id') unidadeId?: string) {
+    return this.instaladorSvc.info(user, req, cliente, unidadeId);
   }
 
   @Public()

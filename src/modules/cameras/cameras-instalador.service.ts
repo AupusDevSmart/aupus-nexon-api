@@ -1,6 +1,7 @@
 import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { readFile } from 'node:fs/promises';
 import type { Request, Response } from 'express';
+import { PermissionScopeService } from '@/core';
 import { capacidades, papelCanonico } from '@/core/modules/auth/papeis';
 import type { ClienteInfo } from '@/core/common/cliente-info';
 import { CamerasAuditoriaService } from './cameras-auditoria.service';
@@ -29,6 +30,7 @@ export class CamerasInstaladorService {
     private readonly storage: CamerasStorageService,
     private readonly midia: CamerasMidiaService,
     private readonly auditoria: CamerasAuditoriaService,
+    private readonly scope: PermissionScopeService,
   ) {}
 
   private async manifesto(): Promise<ManifestoInstalador> {
@@ -53,19 +55,33 @@ export class CamerasInstaladorService {
   }
 
   /** GET /cameras/instalador — versão, links com token (2 h) e o comando para colar no Terminal. */
-  async info(user: Usuario | undefined, req: Request, cliente?: ClienteInfo) {
+  async info(user: Usuario | undefined, req: Request, cliente?: ClienteInfo, unidadeId?: string) {
     this.exigir(user);
     const m = await this.manifesto();
     const { token, valido_ate } = this.midia.gerarTokenMidia(user ?? {});
     const base = this.base(req);
-    const q = `token=${encodeURIComponent(token)}`;
+    let q = `token=${encodeURIComponent(token)}`;
+    // Com a usina: o Raspberry instalado por este comando entra sozinho nela (chave de uso único, 7 dias).
+    let vinculo: { valido_ate: string } | null = null;
+    let ctx: Awaited<ReturnType<CamerasAuditoriaService['contextoUnidade']>> = { unidade: null, planta: null };
+    if (unidadeId?.trim()) {
+      const un = unidadeId.trim();
+      if (user) await this.scope.assertEntityInScope('unidade', un, user);
+      ctx = await this.auditoria.contextoUnidade(un);
+      if (!ctx.unidade) throw new NotFoundException('Usina não encontrada');
+      const v = this.midia.gerarVinculo(un, user?.id?.trim() ?? null);
+      q += `&vinculo=${encodeURIComponent(v.chave)}`;
+      vinculo = { valido_ate: v.valido_ate };
+    }
     await this.auditoria.registrar('camera_instalador', {
-      mensagem: `Instalador do NexON (versão ${m.versao}) pedido para um Raspberry novo`,
+      mensagem: `Instalador do NexON (versão ${m.versao}) pedido para um Raspberry novo${ctx.unidade ? ` — entra sozinho em ${ctx.unidade.nome}` : ''}`,
       user,
       cliente,
+      unidade: ctx.unidade,
+      planta: ctx.planta,
       objetoTipo: 'camera_instalador',
       objetoId: m.versao,
-      extra: { versao: m.versao, arquivo: m.arquivo, valido_ate },
+      extra: { versao: m.versao, arquivo: m.arquivo, valido_ate, vinculo_automatico: !!vinculo },
     });
     return {
       versao: m.versao,
@@ -74,6 +90,8 @@ export class CamerasInstaladorService {
       valido_ate,
       url_imagem: `${base}/imagem?${q}`,
       comando: `curl -fsSL '${base}/script?${q}' | bash`,
+      vinculo_automatico: vinculo,
+      usina: ctx.unidade?.nome ?? null,
     };
   }
 
@@ -96,7 +114,11 @@ export class CamerasInstaladorService {
     }
     const token = String(req.query.token ?? '');
     const url = `${this.base(req)}/imagem?token=${encodeURIComponent(token)}`;
-    texto = texto.replace('__NEXON_IMAGEM_URL__', url).replace('__NEXON_IMAGEM_SHA__', m.sha256);
+    const vinculo = String(req.query.vinculo ?? '');
+    texto = texto
+      .replace('__NEXON_IMAGEM_URL__', url)
+      .replace('__NEXON_IMAGEM_SHA__', m.sha256)
+      .replace('__NEXON_VINCULO__', /^vin\.[\w.-]+$/.test(vinculo) ? vinculo : '');
     res.setHeader('Content-Type', 'text/x-shellscript; charset=utf-8');
     res.setHeader('Cache-Control', 'private, no-store');
     res.send(texto);

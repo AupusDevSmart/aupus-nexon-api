@@ -161,3 +161,18 @@ describe('CamerasMidiaService · auth do MediaMTX', () => {
     expect(rebaixado.scope.assertEntityInScope).toHaveBeenCalledWith('unidade', 'u1', { id: 'u1', role: 'operador' });
   });
 });
+
+describe('chave de vínculo do instalador', () => {
+  it('assina, lê e recusa token de mídia, vencida ou adulterada', () => {
+    process.env.MIDIA_TOKEN_SECRET = process.env.MIDIA_TOKEN_SECRET || 'segredo-teste';
+    const { CamerasMidiaService } = jest.requireActual('./cameras-midia.service');
+    const m = new CamerasMidiaService({} as never, {} as never);
+    const agora = new Date('2026-11-17T12:00:00Z');
+    const v = m.gerarVinculo('u1', 'a1', agora);
+    expect(m.lerVinculo(v.chave, agora)).toEqual({ un: 'u1', by: 'a1', n: v.nonce });
+    expect(m.lerVinculo(v.chave, new Date('2026-11-25T12:00:00Z'))).toBeNull();
+    expect(m.lerVinculo(v.chave.slice(0, -2) + 'xx', agora)).toBeNull();
+    const midia = m.gerarTokenMidia({ id: 'a1', role: 'admin' }, agora).token;
+    expect(m.lerVinculo(`vin.${midia}`, agora)).toBeNull();
+  });
+});

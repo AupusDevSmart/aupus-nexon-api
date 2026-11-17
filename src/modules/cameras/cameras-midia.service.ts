@@ -54,6 +54,21 @@ export class CamerasMidiaService {
     return `${p}.${sig}`;
   }
 
+  /** Chave de vínculo do instalador: a usina onde o Raspberry entra sozinho (uso único, 7 dias). */
+  gerarVinculo(unidadeId: string, userId: string | null, agora = new Date()): { chave: string; nonce: string; valido_ate: string } {
+    const e = agora.getTime() + 7 * 24 * 60 * 60 * 1000;
+    const nonce = randomBytes(12).toString('hex');
+    const chave = `vin.${this.assinar({ t: 'vinculo', un: unidadeId, by: userId, n: nonce, e })}`;
+    return { chave, nonce, valido_ate: new Date(e).toISOString() };
+  }
+
+  lerVinculo(chave: string | null | undefined, agora = new Date()): { un: string; by: string | null; n: string } | null {
+    if (typeof chave !== 'string' || !chave.startsWith('vin.')) return null;
+    const o = this.abrir<{ t?: string; un?: string; by?: string | null; n?: string; e?: number }>(chave.slice(4), agora);
+    if (!o || o.t !== 'vinculo' || !o.un || !o.n || !/^[0-9a-f]{24}$/.test(o.n)) return null;
+    return { un: o.un, by: o.by ?? null, n: o.n };
+  }
+
   private abrir<T extends { e?: number }>(token: string, agora = new Date()): T | null {
     if (typeof token !== 'string' || !token.includes('.')) return null;
     const [p, sig] = token.split('.');
