@@ -59,5 +59,9 @@ describe('registros sem segredos', () => {
     });
     const r = semSegredos('rtsp://admin:p@ss@w0rd@10.0.0.1/x Authorization: Bearer abc123 ?api_key=zz');
     expect(r).not.toMatch(/p@ss|w0rd|abc123|zz/);
+    for (const senha of ['a/b@c', 'x?y#z', 'p@/q']) {
+      const m = semSegredos(`rtsp://admin:${senha}@10.0.0.1:554/cam`);
+      expect(m).toBe('rtsp://admin:***@10.0.0.1:554/cam');
+    }
   });
 });
