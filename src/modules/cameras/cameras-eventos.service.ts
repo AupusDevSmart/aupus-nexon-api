@@ -8,6 +8,7 @@ import { CamerasAuditoriaService } from './cameras-auditoria.service';
 import { CamerasConfigService, type ConfigUnidade } from './cameras-config.service';
 import { CamerasNotificacaoService } from './cameras-notificacao.service';
 import {
+  janelasDoPeriodo,
   nomeDownload,
   decidirEvento,
   decidirReclassificacao,
@@ -17,7 +18,6 @@ import {
   expandirTipos,
   interpretarDados,
   interpretarCaixas,
-  intervaloDoDia,
   normalizarAnalise,
   TIPOS_SISTEMA,
   tipoReclassificado,
@@ -89,10 +89,14 @@ export class CamerasEventosService {
       const cam = await this.cameraVisivel(q.camera_id, user);
       where.camera_id = cam.id;
     }
-    if (q.dia) {
-      const r = intervaloDoDia(q.dia);
-      if (!r) throw new BadRequestException('dia inválido (AAAA-MM-DD)');
-      where.inicio_em = { gte: r.inicio, lt: r.fim };
+    const de = q.de ?? q.dia;
+    if (de || q.hora_de || q.hora_ate) {
+      const hoje = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date());
+      const inicio = de ?? hoje;
+      const janelas = janelasDoPeriodo(inicio, q.ate ?? (q.de ? q.de : inicio), q.hora_de, q.hora_ate);
+      if (!janelas) throw new BadRequestException('Período inválido (datas AAAA-MM-DD, até 92 dias; horas HH:MM)');
+      if (janelas.length === 1) where.inicio_em = { gte: janelas[0].inicio, lt: janelas[0].fim };
+      else where.AND = [{ OR: janelas.map((j) => ({ inicio_em: { gte: j.inicio, lt: j.fim } })) }];
     }
     if (q.tipo) {
       const tipos = expandirTipos(q.tipo);

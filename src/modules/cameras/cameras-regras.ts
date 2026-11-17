@@ -163,6 +163,48 @@ export function intervaloDoDia(dia: string, fuso = FUSO): { inicio: Date; fim: D
   return { inicio, fim };
 }
 
+/** Período máximo de uma consulta de eventos por datas (dias). */
+export const PERIODO_MAX_DIAS = 92;
+
+/**
+ * Janelas de tempo do filtro de eventos (hora de Brasília): dias `de`..`ate` (inclusive) e, opcional, só a
+ * faixa `hora_de`..`hora_ate` de cada dia. Faixa que passa da meia-noite (18:00 → 06:00) vai até a manhã
+ * seguinte. Sem faixa: um intervalo só, do começo de `de` ao fim de `ate`. Inválido → null.
+ */
+export function janelasDoPeriodo(
+  de: string,
+  ate: string,
+  horaDe?: string | null,
+  horaAte?: string | null,
+  fuso = FUSO,
+): { inicio: Date; fim: Date }[] | null {
+  const a = intervaloDoDia(de, fuso);
+  const b = intervaloDoDia(ate, fuso);
+  if (!a || !b || b.inicio < a.inicio) return null;
+  const dias = Math.round((b.inicio.getTime() - a.inicio.getTime()) / 86_400_000) + 1;
+  if (dias > PERIODO_MAX_DIAS) return null;
+  const hDe = horaDe ? minutosDe(horaDe) : null;
+  const hAte = horaAte ? minutosDe(horaAte) : null;
+  if ((horaDe && hDe === null) || (horaAte && hAte === null)) return null;
+  if (hDe === null && hAte === null) return [{ inicio: a.inicio, fim: b.fim }];
+  const ini = hDe ?? 0;
+  const fimMin = hAte ?? 24 * 60;
+  const [ano, mes, d0] = de.split('-').map(Number);
+  const janelas: { inicio: Date; fim: Date }[] = [];
+  for (let i = 0; i < dias; i++) {
+    const base = new Date(Date.UTC(ano, mes - 1, d0 + i));
+    const [y, m, d] = [base.getUTCFullYear(), base.getUTCMonth() + 1, base.getUTCDate()];
+    const inicio = instanteLocal(y, m, d, Math.floor(ini / 60), ini % 60, fuso);
+    // faixa até 24:00 ou que vira a noite: termina no dia seguinte
+    const vira = fimMin <= ini;
+    const prox = new Date(Date.UTC(y, m - 1, d + (vira || fimMin === 24 * 60 ? 1 : 0)));
+    const minFim = fimMin === 24 * 60 ? 0 : fimMin;
+    const fim = instanteLocal(prox.getUTCFullYear(), prox.getUTCMonth() + 1, prox.getUTCDate(), Math.floor(minFim / 60), minFim % 60, fuso);
+    janelas.push({ inicio, fim });
+  }
+  return janelas;
+}
+
 /** "18:00" → minutos desde a meia-noite; inválido → null. */
 export function minutosDe(hhmm: string | null | undefined): number | null {
   const m = /^(\d{1,2}):(\d{2})(?::\d{2})?$/.exec((hhmm ?? '').trim());

@@ -330,6 +330,24 @@ export class ListarEventosDto {
   @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: 'dia deve ser AAAA-MM-DD' })
   dia?: string;
 
+  /** Período (inclusive, AAAA-MM-DD, até 92 dias); sem `ate` = só o dia `de`. */
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: 'de deve ser AAAA-MM-DD' })
+  de?: string;
+
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: 'ate deve ser AAAA-MM-DD' })
+  ate?: string;
+
+  /** Faixa de hora de cada dia (HH:MM); 18:00 → 06:00 atravessa a meia-noite. */
+  @IsOptional()
+  @Matches(/^\d{2}:\d{2}$/, { message: 'hora_de deve ser HH:MM' })
+  hora_de?: string;
+
+  @IsOptional()
+  @Matches(/^\d{2}:\d{2}$/, { message: 'hora_ate deve ser HH:MM' })
+  hora_ate?: string;
+
   /** Lista separada por vírgula; `sistema` = sem_sinal,sinal_restabelecido. */
   @IsOptional()
   @IsString()
