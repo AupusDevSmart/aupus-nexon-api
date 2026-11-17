@@ -3631,6 +3631,8 @@ model cameras {
   fabricante            String             @default("intelbras") @db.VarChar(40)
   modelo                String?            @db.VarChar(80)
   ip                    String             @db.VarChar(64)
+  /// NEXON-108: MAC visto pela descoberta do agente; o IP segue o MAC quando a rede muda.
+  mac                   String?            @db.VarChar(17)
   porta_rtsp            Int                @default(554)
   porta_http            Int                @default(80)
   usuario               String             @db.VarChar(80)

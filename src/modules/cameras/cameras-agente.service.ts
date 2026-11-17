@@ -366,6 +366,50 @@ export class CamerasAgenteService {
       // Descoberta é ajuda de cadastro: falha aqui não pode derrubar o heartbeat (status das câmeras).
       this.logger.warn(`[cameras] agente ${agente.nome}: descobertas não gravadas: ${(e as Error).message}`);
     }
+    try {
+      await this.seguirMac(agente, itens);
+    } catch (e) {
+      this.logger.warn(`[cameras] agente ${agente.nome}: IP das câmeras não conferido: ${(e as Error).message}`);
+    }
+  }
+
+  /**
+   * A câmera é a mesma enquanto o MAC for o mesmo: guarda o MAC (descoberta no mesmo IP) e, quando o
+   * aparelho muda de rede ou o roteador dá outro IP, troca cameras.ip sozinho (audit camera_ip_atualizado).
+   */
+  private async seguirMac(agente: AgenteInfo, itens: { ip: string; mac: string | null }[]) {
+    const comMac = itens.filter((d) => d.mac);
+    if (comMac.length === 0) return;
+    const cams = await this.prisma.cameras.findMany({
+      where: { agente_id: agente.id, deleted_at: null },
+      select: { id: true, nome: true, ip: true, mac: true, unidade_id: true },
+    });
+    const ipsEmUso = new Set(cams.map((c) => c.ip));
+    for (const c of cams) {
+      const mac = c.mac?.toLowerCase() ?? null;
+      if (!mac) {
+        const mesmoIp = comMac.find((d) => d.ip === c.ip);
+        if (mesmoIp?.mac) await this.prisma.cameras.update({ where: { id: c.id }, data: { mac: mesmoIp.mac.toLowerCase() } });
+        continue;
+      }
+      const achada = comMac.find((d) => d.mac!.toLowerCase() === mac);
+      if (!achada || achada.ip === c.ip || ipsEmUso.has(achada.ip)) continue;
+      await this.prisma.cameras.update({ where: { id: c.id }, data: { ip: achada.ip } });
+      ipsEmUso.delete(c.ip);
+      ipsEmUso.add(achada.ip);
+      this.logger.log(`[cameras] câmera ${c.nome}: IP ${c.ip} -> ${achada.ip} (mesmo MAC ${mac})`);
+      const ctx = await this.auditoria.contextoUnidade(c.unidade_id);
+      await this.auditoria.registrar('camera_ip_atualizado', {
+        mensagem: `Câmera "${c.nome}" mudou de endereço ${c.ip} → ${achada.ip} (mesmo MAC ${mac}) — ${ctx.unidade?.nome ?? c.unidade_id}${ctx.planta ? ` (${ctx.planta.nome})` : ''}`,
+        user: null,
+        unidade: ctx.unidade,
+        planta: ctx.planta,
+        camera: { id: c.id, nome: c.nome, ip: achada.ip, unidade_id: c.unidade_id },
+        objetoTipo: 'camera',
+        objetoId: c.id,
+        extra: { ip_anterior: c.ip, ip_novo: achada.ip, mac, agente: { id: agente.id, nome: agente.nome } },
+      });
+    }
   }
 
   /** POST /cameras/agente/miniaturas (multipart: camera_id + arquivo JPEG). */
