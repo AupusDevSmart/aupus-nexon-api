@@ -33,6 +33,7 @@ export interface Params {
   t_validade_lora_s: number;
   t_estagio2_s: number;
   n_retomada: number;
+  rampa_pct_min: number;            // retomada na TON: subida máx. de P por minuto (% de Pn)
   ssu_err_max_min: number;          // erros de leitura da SSU aceitos por minuto
   idade_max_ssu_s: number;
   idade_max_inv_internet_s: number;
@@ -44,7 +45,7 @@ export const PARAMS_PADRAO: Params = {
   fp_lim_ind: 0.92, fp_lim_cap: 0.92, fp_alvo_ind: 0.93, fp_alvo_cap: 0.93,
   janela_cap_ini: '00:00', janela_cap_fim: '06:00', margem_q3_kvar: 0,
   banda_pct: 3, t_min_ajuste_fp_s: 300, t_resposta_s: 60, degrau_min_pct: 3,
-  t_validade_internet_s: 180, t_validade_lora_s: 300, t_estagio2_s: 600, n_retomada: 3,
+  t_validade_internet_s: 180, t_validade_lora_s: 300, t_estagio2_s: 600, n_retomada: 3, rampa_pct_min: 10,
   ssu_err_max_min: 5, idade_max_ssu_s: 120, idade_max_inv_internet_s: 120, idade_max_inv_lora_s: 300,
 };
 
@@ -62,6 +63,8 @@ export interface Ufv {
   zera_estagio2: boolean;
   watchdog_nativo: boolean;         // validado em campo (R2)
   rota: 'internet' | 'lora';
+  bi_manual?: number;               // entrada da TON da UFV com a chave Automático/Manual (0 = sem)
+  bi_invertida?: boolean;           // chave fecha o contato em AUTOMÁTICO (manual = contato aberto)
   inversores: Inversor[];
 }
 

@@ -1100,11 +1100,50 @@ export class EquipamentosCmdService {
           select: { nome: true, topico_mqtt: true, mqtt_habilitado: true },
         });
         const topico = ton?.topico_mqtt?.trim();
-        return topico && ton?.mqtt_habilitado ? { topico, nome: ton.nome } : null;
+        return topico && ton?.mqtt_habilitado ? { topico, nome: ton.nome, id: c.equipamento_id.trim() } : null;
       }
       for (const nb of adj.get(id) ?? []) if (!visto.has(nb)) { visto.add(nb); fila.push(nb); }
     }
     return null;
+  }
+
+  /**
+   * Controle pelo MED (Fase B): como a TON escreve o limite de P / Q deste inversor — device e endereço
+   * no diagrama IoT, TON que o lê e escala/faixa de cada setpoint. null = sem device/TON.
+   */
+  async alvoControle(equipamentoId: string): Promise<{
+    dev: string; addr: number; tonId: string; tonNome: string;
+    p: { escala: number; min: number | null; max: number | null } | null;
+    q: { escala: number; min: number | null; max: number | null } | null;
+  } | null> {
+    const dev = await this.deviceDoEquipamento(equipamentoId.trim());
+    if (!dev || !dev.nome) return null;
+    const ton = await this.tonDoComponente(dev.compId, dev.projetoId);
+    if (!ton) return null;
+    const faixa = (id: string) => {
+      const sp = dev.setpoints.find((x) => x?.id === id);
+      const bo = dev.boMap[id];
+      if (!sp || !bo) return null;
+      const num = (v: unknown) => (Number.isFinite(Number(v)) && v !== null && v !== '' ? Number(v) : null);
+      return { escala: Number(sp.escala) || 1, min: num(bo.min), max: num(bo.max) };
+    };
+    return { dev: dev.nome, addr: dev.addr ?? 0, tonId: ton.id, tonNome: ton.nome, p: faixa('sp_limite_pct'), q: faixa('sp_q_pct') };
+  }
+
+  /**
+   * Comando de texto para a TON SEM trilha nem interpretação do ack (quem chama lê o msg — ex.: o
+   * controle pelo MED, uma vez por minuto). Só lança sem resposta da TON.
+   */
+  async comandoTonCru(tonId: string, cmd: string): Promise<{ status: string; msg: string; latency_ms: number }> {
+    const ton = await this.prisma.equipamentos.findFirst({ where: { id: tonId.trim(), deleted_at: null }, select: { nome: true, topico_mqtt: true } });
+    const topico = ton?.topico_mqtt?.trim();
+    if (!topico) throw new BadRequestException(`TON (${tonId}) sem Tópico Base.`);
+    if (!this.mqtt.isConnected()) throw new ServiceUnavailableException('Broker MQTT nao conectado no momento.');
+    const opcoes = topico.includes('/satellite/') ? { timeoutMs: 15000, maxAttempts: 2 } : {};
+    const t0 = Date.now();
+    let ack = await this.mqtt.publishCommand(topico, cmd, opcoes);
+    if (ack.status === 'error' && String(ack.msg ?? '') === 'lora_no_ack') ack = await this.mqtt.publishCommand(topico, cmd, opcoes);
+    return { status: String(ack.status), msg: String(ack.msg ?? ''), latency_ms: Date.now() - t0 };
   }
 
   /** Ajustes (setpoints) disponíveis p/ o equipamento — só os que o firmware sabe escrever. */

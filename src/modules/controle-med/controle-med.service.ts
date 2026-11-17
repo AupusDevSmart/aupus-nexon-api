@@ -8,6 +8,10 @@ import {
   janelaReativa, lerMinuto, MinutoSsu, Modo, Modos, MODOS_PADRAO, Params, PARAMS_PADRAO, PedidoDemanda, PedidoFp,
   portaoMedidor, qDisponivel, SetpointInv, Ufv, validarCadastro, fmt,
 } from './controle-med.calc';
+import {
+  AlvoSp, bruto, ItemTon, lerRespostaCtl, MAX_INV_TON, montarCadastro, montarCtl, MODO_TON_TEXTO, RespostaCtl,
+  resultadoDoToken, TRINCAS_POR_MSG,
+} from './controle-med.ton';
 
 /** Estado de cada MED entre um minuto e outro (memória do processo; refeito no restart). */
 interface EstadoMed {
@@ -20,6 +24,13 @@ interface EstadoMed {
   ultimoAjusteFp: number;
   validos: number;                            // ciclos válidos seguidos (retomada, 11.2)
   houveFalha: boolean;
+  // Fase B — controle local na TON da UFV (lib controle_ufv)
+  cmd: Record<string, { p_pct: number; q_pct: number }>;   // o que está pedido à TON, por inversor
+  tonsAtivas: Set<string>;                    // TONs com o controle local armado (precisam de "ctl off")
+  legado: Set<string>;                        // TON com firmware sem "ctl": setpoint por inversor (caminho antigo)
+  offConferido: boolean;                      // depois do restart: conferiu se alguma TON ficou armada
+  alvos: { em: number; mapa: Map<string, AlvoSp | null> } | null;
+  modoTon: Record<string, string>;            // último modo informado por TON (eventos de transição)
 }
 
 const ROTULO: Record<Controle, string> = { fp: 'FP', demanda_g: 'Demanda de geração', demanda_c: 'Demanda de carga' };
@@ -114,7 +125,10 @@ export class ControleMedService implements OnModuleInit {
   private estadoDe(medId: string): EstadoMed {
     let e = this.estados.get(medId);
     if (!e) {
-      e = { ant: null, projG: null, projC: null, aguardG: false, aguardC: false, setpoints: {}, enviadoEm: {}, falhas: {}, ultimoAjusteFp: 0, validos: 0, houveFalha: false };
+      e = {
+        ant: null, projG: null, projC: null, aguardG: false, aguardC: false, setpoints: {}, enviadoEm: {}, falhas: {}, ultimoAjusteFp: 0, validos: 0, houveFalha: false,
+        cmd: {}, tonsAtivas: new Set(), legado: new Set(), offConferido: false, alvos: null, modoTon: {},
+      };
       this.estados.set(medId, e);
     }
     return e;
@@ -290,28 +304,213 @@ export class ControleMedService implements OnModuleInit {
 
     const ativoP = modos.demanda_g === 'ativo' || modos.demanda_c === 'ativo';
     const sombraP = modos.demanda_g === 'sombra' || modos.demanda_c === 'sombra';
+    const ativoQ = modos.fp === 'ativo';
     const resultado: Array<ComandoInv & { enviado_p?: string; enviado_q?: string }> = [];
+    const pend = new Map<string, { p_pct?: number; q_pct?: number }>();   // o que muda no ATIVO
     let mudouQ = false;
     for (const c of comandos) {
       const r: ComandoInv & { enviado_p?: string; enviado_q?: string } = { ...c };
       const sp = { ...(est.setpoints[c.inversor_id] ?? { p_lim_kw: c.p_lim_kw, q_kvar: 0 }) };
       if (c.muda_p && (ativoP || sombraP)) {
-        if (ativoP) {
-          r.enviado_p = await this.enviar(c.inversor_id, 'sp_limite_pct', c.p_pct);
-          if (r.enviado_p === 'ok') { sp.p_lim_kw = c.p_lim_kw; est.enviadoEm[c.inversor_id] = Date.now(); }
-        } else { r.enviado_p = 'sombra'; sp.p_lim_kw = c.p_lim_kw; }
+        if (ativoP) pend.set(c.inversor_id, { ...pend.get(c.inversor_id), p_pct: c.p_pct });
+        else { r.enviado_p = 'sombra'; sp.p_lim_kw = c.p_lim_kw; }
       }
       if (c.muda_q && modos.fp !== 'desligado') {
-        if (modos.fp === 'ativo') {
-          r.enviado_q = await this.enviar(c.inversor_id, 'sp_q_pct', c.q_pct);
-          if (r.enviado_q === 'ok') { sp.q_kvar = c.q_kvar; mudouQ = true; }
-        } else { r.enviado_q = 'sombra'; sp.q_kvar = c.q_kvar; mudouQ = true; }
+        if (ativoQ) pend.set(c.inversor_id, { ...pend.get(c.inversor_id), q_pct: c.q_pct });
+        else { r.enviado_q = 'sombra'; sp.q_kvar = c.q_kvar; mudouQ = true; }
       }
       est.setpoints[c.inversor_id] = sp;
       resultado.push(r);
     }
+    if (ativoP || ativoQ) {
+      // Fase B: um "ctl" por TON por ciclo — renova a validade mesmo sem mudança (heartbeat).
+      // Inversor sem pedido anterior (backend reiniciado / cadastro salvo): o que o ciclo decidiu agora;
+      // P só com demanda ATIVA (sombra não mexe no inversor), Q só com FP ativo.
+      const padrao = new Map(comandos.map((c) => [c.inversor_id, { p_pct: ativoP ? c.p_pct : 100, q_pct: ativoQ ? c.q_pct : 0 }]));
+      const res = await this.enviarTons(ufvs, p, est, pend, eventos, padrao);
+      for (const r of resultado) {
+        const pe = pend.get(r.inversor_id);
+        if (!pe) continue;
+        const x = res.get(r.inversor_id) ?? { ok: false, texto: 'sem resposta da TON' };
+        const sp = est.setpoints[r.inversor_id];
+        if (pe.p_pct !== undefined) {
+          r.enviado_p = x.ok ? 'ok' : x.texto;
+          if (x.ok) { sp.p_lim_kw = r.p_lim_kw; est.enviadoEm[r.inversor_id] = Date.now(); }
+        }
+        if (pe.q_pct !== undefined) {
+          r.enviado_q = x.ok ? 'ok' : x.texto;
+          if (x.ok) { sp.q_kvar = r.q_kvar; mudouQ = true; }
+        }
+        if (x.ok && x.texto !== 'ok') r.motivo = [...r.motivo, `TON: ${x.texto}`];
+      }
+    } else {
+      await this.desligarTons(ufvs, est, eventos);
+    }
     if (mudouQ) est.ultimoAjusteFp = Date.now();
     await this.registrar(medId, m, entradas, portao, pedidos, resultado, modos, eventos);
+  }
+
+  // ------------------------------------------------------------------ TON da UFV (Fase B)
+
+  /** Device/TON de cada inversor (cache de 10 min; refeito ao salvar o cadastro). */
+  private async alvos(ufvs: Ufv[], est: EstadoMed): Promise<Map<string, AlvoSp | null>> {
+    if (est.alvos && Date.now() - est.alvos.em < 600_000) return est.alvos.mapa;
+    const mapa = new Map<string, AlvoSp | null>();
+    for (const u of ufvs) for (const i of u.inversores) mapa.set(i.id, await this.cmd.alvoControle(i.id).catch(() => null));
+    est.alvos = { em: Date.now(), mapa };
+    return mapa;
+  }
+
+  /** Inversores agrupados pela TON que os escreve, na ordem das UFVs (índice 1..n na TON). */
+  private async gruposTon(ufvs: Ufv[], est: EstadoMed): Promise<Map<string, ItemTon[]>> {
+    const alvos = await this.alvos(ufvs, est);
+    const g = new Map<string, ItemTon[]>();
+    for (const u of [...ufvs].sort((a, b) => a.ordem - b.ordem)) {
+      for (const i of u.inversores) {
+        const a = alvos.get(i.id);
+        if (!a) continue;
+        (g.get(a.tonId) ?? g.set(a.tonId, []).get(a.tonId)!).push({ ufv: u, inv: i, alvo: a });
+      }
+    }
+    return g;
+  }
+
+  /** Manda as trincas em pedaços; cada pedaço responde pelos índices dele (a TON relista todos). */
+  private async mandarCtl(tonId: string, seq: number, ttl: number, trincas: Array<[number, number, number]>): Promise<RespostaCtl> {
+    const msgs = montarCtl(seq, ttl, trincas);
+    let total: RespostaCtl | null = null;
+    for (let k = 0; k < msgs.length; k++) {
+      const a = await this.cmd.comandoTonCru(tonId, msgs[k]);
+      const r = lerRespostaCtl(a.status, a.msg);
+      if (!r.ok) return r;
+      const idx = trincas.slice(k * TRINCAS_POR_MSG, (k + 1) * TRINCAS_POR_MSG).map((t) => t[0]);
+      if (!total) total = { ...r, porIdx: {} };
+      total.modo = r.modo; total.hash = r.hash;
+      total.seg_seguro = Math.max(total.seg_seguro, r.seg_seguro);
+      total.seg_manual = Math.max(total.seg_manual, r.seg_manual);
+      total.pior = total.pior ?? r.pior;
+      for (const i of idx) if (r.porIdx[i] !== undefined) total.porIdx[i] = r.porIdx[i];
+    }
+    return total!;
+  }
+
+  /**
+   * Um "ctl" por TON: setpoint de TODOS os inversores dela com validade (ttl da rota) e seq = segundos.
+   * Confere o hash do cadastro na resposta e reenvia "ctl geral/cfg" quando difere. Firmware sem "ctl"
+   * (unknown_cmd) cai no setpoint por inversor de antes. Devolve o resultado por inversor PEDIDO.
+   */
+  private async enviarTons(
+    ufvs: Ufv[], p: Params, est: EstadoMed, pend: Map<string, { p_pct?: number; q_pct?: number }>, eventos: string[],
+    padrao: Map<string, { p_pct: number; q_pct: number }> = new Map(),
+  ) {
+    const out = new Map<string, { ok: boolean; texto: string }>();
+    const grupos = await this.gruposTon(ufvs, est);
+    const alvos = est.alvos!.mapa;
+    for (const id of pend.keys()) if (!alvos.get(id)) out.set(id, { ok: false, texto: 'inversor sem device/TON no diagrama IoT' });
+    const seq = Math.floor(Date.now() / 1000);
+    for (const [tonId, itens] of grupos) {
+      const nome = itens[0].alvo.tonNome;
+      if (est.legado.has(tonId)) { await this.enviarLegado(itens, pend, out); continue; }
+      const cad = montarCadastro(itens, p);
+      const lista = itens.slice(0, MAX_INV_TON);
+      const ttl = Math.round(Math.min(...lista.map((x) => (x.ufv.rota === 'lora' ? p.t_validade_lora_s : p.t_validade_internet_s))));
+      const trincas = lista.map((x, k): [number, number, number] => {
+        const at = est.cmd[x.inv.id] ?? padrao.get(x.inv.id) ?? { p_pct: 100, q_pct: 0 };
+        const pe = pend.get(x.inv.id) ?? {};
+        const novo = { p_pct: pe.p_pct ?? at.p_pct, q_pct: pe.q_pct ?? at.q_pct };
+        est.cmd[x.inv.id] = novo;   // a TON guarda e tenta de novo sozinha se a escrita falhar
+        return [k + 1, bruto(x.alvo.p, novo.p_pct), bruto(x.alvo.q, novo.q_pct)];
+      });
+      try {
+        let resp = await this.mandarCtl(tonId, seq, ttl, trincas);
+        if (resp.erro === 'unknown_cmd') {
+          est.legado.add(tonId);
+          eventos.push(`${nome}: firmware sem o controle local (validade e modo seguro) — usando o setpoint por inversor. Regrave a TON.`);
+          await this.enviarLegado(itens, pend, out);
+          continue;
+        }
+        if (resp.erro === 'sem_cfg' || (resp.hash && resp.hash !== cad.hash)) {
+          for (const l of cad.linhas) {
+            const a = await this.cmd.comandoTonCru(tonId, l);
+            if (!/^cfg_ok/.test(a.msg)) throw new Error(`cadastro recusado: "${l}" → ${a.msg || a.status}`);
+          }
+          eventos.push(`${nome}: cadastro do controle local enviado (${lista.length} inversor(es), c=${cad.hash})`);
+          eventos.push(...cad.avisos);
+          resp = await this.mandarCtl(tonId, seq, ttl, trincas);
+        }
+        if (!resp.ok) throw new Error(resp.erro ?? 'recusado');
+        est.tonsAtivas.add(tonId);
+        this.eventosTon(nome, tonId, resp, est, eventos);
+        lista.forEach((x, k) => { if (pend.has(x.inv.id)) out.set(x.inv.id, resultadoDoToken(resp.porIdx[k + 1])); });
+        itens.slice(MAX_INV_TON).forEach((x) => { if (pend.has(x.inv.id)) out.set(x.inv.id, { ok: false, texto: `além dos ${MAX_INV_TON} inversores por TON` }); });
+      } catch (x: any) {
+        const msg = x?.response?.message || x?.message || String(x);
+        eventos.push(`${nome}: setpoint não chegou (${msg}) — a TON mantém o último por até ${ttl} s e depois entra no modo seguro`);
+        for (const it of itens) if (pend.has(it.inv.id)) out.set(it.inv.id, { ok: false, texto: `sem resposta da TON (${msg})` });
+      }
+    }
+    return out;
+  }
+
+  private eventosTon(nome: string, tonId: string, r: RespostaCtl, est: EstadoMed, eventos: string[]) {
+    if (r.seg_seguro > 0) {
+      eventos.push(`${nome}: ficou ${r.seg_seguro} s em modo seguro${r.pior === 'S2' ? ' (chegou ao estágio 2)' : ''} sem setpoint válido`);
+    }
+    if (r.seg_manual > 0 && r.modo !== 'M') eventos.push(`${nome}: chave voltou para AUTOMÁTICO depois de ${r.seg_manual} s em MANUAL`);
+    if (r.modo === 'M' && est.modoTon[tonId] !== 'M') eventos.push(`${nome}: chave em MANUAL — inversores a 100 %, FP 1, sem controle`);
+    est.modoTon[tonId] = r.modo ?? '';
+  }
+
+  /** Firmware antigo: setpoint por inversor (sem validade nem modo seguro na TON). */
+  private async enviarLegado(itens: ItemTon[], pend: Map<string, { p_pct?: number; q_pct?: number }>, out: Map<string, { ok: boolean; texto: string }>) {
+    for (const x of itens) {
+      const pe = pend.get(x.inv.id);
+      if (!pe) continue;
+      const falhas: string[] = [];
+      if (pe.p_pct !== undefined) { const r = await this.enviar(x.inv.id, 'sp_limite_pct', pe.p_pct); if (r !== 'ok') falhas.push(`P: ${r}`); }
+      if (pe.q_pct !== undefined) { const r = await this.enviar(x.inv.id, 'sp_q_pct', pe.q_pct); if (r !== 'ok') falhas.push(`Q: ${r}`); }
+      out.set(x.inv.id, falhas.length ? { ok: false, texto: falhas.join('; ') } : { ok: true, texto: 'ok (firmware antigo, sem modo seguro)' });
+    }
+  }
+
+  /**
+   * Nenhum controle ativo: "ctl off" nas TONs armadas (inversores a 100 %, Q 0, sem watchdog — senão a
+   * validade venceria e a UFV cairia no modo seguro à toa). Depois de um restart do backend, pergunta o
+   * modo a cada TON uma vez ("ctl status").
+   */
+  private async desligarTons(ufvs: Ufv[], est: EstadoMed, eventos: string[]) {
+    let alvo = [...est.tonsAtivas];
+    if (!est.offConferido) {
+      est.offConferido = true;
+      for (const tonId of (await this.gruposTon(ufvs, est)).keys()) {
+        if (est.legado.has(tonId) || alvo.includes(tonId)) continue;
+        try {
+          const a = await this.cmd.comandoTonCru(tonId, 'ctl status');
+          const r = lerRespostaCtl(a.status, a.msg);
+          if (r.modo === 'A' || r.modo === 'S1' || r.modo === 'S2') alvo.push(tonId);
+        } catch { /* TON fora do ar: confere de novo no próximo restart */ }
+      }
+    }
+    for (const tonId of alvo) {
+      try {
+        const a = await this.cmd.comandoTonCru(tonId, 'ctl off');
+        const r = lerRespostaCtl(a.status, a.msg);
+        if (r.ok) eventos.push(`TON ${est.alvos?.mapa ? [...est.alvos.mapa.values()].find((x) => x?.tonId === tonId)?.tonNome ?? tonId : tonId}: controle local desligado (inversores a 100 %, Q 0)`);
+        est.tonsAtivas.delete(tonId);
+      } catch (x: any) {
+        eventos.push(`TON ${tonId}: não confirmou o desligamento do controle local (${x?.message ?? x}) — tenta de novo no próximo minuto`);
+      }
+    }
+  }
+
+  /** Troca de modo para nada ativo: desliga o controle local das TONs na hora (não espera o minuto). */
+  private async desligarTonsAgora(medId: string) {
+    const cfg = await this.lerConfig(medId);
+    if (!cfg) return;
+    const est = this.estadoDe(medId);
+    const eventos: string[] = [];
+    await this.desligarTons(cfg.ufvs, est, eventos);
+    if (eventos.length) this.logger.log(`[modos] MED ${medId}: ${eventos.join(' · ')}`);
   }
 
   /** Setpoint pelo caminho já existente (TON → Modbus). Devolve 'ok' ou o motivo da falha. */
@@ -422,6 +621,7 @@ export class ControleMedService implements OnModuleInit {
       validacao: validarCadastro(cfg.params, cfg.ufvs),
       candidatos: pode ? await this.candidatos(unidadeId, plantaId) : [],
       ultimo_ciclo: ult[0] ?? null,
+      tons: Object.entries(this.estados.get(id)?.modoTon ?? {}).map(([ton_id, modo]) => ({ ton_id, modo, texto: MODO_TON_TEXTO[modo] ?? modo })),
       pode_configurar: pode, pode_operar: pode,
     };
   }
@@ -500,6 +700,10 @@ export class ControleMedService implements OnModuleInit {
     this.estados.delete(id);
     this.mapaEm = 0;
     this.logger.log(`[modos] MED ${id}: ${JSON.stringify(modos)} por ${autor}`);
+    const algumAtivo = CONTROLES.some((c) => modos[c] === 'ativo');
+    if (!algumAtivo && CONTROLES.some((c) => atual.modos[c] === 'ativo')) {
+      void this.desligarTonsAgora(id).catch((x) => this.logger.warn(`[modos] MED ${id}: ctl off: ${x?.message ?? x}`));
+    }
     return this.obter(id, user);
   }
 
@@ -540,6 +744,7 @@ export function sanitizarParams(b: any): Params {
     t_validade_lora_s: n(b.t_validade_lora_s, P.t_validade_lora_s, 60, 3600) as number,
     t_estagio2_s: n(b.t_estagio2_s, P.t_estagio2_s, 0, 86400) as number,
     n_retomada: Math.round(n(b.n_retomada, P.n_retomada, 1, 20) as number),
+    rampa_pct_min: n(b.rampa_pct_min, P.rampa_pct_min, 0, 100) as number,
     ssu_err_max_min: n(b.ssu_err_max_min, P.ssu_err_max_min, 0, 60) as number,
     idade_max_ssu_s: n(b.idade_max_ssu_s, P.idade_max_ssu_s, 60, 900) as number,
     idade_max_inv_internet_s: n(b.idade_max_inv_internet_s, P.idade_max_inv_internet_s, 30, 900) as number,
@@ -572,6 +777,8 @@ export function sanitizarUfvs(lista: any): Ufv[] {
       zera_estagio2: u?.zera_estagio2 === true,
       watchdog_nativo: u?.watchdog_nativo === true,
       rota: u?.rota === 'lora' ? 'lora' : 'internet',
+      bi_manual: Math.round(n(u?.bi_manual, 0, 0, 8) as number),
+      bi_invertida: u?.bi_invertida === true,
       inversores,
     } as Ufv;
   });
