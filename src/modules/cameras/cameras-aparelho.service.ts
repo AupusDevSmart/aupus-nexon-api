@@ -24,6 +24,18 @@ export interface ManifestoAgente {
   notas?: string;
 }
 
+/** Tira credenciais de URLs (rtsp://user:senha@, ?token=) antes de mostrar os registros do aparelho. */
+export function semSegredos<T>(v: T): T {
+  if (typeof v === 'string') {
+    return v
+      .replace(/([a-z][a-z0-9+.-]*:\/\/[^:/\s@]+:)[^@\s]+@/gi, '$1***@')
+      .replace(/([?&](?:token|senha|password|pwd)=)[^&\s"']+/gi, '$1***') as T;
+  }
+  if (Array.isArray(v)) return v.map((x) => semSegredos(x)) as T;
+  if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, semSegredos(x)])) as T;
+  return v;
+}
+
 const ROTULO: Record<TipoComandoAparelho, string> = {
   atualizar: 'Atualização',
   reiniciar: 'Reinício',
@@ -105,7 +117,7 @@ export class CamerasAparelhoService {
       tipo: c.tipo,
       estado: expirado ? 'expirado' : c.estado,
       erro: c.erro,
-      resultado: c.resultado ?? null,
+      resultado: semSegredos(c.resultado ?? null),
       criado_em: c.created_at,
       concluido_em: c.concluido_em,
     };

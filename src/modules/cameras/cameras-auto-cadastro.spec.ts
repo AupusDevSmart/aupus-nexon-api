@@ -52,3 +52,17 @@ describe('cadastro automático de câmera de fábrica', () => {
     }
   });
 });
+
+describe('limites do cadastro automático', () => {
+  it('sem fabricante não cadastra; no máximo 4 por vez; para em 64 na usina', async () => {
+    const a = montar();
+    await a.svc.autoCadastrar(agente, [{ ...nova, fabricante: null }]);
+    expect(a.criadas).toHaveLength(0);
+    const b = montar({ total: 0 });
+    await b.svc.autoCadastrar(agente, Array.from({ length: 10 }, (_, i) => ({ ...nova, ip: `192.168.1.${100 + i}`, mac: `aa:${i}` })));
+    expect(b.criadas).toHaveLength(4);
+    const c = montar({ total: 64 });
+    await c.svc.autoCadastrar(agente, [nova]);
+    expect(c.criadas).toHaveLength(0);
+  });
+});
