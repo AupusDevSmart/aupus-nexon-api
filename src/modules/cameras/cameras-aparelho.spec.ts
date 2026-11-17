@@ -57,5 +57,7 @@ describe('registros sem segredos', () => {
     expect(semSegredos({ linhas: ['rtsp://admin:S3nh4@192.168.1.13:554/x', 'GET /hls?token=abc.def&x=1'] })).toEqual({
       linhas: ['rtsp://admin:***@192.168.1.13:554/x', 'GET /hls?token=***&x=1'],
     });
+    const r = semSegredos('rtsp://admin:p@ss@w0rd@10.0.0.1/x Authorization: Bearer abc123 ?api_key=zz');
+    expect(r).not.toMatch(/p@ss|w0rd|abc123|zz/);
   });
 });
