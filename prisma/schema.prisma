@@ -3716,6 +3716,8 @@ model cameras_unidade_config {
   sirene_ponto_id         String?   @db.VarChar(26)
   abrir_chamado           Boolean   @default(false)
   notificar_emails        String[]  @default([])
+  /// NEXON-108: câmera de fábrica achada na rede entra sozinha (senha gerada e gravada pelo aparelho)
+  auto_cadastrar          Boolean   @default(true)
   updated_at              DateTime  @default(now()) @updatedAt @db.Timestamp(0)
   updated_por_id          String?   @db.VarChar(26)
 }
@@ -3723,7 +3725,8 @@ model cameras_unidade_config {
 /// Pedido da pessoa para o agente (foto agora). Entregue no GET /cameras/agente/comandos.
 model cameras_comandos {
   id                String          @id @db.VarChar(26)
-  camera_id         String          @db.VarChar(26)
+  /// null = comando do aparelho (atualizar, reiniciar, logs)
+  camera_id         String?         @db.VarChar(26)
   agente_id         String          @db.VarChar(26)
   tipo              String          @db.VarChar(24)
   parametros        Json            @default("{}")
@@ -3731,11 +3734,13 @@ model cameras_comandos {
   estado            String          @default("pendente") @db.VarChar(12)
   erro              String?         @db.VarChar(500)
   evento_id         String?         @db.VarChar(26)
+  /// resposta do aparelho (ex.: { linhas: [...] } no comando logs)
+  resultado         Json?
   solicitado_por_id String?         @db.VarChar(26)
   created_at        DateTime        @default(now()) @db.Timestamp(0)
   entregue_em       DateTime?       @db.Timestamp(0)
   concluido_em      DateTime?       @db.Timestamp(0)
-  camera            cameras         @relation(fields: [camera_id], references: [id], onDelete: Cascade)
+  camera            cameras?        @relation(fields: [camera_id], references: [id], onDelete: Cascade)
   agente            cameras_agentes @relation(fields: [agente_id], references: [id], onDelete: Cascade)
 
   @@index([agente_id, estado])

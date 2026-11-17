@@ -20,6 +20,7 @@ import { CurrentUser, Public } from '@/core';
 import { Cliente, type ClienteInfo } from '@/core/common/cliente-info';
 import { CamerasAgenteService } from './cameras-agente.service';
 import { CamerasEventosService } from './cameras-eventos.service';
+import { CamerasAparelhoService } from './cameras-aparelho.service';
 import { CamerasTrechosService } from './cameras-trechos.service';
 import { CamerasService } from './cameras.service';
 import type { Usuario } from './cameras.tipos';
@@ -32,6 +33,7 @@ import {
   EditarCameraDto,
   ListarAgentesDto,
   ListarCamerasDto,
+  ComandoAparelhoDto,
   ExcluirEventosDto,
   ListarEventosDto,
   MarcarLidosDto,
@@ -54,6 +56,7 @@ export class CamerasController {
     private readonly eventos: CamerasEventosService,
     private readonly agentes: CamerasAgenteService,
     private readonly trechos: CamerasTrechosService,
+    private readonly aparelho: CamerasAparelhoService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -156,6 +159,24 @@ export class CamerasController {
   // Agentes (cadastroTecnico)
   // ---------------------------------------------------------------------------
 
+  @Get('atualizacao')
+  @ApiOperation({ summary: 'Versão do programa do aparelho publicada (para atualizar pela web)' })
+  atualizacaoDisponivel() {
+    return this.aparelho.disponivel();
+  }
+
+  @Post('agentes/:id/comandos')
+  @ApiOperation({ summary: 'Aparelho pela web: { tipo: atualizar | reiniciar (admin) | logs }. Audit camera_agente_comando' })
+  comandoAparelho(@Param('id') id: string, @Body() dto: ComandoAparelhoDto, @CurrentUser() user?: Usuario, @Cliente() cliente?: ClienteInfo) {
+    return this.aparelho.pedir(id, dto.tipo, user, cliente);
+  }
+
+  @Get('agentes/:id/comandos/:comandoId')
+  @ApiOperation({ summary: 'Estado do comando do aparelho (logs: resultado.linhas)' })
+  estadoComandoAparelho(@Param('id') id: string, @Param('comandoId') comandoId: string, @CurrentUser() user?: Usuario) {
+    return this.aparelho.estado(id, comandoId, user);
+  }
+
   @Get('agentes')
   listarAgentes(@Query() q: ListarAgentesDto, @CurrentUser() user?: Usuario) {
     return this.agentes.listar(q, user);
@@ -236,6 +257,12 @@ export class CamerasController {
   @Post()
   criar(@Body() dto: CriarCameraDto, @CurrentUser() user?: Usuario, @Cliente() cliente?: ClienteInfo) {
     return this.cameras.criar(dto, user, cliente);
+  }
+
+  @Get(':id/senha')
+  @ApiOperation({ summary: 'Só admin: senha da câmera (para entrar na página dela na rede local). Audit camera_senha_vista' })
+  senha(@Param('id') id: string, @CurrentUser() user?: Usuario, @Cliente() cliente?: ClienteInfo) {
+    return this.cameras.senha(id, user, cliente);
   }
 
   @Get(':id')

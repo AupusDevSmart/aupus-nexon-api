@@ -309,6 +309,11 @@ export class ConfigUnidadeDto {
   @IsBoolean()
   abrir_chamado?: boolean;
 
+  /** Câmera de fábrica achada pelo aparelho entra sozinha (padrão: sim). */
+  @IsOptional()
+  @IsBoolean()
+  auto_cadastrar?: boolean;
+
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(20)
@@ -376,6 +381,11 @@ export class ListarEventosDto {
   @Min(1)
   @Max(100)
   limit?: number = 20;
+}
+
+export class ComandoAparelhoDto {
+  @IsIn(['atualizar', 'reiniciar', 'logs'])
+  tipo!: 'atualizar' | 'reiniciar' | 'logs';
 }
 
 export class ExcluirEventosDto {

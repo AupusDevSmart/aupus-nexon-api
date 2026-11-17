@@ -300,6 +300,22 @@ export class CamerasService {
     await this.storage.servir(req, res, this.storage.caminhoMiniatura(c.id), 'image/jpeg', 'private, max-age=30');
   }
 
+  /** Só admin: devolve a senha decifrada da câmera e registra quem viu (camera_senha_vista). */
+  async senha(id: string, user?: Usuario, cliente?: ClienteInfo) {
+    if (!user || papelCanonico(user.role) !== 'admin') throw new ForbiddenException('Só o administrador vê a senha da câmera');
+    const c = await this.buscar(id, user);
+    const ctx = await this.auditoria.contextoUnidade(c.unidade_id);
+    await this.auditoria.registrar('camera_senha_vista', {
+      mensagem: `Senha da câmera "${c.nome}" (${c.ip}) vista — ${ctx.unidade?.nome ?? c.unidade_id}${ctx.planta ? ` (${ctx.planta.nome})` : ''}`,
+      user,
+      cliente,
+      unidade: ctx.unidade,
+      planta: ctx.planta,
+      camera: { id: c.id, nome: c.nome, ip: c.ip, unidade_id: c.unidade_id },
+    });
+    return { usuario: c.usuario, senha: this.midia.decifrar(c.senha) };
+  }
+
   /**
    * Marca a câmera como assistida (90 s) e devolve o HLS com token de mídia do usuário.
    * `estado` vem do servidor de mídia (o vídeo já chegou?), não do último heartbeat (até 30 s atrasado):
@@ -437,7 +453,7 @@ export class CamerasService {
     await this.auditoria.registrar('camera_config', {
       mensagem:
         `Configuração das câmeras salva — ${ctx.unidade.nome} (${ctx.planta.nome}): modo ${depois.armamento_modo}, ` +
-        `refletor ${simNao(depois.refletor_ponto_id)}, sirene ${simNao(depois.sirene_ponto_id)}, chamado ${simNao(depois.abrir_chamado)}, ` +
+        `refletor ${simNao(depois.refletor_ponto_id)}, sirene ${simNao(depois.sirene_ponto_id)}, chamado ${simNao(depois.abrir_chamado)}, cadastro automático ${simNao(depois.auto_cadastrar)}, ` +
         `${depois.notificar_emails.length} e-mail(s)`,
       user,
       cliente,
