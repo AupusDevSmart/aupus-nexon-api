@@ -66,3 +66,20 @@ describe('limites do cadastro automático', () => {
     expect(c.criadas).toHaveLength(0);
   });
 });
+
+describe('câmera com a mesma senha de outra da usina', () => {
+  it('copia usuário e senha cifrada da câmera de referência e audita a origem', async () => {
+    const m = montar({ total: 1 });
+    m.prisma.cameras.findFirst = jest
+      .fn()
+      .mockResolvedValueOnce({ id: 'c1', nome: 'Portão', usuario: 'admin', senha: 'cif:X', agente_id: 'ag1' }) // cameraDoAgente
+      .mockResolvedValueOnce(null); // não existe ainda
+    m.prisma.cameras_descobertas = {
+      findFirst: jest.fn().mockResolvedValue({ ip: '192.168.1.13', mac: 'CC:81:30:2A:23:32', fabricante: 'intelbras', modelo: 'VIPC', serial: 'S', porta_http: 80, porta_rtsp: null }),
+    };
+    const r = await m.svc.senhaConhecida(agente, '192.168.1.13', 'c1');
+    expect(r.cadastrada).toBe(true);
+    expect(m.criadas[0]).toMatchObject({ ip: '192.168.1.13', usuario: 'admin', senha: 'cif:X', nome: 'Câmera 2', mac: 'cc:81:30:2a:23:32' });
+    expect(m.auditoria.registrar.mock.calls[0][1].extra).toMatchObject({ origem: 'senha_conhecida', senha_de: { id: 'c1' } });
+  });
+});
