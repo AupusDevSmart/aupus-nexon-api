@@ -61,7 +61,7 @@ export function avaliarRestricoes(ctx: ContextoComando): Bloqueio | null {
     };
   }
   if (ctx.remoto !== undefined && ehPartidaPivo(ctx.nomePonto)) {
-    if (ctx.remoto === 1) return { code: 'COMANDO_BLOQUEADO_REMOTO', message: 'Pivô em REMOTO na chave do painel: a TON não liga. Passe para LOCAL.' };
+    if (ctx.remoto === 1) return { code: 'COMANDO_BLOQUEADO_REMOTO', message: 'Pivô travado no LOCAL (chave Local/Remoto do painel): o NexON não liga. Ligue pelo painel ou mude a chave.' };
     if (ctx.remoto === null) return { code: 'COMANDO_BLOQUEADO_REMOTO', message: 'Sem leitura da chave Local/Remoto do pivô: não dá para confirmar que está em LOCAL.' };
   }
   if (ehComandoDePartida(ctx.nomePonto) && bloqueioVigente(ctx.bloqueioPonta, ctx.agora)) {

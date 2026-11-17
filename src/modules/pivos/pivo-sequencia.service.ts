@@ -810,7 +810,7 @@ export class PivoSequenciaService implements OnModuleInit {
   private async travaRemoto(pts: { st: Partial<Record<string, MapaBi>> }): Promise<string | null> {
     if (!pts.st.remoto) return null;
     const v = await this.lerStatus(pts.st.remoto);
-    if (v === 1) return 'Pivô em REMOTO na chave do painel: a TON não liga o pivô. Passe a chave para LOCAL para ligar pelo NexON.';
+    if (v === 1) return 'Pivô travado no LOCAL (chave Local/Remoto do painel, BI07): o NexON não liga. Ligue pelo painel ou mude a chave.';
     if (v === null) return 'Sem leitura da chave Local/Remoto (BI07): não dá para confirmar que o pivô está em LOCAL.';
     return null;
   }

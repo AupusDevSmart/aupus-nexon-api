@@ -731,8 +731,8 @@ describe('chave Local/Remoto (ponto Remoto, BI07)', () => {
     const { svc, entradas } = montar(PTS, {}, { 'T:3': 0, 'T:4': 0, 'T:7': 1 });
     svc.irrigacaoAtiva = async () => null;
     const pts = await svc.pontos('PIV');
-    expect(await svc.travaLigar('PIV', pts)).toMatch(/REMOTO/);
-    expect(await svc.travaReiniciar('PIV', pts)).toMatch(/REMOTO/);
+    expect(await svc.travaLigar('PIV', pts)).toMatch(/travado no LOCAL/);
+    expect(await svc.travaReiniciar('PIV', pts)).toMatch(/travado no LOCAL/);
     entradas['T:7'] = null;
     expect(await svc.travaLigar('PIV', pts)).toMatch(/Sem leitura da chave/);
     entradas['T:7'] = 0;
