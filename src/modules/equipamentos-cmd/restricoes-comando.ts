@@ -14,7 +14,7 @@ import { isGlobal, Papel } from '../../core/modules/auth/papeis';
  *
  * Ordem: permissão da instalação → janela do operador → horário de ponta.
  */
-export type CodigoBloqueio = 'SEM_PERMISSAO_UNIDADE' | 'COMANDO_FORA_JANELA' | 'COMANDO_BLOQUEADO_PONTA';
+export type CodigoBloqueio = 'SEM_PERMISSAO_UNIDADE' | 'COMANDO_FORA_JANELA' | 'COMANDO_BLOQUEADO_PONTA' | 'COMANDO_BLOQUEADO_REMOTO';
 
 export interface Bloqueio {
   code: CodigoBloqueio;
@@ -35,6 +35,18 @@ export interface ContextoComando {
   /** Nome do ponto acionado ("Ligar pivô", "Parar"...). */
   nomePonto: string;
   agora: MomentoLocal;
+  /**
+   * Chave Local/Remoto do pivô (ponto de status "Remoto", BI07): 1 = REMOTO, 0 = LOCAL,
+   * null = sem leitura, undefined = equipamento sem o ponto ligado a uma BI (sem trava).
+   */
+  remoto?: 0 | 1 | null;
+}
+
+/** Comando que PÕE o pivô para funcionar (bomba, giro, ligar) — o que o REMOTO bloqueia. */
+export function ehPartidaPivo(nomePonto: unknown): boolean {
+  const n = String(nomePonto ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  if (/deslig|parar|stop/.test(n)) return false;
+  return /bomb|girar|ligar/.test(n) || ehComandoDePartida(nomePonto);
 }
 
 export function avaliarRestricoes(ctx: ContextoComando): Bloqueio | null {
@@ -47,6 +59,10 @@ export function avaliarRestricoes(ctx: ContextoComando): Bloqueio | null {
       code: 'COMANDO_FORA_JANELA',
       message: `Fora da janela de comando do operador (${j.inicio}–${j.fim})`,
     };
+  }
+  if (ctx.remoto !== undefined && ehPartidaPivo(ctx.nomePonto)) {
+    if (ctx.remoto === 1) return { code: 'COMANDO_BLOQUEADO_REMOTO', message: 'Pivô em REMOTO na chave do painel: a TON não liga. Passe para LOCAL.' };
+    if (ctx.remoto === null) return { code: 'COMANDO_BLOQUEADO_REMOTO', message: 'Sem leitura da chave Local/Remoto do pivô: não dá para confirmar que está em LOCAL.' };
   }
   if (ehComandoDePartida(ctx.nomePonto) && bloqueioVigente(ctx.bloqueioPonta, ctx.agora)) {
     return {

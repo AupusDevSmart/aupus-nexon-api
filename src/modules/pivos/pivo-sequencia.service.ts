@@ -88,7 +88,7 @@ const SEQ_PADRAO: SequenciaCfg = { pressurizacao_s: 60, confirma_giro_s: 30, con
 const norm = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 
 type PapelComando = 'ligar' | 'valvula' | 'canhao' | 'percentimetro' | 'direita' | 'esquerda' | 'desligar';
-type PapelStatus = 'ligado' | 'canhao' | 'permissivo' | 'pressao' | 'tensao' | 'seguranca' | 'direita' | 'esquerda' | 'desligado' | 'erro';
+type PapelStatus = 'remoto' | 'ligado' | 'canhao' | 'permissivo' | 'pressao' | 'tensao' | 'seguranca' | 'direita' | 'esquerda' | 'desligado' | 'erro';
 type MapaBi = { ton_id: string; bi: number; inv: boolean };
 /** "sem irrigar: 346°–162°, 10°–20°" — o complemento das faixas ligadas (o que o operador marcou). */
 export function textoTrechosSemIrrigar(ligadas: FaixaCanhao[]): string {
@@ -119,6 +119,9 @@ const PAPEIS_COMANDO: Record<PapelComando, RegExp> = {
   desligar: /deslig|parar|stop/,
 };
 const PAPEIS_STATUS: Record<PapelStatus, RegExp> = {
+  // Remoto (BI07 do padrão): chave Local/Remoto do painel — continuidade (1) = REMOTO. Em remoto a
+  // TON/NexON NÃO liga o pivô; irrigação em curso segue normal e Desligar continua valendo (17/11).
+  remoto: /remot/,
   // Ligado: retorno do Ligar (bomba ligada)
   ligado: /^(?!.*(deslig|canha)).*(ligad|bomba)/,
   // Canhao_ligado: estado do canhão final
@@ -558,6 +561,8 @@ export class PivoSequenciaService implements OnModuleInit {
         lido_em: await this.lidoEmPivo(pts),
         // Chave seletora em modo TON (NEXON-103): null = sem leitura; tem_modo_ton false = pivô sem a chave
         tem_modo_ton: !!pts.modoTon,
+        // Chave Local/Remoto (BI07, 17/11): valor 1 = REMOTO (TON não liga), 0 = LOCAL, null = sem leitura
+        remoto: { tem: !!pts.st.remoto, valor: await this.lerStatus(pts.st.remoto) },
         modo_ton: await this.lerStatus(pts.modoTon ?? undefined),
         // Sequência na TON (Fase 3): estado/passo/falha/ângulo como a TON reportou (null = TON sem sequência local)
         ton_local: await this.tonLocal(pts).catch(() => null),
@@ -797,8 +802,23 @@ export class PivoSequenciaService implements OnModuleInit {
     return { estado: 'desconhecido' as const, sentido: null, erro: st.erro };
   }
 
+  /**
+   * Chave Local/Remoto (ponto Remoto, BI07): em REMOTO a TON não liga o pivô. Sem leitura da
+   * chave também recusa (fail-closed). Pivô sem o ponto ligado a uma BI = sem trava.
+   * Só vale para LIGAR: o que já está irrigando continua e o Desligar sempre passa.
+   */
+  private async travaRemoto(pts: { st: Partial<Record<string, MapaBi>> }): Promise<string | null> {
+    if (!pts.st.remoto) return null;
+    const v = await this.lerStatus(pts.st.remoto);
+    if (v === 1) return 'Pivô em REMOTO na chave do painel: a TON não liga o pivô. Passe a chave para LOCAL para ligar pelo NexON.';
+    if (v === null) return 'Sem leitura da chave Local/Remoto (BI07): não dá para confirmar que o pivô está em LOCAL.';
+    return null;
+  }
+
   /** null = pode ligar; senão o motivo da recusa. */
   private async travaLigar(id: string, pts: { st: Partial<Record<string, { ton_id: string; bi: number; inv: boolean }>> }): Promise<string | null> {
+    const rem = await this.travaRemoto(pts);
+    if (rem) return rem;
     const t = await this.estadoTrava(pts);
     if (t.erro === 1) return 'Pivô sinalizando ERRO — verifique no painel antes de ligar.';
     if (t.estado === 'girando') return `O pivô já está girando para a ${t.sentido}. Desligue antes de ligar de novo ou inverter o sentido.`;
@@ -818,6 +838,9 @@ export class PivoSequenciaService implements OnModuleInit {
    * irrigação que o NexON comandou em curso.
    */
   private async travaReiniciar(id: string, pts: { st: Partial<Record<string, { ton_id: string; bi: number; inv: boolean }>> }): Promise<string | null> {
+    // Reiniciar = desligar e LIGAR de novo pela TON: em remoto não pode (Desligar sozinho pode).
+    const rem = await this.travaRemoto(pts);
+    if (rem) return rem;
     const t = await this.estadoTrava(pts);
     if (t.erro === 1) return 'Pivô sinalizando ERRO — verifique no painel antes de reiniciar.';
     if (t.estado === 'desconhecido') return 'Sem leitura do status do pivô (entradas da TON): não dá para confirmar que está ligado.';
@@ -1158,7 +1181,7 @@ export class PivoSequenciaService implements OnModuleInit {
     const atual = await this.lerStatus(pts.st.canhao);
     if (atual === null) return 'sem_leitura';
     if (atual === alvo) return 'ja';
-    await this.cmd.acionarPonto(id, pts.cmd.canhao, user, false, undefined, cliente);
+    await this.cmd.acionarPonto(id, pts.cmd.canhao, user, false, undefined, cliente, undefined, true);
     const ok = await this.esperar(async () => (await this.lerStatus(pts.st.canhao)) === alvo, segundos, ctl);
     return ok ? 'ok' : 'nao_confirmou';
   }
@@ -1382,12 +1405,12 @@ export class PivoSequenciaService implements OnModuleInit {
           // bomba desliga do mesmo jeito. Só neste caso: num pivô que pode estar girando, um
           // Desligar sem resposta continua abortando (desligar a bomba o deixaria a seco).
           paradaEnviada = true;
-          const foi = await this.cmd.acionarPonto(id, pts.cmd.desligar, user, false, undefined, cliente).then(() => true).catch(() => false);
+          const foi = await this.cmd.acionarPonto(id, pts.cmd.desligar, user, false, undefined, cliente, undefined, true).then(() => true).catch(() => false);
           desligarPivoEnviado = foi;
           await passo('pivo', foi ? 'Comando Desligar enviado ao pivô (já estava parado)' : 'Pivô já parado — o Desligar dele ficou sem resposta; seguindo para a bomba', foi ? true : null);
           parou = true;
         } else if (pts.cmd.desligar) {
-          await mandarParada(() => this.cmd.acionarPonto(id, pts.cmd.desligar!, user, false, undefined, cliente));
+          await mandarParada(() => this.cmd.acionarPonto(id, pts.cmd.desligar!, user, false, undefined, cliente, undefined, true));
           desligarPivoEnviado = true;
           await passo('pivo', 'Comando Desligar enviado ao pivô', true);
           // Mesma regra das travas: parado = Desligado = 1 ou todos os Girando LIGADOS em 0
@@ -1572,7 +1595,7 @@ export class PivoSequenciaService implements OnModuleInit {
           await this.saidaMantida(id, pts.cmd[sentido], true, `Girar ${sentido}`, user, cliente);
           await passo('pivo', `Girar ${sentido} ligado (saída mantida)`, true);
         } else {
-          await this.cmd.acionarPonto(id, pts.cmd[sentido]!, user, false, undefined, cliente);
+          await this.cmd.acionarPonto(id, pts.cmd[sentido]!, user, false, undefined, cliente, undefined, true);
           await passo('pivo', `Comando Girar ${sentido} enviado ao pivô`, true);
         }
         const girou = await this.esperar(async () => {
@@ -1657,7 +1680,7 @@ export class PivoSequenciaService implements OnModuleInit {
             if (ptsR.cmd[k]) await this.saidaMantida(id, ptsR.cmd[k], false, `Girar ${k} desligado`, user, cliente).catch(() => { aceita = false; });
           }
         } else if (ptsR?.cmd.desligar) {
-          aceita = await this.cmd.acionarPonto(id, ptsR.cmd.desligar, user, false, undefined, cliente).then(() => true).catch(() => false);
+          aceita = await this.cmd.acionarPonto(id, ptsR.cmd.desligar, user, false, undefined, cliente, undefined, true).then(() => true).catch(() => false);
         }
         const t = ptsR ? await this.estadoTrava(ptsR).catch(() => null) : null;
         const parado = t?.estado === 'parado' || (aceita && !!t && t.estado !== 'girando');
@@ -1685,7 +1708,7 @@ export class PivoSequenciaService implements OnModuleInit {
           }
           await passo('pivo', 'Giro não confirmado — saídas de giro desligadas (estado seguro)', true).catch(() => undefined);
         } else if (ptsF?.cmd.desligar) {
-          await this.cmd.acionarPonto(id, ptsF.cmd.desligar, user, false, undefined, cliente)
+          await this.cmd.acionarPonto(id, ptsF.cmd.desligar, user, false, undefined, cliente, undefined, true)
             .then(() => { desligarEnviado = true; return passo('pivo', 'Giro não confirmado — comando Desligar enviado ao pivô (estado seguro)', true); })
             .catch((x) => passo('pivo', `Giro não confirmado e o Desligar falhou: ${msgErro(x)}`, false))
             .catch(() => undefined);
@@ -1768,7 +1791,7 @@ export class PivoSequenciaService implements OnModuleInit {
           await passo('bomba', 'Sem o ponto Desligar ligado a uma BO — a bomba não foi desligada', false);
           return;
         }
-        await this.cmd.acionarPonto(dono, pd, user, false, undefined, cliente);
+        await this.cmd.acionarPonto(dono, pd, user, false, undefined, cliente, undefined, true);
         await passo('bomba', dono === id ? 'Comando Desligar enviado (desliga a bomba)' : 'Comando Desligar enviado ao pivô dono da bomba', true);
       }
       if (b.bi_confirma) {
@@ -1821,7 +1844,7 @@ export class PivoSequenciaService implements OnModuleInit {
         // ordem importa: "anti-horário" antes de "horário"
         for (const k of ['valvula', 'canhao', 'ligar', 'percentimetro', 'esquerda', 'direita', 'desligar'] as const) if (PAPEIS_COMANDO[k].test(n)) { if (!cmd[k]) cmd[k] = r.id; break; }
       } else if (r.tipo === 'status' && r.ton_id && r.bi) {
-        for (const k of ['canhao', 'ligado', 'permissivo', 'pressao', 'tensao', 'seguranca', 'erro', 'desligado', 'esquerda', 'direita'] as const) if (PAPEIS_STATUS[k].test(n)) { if (!st[k]) st[k] = { ton_id: r.ton_id, bi: r.bi, inv: !!r.inv }; break; }
+        for (const k of ['remoto', 'canhao', 'ligado', 'permissivo', 'pressao', 'tensao', 'seguranca', 'erro', 'desligado', 'esquerda', 'direita'] as const) if (PAPEIS_STATUS[k].test(n)) { if (!st[k]) st[k] = { ton_id: r.ton_id, bi: r.bi, inv: !!r.inv }; break; }
       }
     }
     return { cmd, st, modoTon };

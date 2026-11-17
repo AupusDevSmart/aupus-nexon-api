@@ -712,3 +712,37 @@ describe('irrigando parado sem o ponto Percentímetro (só a bomba)', () => {
     });
   });
 });
+
+describe('chave Local/Remoto (ponto Remoto, BI07)', () => {
+  const PTS: Ponto[] = [
+    { id: 'p-dir', tipo: 'comando', nome: 'Girar_direita' },
+    { id: 'p-desl', tipo: 'comando', nome: 'Desligar' },
+    { id: 's-dir', tipo: 'status', nome: 'Girando_direita', ton_id: 'T', bi: 3 },
+    { id: 's-esq', tipo: 'status', nome: 'Girando_esquerda', ton_id: 'T', bi: 4 },
+    { id: 's-rem', tipo: 'status', nome: 'Remoto', ton_id: 'T', bi: 7 },
+  ];
+  it('Remoto vira o papel "remoto" (não casa com outro status)', async () => {
+    const { svc } = montar(PTS, {}, {});
+    const pts = await svc.pontos('PIV');
+    expect(pts.st.remoto).toEqual({ ton_id: 'T', bi: 7, inv: false });
+    expect(pts.st.ligado).toBeUndefined();
+  });
+  it('REMOTO ou sem leitura recusa ligar e reiniciar; LOCAL libera', async () => {
+    const { svc, entradas } = montar(PTS, {}, { 'T:3': 0, 'T:4': 0, 'T:7': 1 });
+    svc.irrigacaoAtiva = async () => null;
+    const pts = await svc.pontos('PIV');
+    expect(await svc.travaLigar('PIV', pts)).toMatch(/REMOTO/);
+    expect(await svc.travaReiniciar('PIV', pts)).toMatch(/REMOTO/);
+    entradas['T:7'] = null;
+    expect(await svc.travaLigar('PIV', pts)).toMatch(/Sem leitura da chave/);
+    entradas['T:7'] = 0;
+    expect(await svc.travaLigar('PIV', pts)).toBeNull();
+  });
+  it('REMOTO não impede desligar o que está irrigando', async () => {
+    const { svc } = montar(PTS, {}, { 'T:3': 1, 'T:4': 0, 'T:7': 1 });
+    svc.irrigacaoAtiva = async () => ({ id: 'x' });
+    svc.rodando = new Map();
+    const pts = await svc.pontos('PIV');
+    expect(await svc.travaDesligar('PIV', pts, { bombeamento: null })).toBeNull();
+  });
+});

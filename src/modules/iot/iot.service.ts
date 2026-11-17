@@ -872,6 +872,7 @@ export class IoTService {
    * Pivô ligado a uma TON no diagrama: I/O PADRÃO da sequência local (docs/IOT-PIVO-TON-LOCAL.md)
    *   BO1 Bombeamento · BO2 Valvula · BO3 Girar_direita · BO4 Girar_esquerda · BO5 Percentimetro · BO6 Canhao
    *   BI1 Pressao_ok  · BI2 Tensao_ok · BI3 Girando_direita · BI4 Girando_esquerda · BI5 Seguranca · BI6 Canhao_ligado
+   *   BI7 Remoto (chave Local/Remoto; só TON com 7+ entradas)
    * Só preenche: ponto que já tem BO/BI (nesta ou noutra TON) fica onde está, e BO/BI da TON
    * ocupada por outro ponto não é tocada — o usuário altera no Configurar I/O da TON.
    * Devolve as TONs alteradas (o espelho iot_vinculos é refeito depois do commit).
@@ -886,6 +887,7 @@ export class IoTService {
       { tipo: 'status', nome: 'Pressao_ok', canal: 1 }, { tipo: 'status', nome: 'Tensao_ok', canal: 2 },
       { tipo: 'status', nome: 'Girando_direita', canal: 3 }, { tipo: 'status', nome: 'Girando_esquerda', canal: 4 },
       { tipo: 'status', nome: 'Seguranca', canal: 5 }, { tipo: 'status', nome: 'Canhao_ligado', canal: 6 },
+      { tipo: 'status', nome: 'Remoto', canal: 7 },   // chave Local/Remoto: continuidade = REMOTO (TON não liga)
     ];
     const alteradas = new Set<string>();
     for (const piv of comps.filter((c) => String(c?.type ?? '').toLowerCase() === 'pivo')) {

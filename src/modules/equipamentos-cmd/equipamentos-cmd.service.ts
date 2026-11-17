@@ -297,6 +297,8 @@ export class EquipamentosCmdService {
     testMac?: string,
     cliente?: ClienteInfo,
     ligar?: boolean,
+    /** Chamado pela sequência do pivô já autorizada (travaLigar): a chave Remoto não interrompe o que está em curso. */
+    daSequenciaPivo = false,
   ): Promise<AcionarPontoResultDto> {
     const eqId = equipamentoId.trim();
     const pId = pontoId.trim();
@@ -366,7 +368,7 @@ export class EquipamentosCmdService {
     // operador e bloqueio de ponta do pivô. Bancada (sim) não passa por aqui.
     // Bloqueio → 403 com error.code e linha 'bloqueado' na trilha.
     if (!sim) {
-      const bloqueio = await this.verificarRestricoes(eqId, ponto.nome, user);
+      const bloqueio = await this.verificarRestricoes(eqId, ponto.nome, user, !daSequenciaPivo);
       if (bloqueio) {
         await this.registrarComando(
           {
@@ -817,7 +819,7 @@ export class EquipamentosCmdService {
    * Carrega o contexto e avalia as restrições do acionar. Tabelas/colunas do SQL
    * v2 ausentes → sem restrição (comportamento v1).
    */
-  private async verificarRestricoes(equipamentoId: string, nomePonto: string, user?: Autor) {
+  private async verificarRestricoes(equipamentoId: string, nomePonto: string, user?: Autor, checarRemoto = false) {
     const userId = user?.id?.trim();
     let comandarNaUnidade: boolean | null = null;
     let janelaOperador: unknown = null;
@@ -860,10 +862,28 @@ export class EquipamentosCmdService {
       this.logger.debug?.(`[restricoes] pivo_config indisponível: ${(e as Error).message}`);
     }
 
+    // Chave Local/Remoto do pivô (ponto "Remoto" numa BI, 17/11): em REMOTO a TON não dá partida.
+    let remoto: 0 | 1 | null | undefined;
+    if (checarRemoto) try {
+      const rows = await this.prisma.$queryRaw<Array<{ ton_id: string; bi: number; inv: boolean }>>`
+        SELECT TRIM(b.ton_id) AS ton_id, b.bi_numero AS bi, b.invertido AS inv
+        FROM equipamento_pontos p JOIN ton_bi b ON b.equipamento_ponto_id = p.id AND b.deleted_at IS NULL AND b.ativo
+        WHERE p.equipamento_id = ${equipamentoId}::bpchar AND p.tipo = 'status' AND p.deleted_at IS NULL AND p.ativo
+          AND lower(p.nome) LIKE '%remot%'
+        ORDER BY b.updated_at DESC NULLS LAST LIMIT 1`;
+      if (rows[0]) {
+        const v = (await this.lerEntradaTon(rows[0].ton_id, rows[0].bi).catch(() => ({ valor: null }))).valor;
+        remoto = v === null ? null : ((rows[0].inv ? 1 - v : v) as 0 | 1);
+      }
+    } catch (e) {
+      this.logger.debug?.(`[restricoes] chave remoto indisponível: ${(e as Error).message}`);
+    }
+
     return avaliarRestricoes({
       comandarNaUnidade,
       janelaOperador,
       bloqueioPonta,
+      remoto,
       nomePonto,
       agora: momentoEmSaoPaulo(),
     });

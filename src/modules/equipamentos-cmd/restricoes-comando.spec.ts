@@ -79,3 +79,22 @@ describe('ehMedidor', () => {
     expect(ehMedidor(null)).toBe(false);
   });
 });
+
+describe('chave Local/Remoto do pivô (BI07)', () => {
+  const sem = { ...base, agora: { diaSemana: 2, minutos: 10 * 60 } };
+  it('REMOTO bloqueia a partida (Bombeamento, Girar, Ligar)', () => {
+    for (const nomePonto of ['Bombeamento', 'Girar_direita', 'Girar_esquerda', 'Ligar']) {
+      expect(avaliarRestricoes({ ...sem, nomePonto, remoto: 1 })?.code).toBe('COMANDO_BLOQUEADO_REMOTO');
+    }
+  });
+  it('sem leitura da chave também bloqueia a partida (fail-closed)', () => {
+    expect(avaliarRestricoes({ ...sem, nomePonto: 'Girar_direita', remoto: null })?.code).toBe('COMANDO_BLOQUEADO_REMOTO');
+  });
+  it('Desligar, Canhão e Percentímetro passam em REMOTO', () => {
+    for (const nomePonto of ['Desligar', 'Canhao', 'Percentimetro']) expect(avaliarRestricoes({ ...sem, nomePonto, remoto: 1 })).toBeNull();
+  });
+  it('LOCAL ou pivô sem o ponto Remoto: libera', () => {
+    expect(avaliarRestricoes({ ...sem, nomePonto: 'Girar_direita', remoto: 0 })).toBeNull();
+    expect(avaliarRestricoes({ ...sem, nomePonto: 'Girar_direita' })).toBeNull();
+  });
+});
