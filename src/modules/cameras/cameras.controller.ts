@@ -22,6 +22,7 @@ import { CamerasAgenteService } from './cameras-agente.service';
 import { CamerasEventosService } from './cameras-eventos.service';
 import { CamerasAparelhoService } from './cameras-aparelho.service';
 import { CamerasInstaladorService } from './cameras-instalador.service';
+import { CamerasInstalacoesService } from './cameras-instalacoes.service';
 import { CamerasTrechosService } from './cameras-trechos.service';
 import { CamerasService } from './cameras.service';
 import type { Usuario } from './cameras.tipos';
@@ -39,6 +40,7 @@ import {
   ListarEventosDto,
   MarcarLidosDto,
   PedirTrechoDto,
+  RelatoInstalacaoDto,
 } from './dto/cameras.dto';
 import { UsuarioOuTokenMidiaGuard } from './guards/usuario-ou-token-midia.guard';
 
@@ -59,6 +61,7 @@ export class CamerasController {
     private readonly trechos: CamerasTrechosService,
     private readonly aparelho: CamerasAparelhoService,
     private readonly instaladorSvc: CamerasInstaladorService,
+    private readonly instalacoes: CamerasInstalacoesService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -181,6 +184,26 @@ export class CamerasController {
   @ApiOperation({ summary: 'Script do PC que grava o SD do Raspberry pelo cabo USB-C (JWT ou ?token=)' })
   instaladorScript(@CurrentUser() user: Usuario, @Req() req: Request, @Res() res: Response) {
     return this.instaladorSvc.script(user, req, res);
+  }
+
+  @Public()
+  @UseGuards(UsuarioOuTokenMidiaGuard)
+  @Post('instalador/relato')
+  @ApiOperation({ summary: 'Andamento e erros do instalador do computador (JWT ou ?token=). Audit camera_instalacao no erro e no fim' })
+  relatoInstalacao(@CurrentUser() user: Usuario, @Body() dto: RelatoInstalacaoDto, @Cliente() cliente?: ClienteInfo) {
+    return this.instalacoes.relatar(user, dto, cliente);
+  }
+
+  @Get('instalacoes')
+  @ApiOperation({ summary: 'Instalações feitas pelo computador (só administrador): passo, estado e mensagem' })
+  listarInstalacoes(@CurrentUser() user?: Usuario) {
+    return this.instalacoes.listar(user);
+  }
+
+  @Get('instalacoes/:id')
+  @ApiOperation({ summary: 'Registro completo do Terminal de uma instalação (só administrador)' })
+  registroInstalacao(@Param('id') id: string, @CurrentUser() user?: Usuario) {
+    return this.instalacoes.registro(id, user);
   }
 
   @Get('atualizacao')

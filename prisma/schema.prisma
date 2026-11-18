@@ -3722,6 +3722,26 @@ model cameras_unidade_config {
   updated_por_id          String?   @db.VarChar(26)
 }
 
+/// NEXON-108: relato de cada instalação feita pelo computador (andamento, erro e o fim do registro).
+model cameras_instalacoes {
+  id           String   @id @db.VarChar(26)
+  sessao       String   @unique @db.VarChar(40)
+  usuario_id   String?  @db.VarChar(26)
+  usuario_nome String?  @db.VarChar(160)
+  unidade_id   String?  @db.VarChar(26)
+  sistema      String?  @db.VarChar(160)
+  passo        String?  @db.VarChar(120)
+  estado       String   @default("andamento") @db.VarChar(20)
+  mensagem     String?
+  registro     String?
+  ip           String?  @db.VarChar(60)
+  versao       String?  @db.VarChar(40)
+  created_at   DateTime @default(now()) @db.Timestamp(0)
+  updated_at   DateTime @default(now()) @updatedAt @db.Timestamp(0)
+
+  @@index([created_at(sort: Desc)])
+}
+
 /// Pedido da pessoa para o agente (foto agora). Entregue no GET /cameras/agente/comandos.
 model cameras_comandos {
   id                String          @id @db.VarChar(26)

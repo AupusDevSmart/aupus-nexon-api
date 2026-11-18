@@ -422,3 +422,45 @@ export class CriarAgenteDto {
   @MaxLength(120)
   nome!: string;
 }
+
+/** NEXON-108: relato do instalador do computador (POST /cameras/instalador/relato?token=). */
+export class RelatoInstalacaoDto {
+  @IsString()
+  @MaxLength(40)
+  sessao!: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  estado?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  passo?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(4000)
+  mensagem?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(200000)
+  registro?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(160)
+  sistema?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  versao?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(600)
+  vinculo?: string;
+}
