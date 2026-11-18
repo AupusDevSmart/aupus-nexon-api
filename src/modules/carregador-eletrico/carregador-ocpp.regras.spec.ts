@@ -16,9 +16,11 @@ import {
   podeNoCarregador,
   grupoDoMorador,
   parametroSecreto,
+  podeDeFato,
   potenciaMediaW,
   semSegredo,
   textoMotivoFim,
+  valorParaRegistro,
 } from './carregador-ocpp.regras';
 
 /** NEXON-130 — regras do carregador OCPP: estado, falhas do manual, limites, fim e permissão. */
@@ -142,6 +144,30 @@ describe('Carregador OCPP: fim da recarga, tag e permissão', () => {
     expect(semSegredo('60')).toBe('60');
     expect(['AuthorizationKey', 'WifiPassword', 'ApiToken', 'senha_admin'].map(parametroSecreto)).toEqual([true, true, true, true]);
     expect(parametroSecreto('MeterValueSampleInterval')).toBe(false);
+  });
+
+  it('valor de parâmetro que fica registrado: só o que não pode ser segredo', () => {
+    // parâmetro padrão do OCPP: valor inteiro
+    expect(valorParaRegistro('MeterValueSampleInterval', '60')).toBe('60');
+    expect(valorParaRegistro('MeterValuesSampledData', 'Energy.Active.Import.Register,Power.Active.Import')).toBe('Energy.Active.Import.Register,Power.Active.Import');
+    expect(valorParaRegistro('AuthorizeRemoteTxRequests', 'true')).toBe('true');
+    // parâmetro do fabricante: só número e sim/não
+    expect(valorParaRegistro('ChintLedBrightness', '80')).toBe('80');
+    expect(valorParaRegistro('ChintPlugAndCharge', 'false')).toBe('false');
+    expect(valorParaRegistro('CentralSystemUrl', 'wss://usuario:senha@host/ocpp/abc?token=1')).toBe('•••');
+    expect(valorParaRegistro('WifiSsid', 'Condominio-5G')).toBe('•••');
+    // nome que cheira a segredo: nunca, nem numérico
+    expect(['AuthorizationKey', 'WifiPassword', 'AdminPin', 'ApnUser', 'ftp_pwd'].map((k) => valorParaRegistro(k, '1234'))).toEqual(['•••', '•••', '•••', '•••', '•••']);
+  });
+
+  it('permissão de fato: o perfil do carregador não vale mais que o papel do usuário no NexON', () => {
+    expect(podeDeFato('analista', 'admin')).toEqual({ comandar: true, limites: true, bloquear: true, tecnico: true });
+    expect(podeDeFato('proprietario', 'proprietario')).toEqual({ comandar: true, limites: true, bloquear: true, tecnico: false });
+    expect(podeDeFato('operador', 'operador')).toEqual({ comandar: true, limites: false, bloquear: true, tecnico: false });
+    expect(podeDeFato('morador', 'cativo')).toEqual({ comandar: true, limites: false, bloquear: false, tecnico: false });
+    // papel sem nome tratado como dono dentro do escopo: inicia e para, mas não mexe em limite nem bloqueia
+    expect(podeDeFato('proprietario', 'cativo')).toEqual({ comandar: true, limites: false, bloquear: false, tecnico: false });
+    expect(podeDeFato('proprietario', null)).toEqual({ comandar: true, limites: false, bloquear: false, tecnico: false });
   });
 
   it('origem da recarga', () => {

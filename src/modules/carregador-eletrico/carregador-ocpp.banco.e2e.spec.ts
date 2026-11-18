@@ -277,6 +277,10 @@ const escopoAdmin: any = {
     // A identidade fica livre para ser cadastrada de novo.
     const outra: any = await gestao.vincular(eid, { charge_point_id: identidade }, ADMIN, CLIENTE);
     expect(outra.chave).toMatch(/^[0-9a-f]{32}$/);
+    // O histórico bruto ficou com a estação antiga: a nova, de mesma identidade, não o herda.
+    expect((await tecnico.transactions(identidade, '10', ADMIN)).data).toHaveLength(0);
+    expect((await prisma.$queryRaw<any[]>`SELECT 1 FROM ocpp_transactions WHERE charge_point_id LIKE ${`${identidade}#%`}`).length).toBe(4);
+    expect((await prisma.$queryRaw<any[]>`SELECT 1 FROM ocpp_meter_values WHERE charge_point_id = ${identidade}`).length).toBe(0);
     const guardado = await um(prisma.$queryRaw<any[]>`SELECT chave_hash FROM ocpp_charge_points WHERE equipamento_id = ${eid}::bpchar AND deleted_at IS NULL`);
     expect(guardado.chave_hash).toMatch(/^[0-9a-f]{64}$/);
     expect(guardado.chave_hash).not.toBe(outra.chave);
