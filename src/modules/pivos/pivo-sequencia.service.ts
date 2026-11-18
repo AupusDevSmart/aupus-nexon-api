@@ -119,8 +119,8 @@ const PAPEIS_COMANDO: Record<PapelComando, RegExp> = {
   desligar: /deslig|parar|stop/,
 };
 const PAPEIS_STATUS: Record<PapelStatus, RegExp> = {
-  // Remoto (BI07 do padrão): chave Local/Remoto do painel — continuidade (1) = REMOTO. Em remoto a
-  // TON/NexON NÃO liga o pivô; irrigação em curso segue normal e Desligar continua valendo (17/11).
+  // Remoto (BI07 do padrão): chave Local/Remoto do painel — 1 = REMOTO (a TON comanda), 0 = LOCAL.
+  // Em LOCAL a TON/NexON NÃO liga o pivô; irrigação em curso segue normal e Desligar vale (18/11).
   remoto: /remot/,
   // Ligado: retorno do Ligar (bomba ligada)
   ligado: /^(?!.*(deslig|canha)).*(ligad|bomba)/,
@@ -561,7 +561,7 @@ export class PivoSequenciaService implements OnModuleInit {
         lido_em: await this.lidoEmPivo(pts),
         // Chave seletora em modo TON (NEXON-103): null = sem leitura; tem_modo_ton false = pivô sem a chave
         tem_modo_ton: !!pts.modoTon,
-        // Chave Local/Remoto (BI07, 17/11): valor 1 = REMOTO (TON não liga), 0 = LOCAL, null = sem leitura
+        // Chave Local/Remoto (BI07): valor 1 = REMOTO (TON comanda), 0 = LOCAL (TON não liga), null = sem leitura
         remoto: { tem: !!pts.st.remoto, valor: await this.lerStatus(pts.st.remoto) },
         modo_ton: await this.lerStatus(pts.modoTon ?? undefined),
         // Sequência na TON (Fase 3): estado/passo/falha/ângulo como a TON reportou (null = TON sem sequência local)
@@ -803,15 +803,15 @@ export class PivoSequenciaService implements OnModuleInit {
   }
 
   /**
-   * Chave Local/Remoto (ponto Remoto, BI07): em REMOTO a TON não liga o pivô. Sem leitura da
+   * Chave Local/Remoto (ponto Remoto, BI07; 1 = remoto/TON): em LOCAL (0) a TON não liga o pivô. Sem leitura da
    * chave também recusa (fail-closed). Pivô sem o ponto ligado a uma BI = sem trava.
    * Só vale para LIGAR: o que já está irrigando continua e o Desligar sempre passa.
    */
   private async travaRemoto(pts: { st: Partial<Record<string, MapaBi>> }): Promise<string | null> {
     if (!pts.st.remoto) return null;
     const v = await this.lerStatus(pts.st.remoto);
-    if (v === 1) return 'Pivô travado no LOCAL (chave Local/Remoto do painel, BI07): o NexON não liga. Ligue pelo painel ou mude a chave.';
-    if (v === null) return 'Sem leitura da chave Local/Remoto (BI07): não dá para confirmar que o pivô está em LOCAL.';
+    if (v === 0) return 'Pivô travado no LOCAL (chave Local/Remoto do painel, BI07): o NexON não liga. Ligue pelo painel ou mude a chave.';
+    if (v === null) return 'Sem leitura da chave Local/Remoto (BI07): não dá para confirmar que o pivô está em REMOTO (TON).';
     return null;
   }
 
@@ -838,7 +838,7 @@ export class PivoSequenciaService implements OnModuleInit {
    * irrigação que o NexON comandou em curso.
    */
   private async travaReiniciar(id: string, pts: { st: Partial<Record<string, { ton_id: string; bi: number; inv: boolean }>> }): Promise<string | null> {
-    // Reiniciar = desligar e LIGAR de novo pela TON: em remoto não pode (Desligar sozinho pode).
+    // Reiniciar = desligar e LIGAR de novo pela TON: em LOCAL não pode (Desligar sozinho pode).
     const rem = await this.travaRemoto(pts);
     if (rem) return rem;
     const t = await this.estadoTrava(pts);

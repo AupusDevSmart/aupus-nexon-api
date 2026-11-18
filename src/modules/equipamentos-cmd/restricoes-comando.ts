@@ -36,13 +36,13 @@ export interface ContextoComando {
   nomePonto: string;
   agora: MomentoLocal;
   /**
-   * Chave Local/Remoto do pivô (ponto de status "Remoto", BI07): 1 = REMOTO, 0 = LOCAL,
+   * Chave Local/Remoto do pivô (ponto de status "Remoto", BI07): 1 = REMOTO (TON comanda), 0 = LOCAL (trava),
    * null = sem leitura, undefined = equipamento sem o ponto ligado a uma BI (sem trava).
    */
   remoto?: 0 | 1 | null;
 }
 
-/** Comando que PÕE o pivô para funcionar (bomba, giro, ligar) — o que o REMOTO bloqueia. */
+/** Comando que PÕE o pivô para funcionar (bomba, giro, ligar) — o que o LOCAL bloqueia. */
 export function ehPartidaPivo(nomePonto: unknown): boolean {
   const n = String(nomePonto ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
   if (/deslig|parar|stop/.test(n)) return false;
@@ -61,8 +61,8 @@ export function avaliarRestricoes(ctx: ContextoComando): Bloqueio | null {
     };
   }
   if (ctx.remoto !== undefined && ehPartidaPivo(ctx.nomePonto)) {
-    if (ctx.remoto === 1) return { code: 'COMANDO_BLOQUEADO_REMOTO', message: 'Pivô travado no LOCAL (chave Local/Remoto do painel): o NexON não liga. Ligue pelo painel ou mude a chave.' };
-    if (ctx.remoto === null) return { code: 'COMANDO_BLOQUEADO_REMOTO', message: 'Sem leitura da chave Local/Remoto do pivô: não dá para confirmar que está em LOCAL.' };
+    if (ctx.remoto === 0) return { code: 'COMANDO_BLOQUEADO_REMOTO', message: 'Pivô travado no LOCAL (chave Local/Remoto do painel): o NexON não liga. Ligue pelo painel ou mude a chave.' };
+    if (ctx.remoto === null) return { code: 'COMANDO_BLOQUEADO_REMOTO', message: 'Sem leitura da chave Local/Remoto do pivô: não dá para confirmar que está em REMOTO (TON).' };
   }
   if (ehComandoDePartida(ctx.nomePonto) && bloqueioVigente(ctx.bloqueioPonta, ctx.agora)) {
     return {

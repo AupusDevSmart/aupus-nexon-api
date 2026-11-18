@@ -727,19 +727,19 @@ describe('chave Local/Remoto (ponto Remoto, BI07)', () => {
     expect(pts.st.remoto).toEqual({ ton_id: 'T', bi: 7, inv: false });
     expect(pts.st.ligado).toBeUndefined();
   });
-  it('REMOTO ou sem leitura recusa ligar e reiniciar; LOCAL libera', async () => {
-    const { svc, entradas } = montar(PTS, {}, { 'T:3': 0, 'T:4': 0, 'T:7': 1 });
+  it('LOCAL (0) ou sem leitura recusa ligar e reiniciar; REMOTO (1) libera', async () => {
+    const { svc, entradas } = montar(PTS, {}, { 'T:3': 0, 'T:4': 0, 'T:7': 0 });
     svc.irrigacaoAtiva = async () => null;
     const pts = await svc.pontos('PIV');
     expect(await svc.travaLigar('PIV', pts)).toMatch(/travado no LOCAL/);
     expect(await svc.travaReiniciar('PIV', pts)).toMatch(/travado no LOCAL/);
     entradas['T:7'] = null;
     expect(await svc.travaLigar('PIV', pts)).toMatch(/Sem leitura da chave/);
-    entradas['T:7'] = 0;
+    entradas['T:7'] = 1;
     expect(await svc.travaLigar('PIV', pts)).toBeNull();
   });
-  it('REMOTO não impede desligar o que está irrigando', async () => {
-    const { svc } = montar(PTS, {}, { 'T:3': 1, 'T:4': 0, 'T:7': 1 });
+  it('LOCAL não impede desligar o que está irrigando', async () => {
+    const { svc } = montar(PTS, {}, { 'T:3': 1, 'T:4': 0, 'T:7': 0 });
     svc.irrigacaoAtiva = async () => ({ id: 'x' });
     svc.rodando = new Map();
     const pts = await svc.pontos('PIV');

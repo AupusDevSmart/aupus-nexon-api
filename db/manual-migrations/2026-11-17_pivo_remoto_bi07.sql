@@ -1,5 +1,5 @@
 -- Pivô: chave LOCAL/REMOTO do painel na BI07 (17/11/2026).
---   Ponto de status "Remoto": continuidade (1) = REMOTO -> a TON/NexON NÃO liga o pivô
+--   Ponto de status "Remoto": 1 (alto) = REMOTO, a TON comanda; 0 = LOCAL (manual no painel) -> a TON/NexON NÃO liga o pivô
 --   (Ligar, reinício, agenda, retomada da ponta e comando direto de Bombeamento/Girar).
 --   Irrigação em curso segue normal se a chave mudar; Desligar sempre vale.
 --   Pivô sem o ponto ligado a uma BI = sem trava. Ponto ligado mas sem leitura = recusa ligar.

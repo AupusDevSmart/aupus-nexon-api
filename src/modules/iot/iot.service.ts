@@ -887,7 +887,7 @@ export class IoTService {
       { tipo: 'status', nome: 'Pressao_ok', canal: 1 }, { tipo: 'status', nome: 'Tensao_ok', canal: 2 },
       { tipo: 'status', nome: 'Girando_direita', canal: 3 }, { tipo: 'status', nome: 'Girando_esquerda', canal: 4 },
       { tipo: 'status', nome: 'Seguranca', canal: 5 }, { tipo: 'status', nome: 'Canhao_ligado', canal: 6 },
-      { tipo: 'status', nome: 'Remoto', canal: 7 },   // chave Local/Remoto: continuidade = REMOTO (TON não liga)
+      { tipo: 'status', nome: 'Remoto', canal: 7 },   // chave Local/Remoto: 1 = REMOTO (TON comanda), 0 = LOCAL (TON não liga)
     ];
     const alteradas = new Set<string>();
     for (const piv of comps.filter((c) => String(c?.type ?? '').toLowerCase() === 'pivo')) {

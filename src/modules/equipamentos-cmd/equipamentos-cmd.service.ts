@@ -862,7 +862,7 @@ export class EquipamentosCmdService {
       this.logger.debug?.(`[restricoes] pivo_config indisponível: ${(e as Error).message}`);
     }
 
-    // Chave Local/Remoto do pivô (ponto "Remoto" numa BI, 17/11): em REMOTO a TON não dá partida.
+    // Chave Local/Remoto do pivô (ponto "Remoto" numa BI, 17/11): 1 = remoto (TON comanda); em LOCAL (0) a TON não dá partida.
     let remoto: 0 | 1 | null | undefined;
     if (checarRemoto) try {
       const rows = await this.prisma.$queryRaw<Array<{ ton_id: string; bi: number; inv: boolean }>>`
