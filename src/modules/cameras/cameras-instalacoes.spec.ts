@@ -10,6 +10,7 @@ function montar(antes: any = null) {
       update: jest.fn().mockImplementation(({ data }: any) => Promise.resolve({ id: 'i1', ...data })),
       findMany: jest.fn().mockResolvedValue([{ id: 'i1', unidade_id: 'u1', estado: 'erro' }]),
     },
+    usuarios: { findFirst: jest.fn().mockResolvedValue({ nome: 'Fulano' }) },
     unidades: { findMany: jest.fn().mockResolvedValue([{ id: 'u1', nome: 'UFV Aupus II' }]) },
   };
   const midia: any = { lerVinculo: (c: string) => (c === 'vin.ok' ? { un: 'u1', by: 'a1', n: 'x' } : null) };
@@ -30,6 +31,12 @@ describe('relato das instalações pelo computador', () => {
     expect(data.registro).not.toContain('segredo');
     expect(data.registro).not.toContain('vin.abc');
     expect(m.auditoria.registrar).toHaveBeenCalledWith('camera_instalacao', expect.objectContaining({ objetoTipo: 'camera_instalacao' }));
+  });
+
+  it('sem nome no token, busca o nome no cadastro', async () => {
+    const m = montar();
+    await m.svc.relatar({ id: 'a1', role: 'super_admin' } as any, { sessao: 'abc12345-9' } as any);
+    expect(m.prisma.cameras_instalacoes.create.mock.calls[0][0].data.usuario_nome).toBe('Fulano');
   });
 
   it('andamento não audita; mesma sessão de outra pessoa é recusada; sessão inválida também', async () => {
