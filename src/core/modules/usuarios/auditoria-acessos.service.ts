@@ -16,6 +16,7 @@ export type AcaoAuditoria =
   // NEXON-20 (spec de permissões, seção 8)
   | 'usuario_criado'
   | 'usuario_alterado'
+  | 'senha_reenviada'
   | 'usuario_desativado'
   | 'usuario_reativado'
   | 'usuario_excluido'

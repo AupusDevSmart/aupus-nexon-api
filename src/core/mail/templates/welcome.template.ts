@@ -3,8 +3,22 @@ export function getWelcomeEmailHtml(
   senhaTemporaria: string,
   loginUrl: string,
   frontendUrl: string,
+  opcoes: { reenvio?: boolean; email?: string } = {},
 ): string {
   const logoUrl = `${frontendUrl}/logoaupus.png`;
+  const reenvio = !!opcoes.reenvio;
+  const titulo = reenvio ? 'Sua nova senha de acesso' : 'Bem-vindo ao Aupus';
+  const introducao = reenvio
+    ? 'Geramos uma nova senha de acesso para a sua conta no sistema Aupus. A senha anterior deixou de valer; utilize as credenciais abaixo para entrar.'
+    : 'Sua conta foi criada no sistema Aupus. Utilize as credenciais abaixo para realizar o seu primeiro acesso.';
+  const linhaEmail = opcoes.email
+    ? `<tr>
+                        <td style="font-size: 13px; color: #6b7280; padding-bottom: 8px;">E-mail de acesso</td>
+                      </tr>
+                      <tr>
+                        <td style="font-size: 16px; font-weight: 600; color: #1a1a2e; padding-bottom: 16px;">${opcoes.email}</td>
+                      </tr>`
+    : '';
 
   return `
 <!DOCTYPE html>
@@ -12,7 +26,7 @@ export function getWelcomeEmailHtml(
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Bem-vindo ao Aupus</title>
+  <title>${titulo}</title>
 </head>
 <body style="margin: 0; padding: 0; background-color: #f4f5f7; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color: #f4f5f7; padding: 40px 0;">
@@ -31,7 +45,7 @@ export function getWelcomeEmailHtml(
           <tr>
             <td style="background-color: #ffffff; padding: 40px;">
               <h1 style="margin: 0 0 24px; font-size: 22px; font-weight: 600; color: #1a1a2e;">
-                Bem-vindo ao Aupus
+                ${titulo}
               </h1>
 
               <p style="margin: 0 0 16px; font-size: 15px; line-height: 1.6; color: #374151;">
@@ -39,7 +53,7 @@ export function getWelcomeEmailHtml(
               </p>
 
               <p style="margin: 0 0 16px; font-size: 15px; line-height: 1.6; color: #374151;">
-                Sua conta foi criada no sistema Aupus. Utilize as credenciais abaixo para realizar o seu primeiro acesso.
+                ${introducao}
               </p>
 
               <!-- Credentials Box -->
@@ -47,6 +61,7 @@ export function getWelcomeEmailHtml(
                 <tr>
                   <td style="background-color: #f8f9fb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 20px 24px;">
                     <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                      ${linhaEmail}
                       <tr>
                         <td style="font-size: 13px; color: #6b7280; padding-bottom: 8px;">Senha temporária</td>
                       </tr>
@@ -59,7 +74,7 @@ export function getWelcomeEmailHtml(
               </table>
 
               <p style="margin: 0 0 24px; font-size: 15px; line-height: 1.6; color: #374151;">
-                Após o primeiro acesso, recomendamos que altere sua senha imediatamente através da página de perfil do sistema.
+                Após ${reenvio ? 'entrar' : 'o primeiro acesso'}, recomendamos que altere sua senha imediatamente através da página de perfil do sistema.
               </p>
 
               <!-- CTA Button -->
@@ -74,7 +89,7 @@ export function getWelcomeEmailHtml(
               </table>
 
               <p style="margin: 24px 0 0; font-size: 13px; line-height: 1.5; color: #9ca3af;">
-                Caso não tenha solicitado esta conta, desconsidere este email ou entre em contato com o administrador do sistema.
+                Caso não ${reenvio ? 'reconheça este pedido' : 'tenha solicitado esta conta'}, desconsidere este email ou entre em contato com o administrador do sistema.
               </p>
             </td>
           </tr>

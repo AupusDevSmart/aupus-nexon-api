@@ -65,6 +65,40 @@ export class MailService implements OnModuleInit {
   }
 
   /**
+   * Reenvia ao usuário uma senha nova gerada pelo administrador (NEXON-129).
+   * Diferente do boas-vindas, devolve se o envio deu certo: a tela precisa saber
+   * se o e-mail saiu para avisar quem clicou.
+   */
+  async sendSenhaReenviadaEmail(
+    to: string,
+    nome: string,
+    senhaTemporaria: string,
+  ): Promise<{ enviado: boolean; erro?: string }> {
+    if (!this.transporter) {
+      this.logger.warn(`SMTP not configured. Skipping password resend email to ${to}`);
+      return { enviado: false, erro: 'SMTP não configurado' };
+    }
+    try {
+      const loginUrl = `${this.frontendUrl}/login`;
+      const html = getWelcomeEmailHtml(nome, senhaTemporaria, loginUrl, this.frontendUrl, {
+        reenvio: true,
+        email: to,
+      });
+      await this.transporter.sendMail({
+        from: this.fromAddress,
+        to,
+        subject: 'Aupus NexON - Nova senha de acesso',
+        html,
+      });
+      this.logger.log(`Password resend email sent to ${to}`);
+      return { enviado: true };
+    } catch (error) {
+      this.logger.error(`Failed to send password resend email to ${to}: ${error.message}`);
+      return { enviado: false, erro: String(error?.message ?? error).slice(0, 300) };
+    }
+  }
+
+  /**
    * Envia email de redefinicao de senha com link temporario.
    * @param to Email do destinatario
    * @param nome Nome do usuario
