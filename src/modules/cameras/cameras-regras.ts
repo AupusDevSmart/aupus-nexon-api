@@ -857,15 +857,34 @@ export function normalizarDescobertas(lista: unknown): Descoberta[] {
   return [...porIp.values()].slice(0, DESCOBERTAS_MAX);
 }
 
-/** Descobertas recentes (24 h) cujo IP ainda não é de câmera cadastrada na unidade. */
-export function descobertasPendentes<T extends { ip: string; visto_em: Date }>(
+/**
+ * NEXON-108: gravador (NVR/XVR/DVR) Intelbras/Dahua pelo modelo que a descoberta informa — um IP com vários
+ * canais (cada canal vira uma câmera, campo `canal`). Ex.: "NVD 1404", "DHI-NVR4108HS", "MHDX 1108".
+ */
+export function ehGravador(modelo: string | null | undefined): boolean {
+  return !!modelo && /(^|[^a-z])(i?nvd|nvr|xvr|dvr|hcvr|i?mhdx)/i.test(modelo);
+}
+
+/** Quantos canais o modelo sugere (2 últimos dígitos do primeiro número de 4 dígitos: 1404 → 4, 4108 → 8, 3132 → 32). */
+export function canaisDoModelo(modelo: string | null | undefined): number | null {
+  const m = modelo?.match(/(\d)(\d)(\d{2})/);
+  if (!m) return null;
+  const n = Number(m[3]);
+  return n >= 1 && n <= 64 ? n : null;
+}
+
+/**
+ * Descobertas recentes (24 h) cujo IP ainda não é de câmera cadastrada na unidade. Gravador (NVR) continua na
+ * lista mesmo com canais cadastrados: os outros canais ainda podem entrar.
+ */
+export function descobertasPendentes<T extends { ip: string; visto_em: Date; modelo?: string | null }>(
   descobertas: T[],
   ipsCadastrados: Iterable<string>,
   agora = new Date(),
 ): T[] {
   const cadastrados = new Set([...ipsCadastrados].map((ip) => normalizarIp(ip)));
   const desde = agora.getTime() - DESCOBERTA_VALIDADE_S * 1000;
-  return descobertas.filter((d) => d.visto_em.getTime() >= desde && !cadastrados.has(normalizarIp(d.ip)));
+  return descobertas.filter((d) => d.visto_em.getTime() >= desde && (ehGravador(d.modelo) || !cadastrados.has(normalizarIp(d.ip))));
 }
 
 // ---------------------------------------------------------------------------

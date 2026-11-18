@@ -37,6 +37,17 @@ describe('câmera segue o MAC', () => {
     expect(reg.extra).toMatchObject({ ip_anterior: '192.168.100.60', ip_novo: '192.168.1.118' });
   });
 
+  it('canais do mesmo gravador (NVR) mudam de IP juntos', async () => {
+    const m = montar([
+      { id: 'c1', nome: 'NVR canal 1', ip: '192.168.1.30', mac: 'dd:dd:dd:dd:dd:dd', unidade_id: 'u1' },
+      { id: 'c2', nome: 'NVR canal 2', ip: '192.168.1.30', mac: 'dd:dd:dd:dd:dd:dd', unidade_id: 'u1' },
+    ]);
+    await m.svc.seguirMac(agente, [{ ip: '10.0.0.5', mac: 'dd:dd:dd:dd:dd:dd' }]);
+    expect(m.prisma.cameras.update).toHaveBeenCalledWith({ where: { id: 'c1' }, data: { ip: '10.0.0.5' } });
+    expect(m.prisma.cameras.update).toHaveBeenCalledWith({ where: { id: 'c2' }, data: { ip: '10.0.0.5' } });
+    expect(m.auditoria.registrar.mock.calls[1][1].extra).toMatchObject({ ip_anterior: '192.168.1.30', ip_novo: '10.0.0.5' });
+  });
+
   it('não troca para IP que outra câmera do agente já usa', async () => {
     const m = montar([
       { id: 'c1', nome: 'A', ip: '192.168.1.10', mac: 'aa:aa:aa:aa:aa:aa', unidade_id: 'u1' },

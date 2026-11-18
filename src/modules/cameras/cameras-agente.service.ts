@@ -15,6 +15,8 @@ import {
   caminhoStream,
   DESCOBERTA_VALIDADE_S,
   descobertasPendentes,
+  canaisDoModelo,
+  ehGravador,
   ehJpeg,
   estaArmado,
   lerGravacao,
@@ -170,6 +172,9 @@ export class CamerasAgenteService {
       mac: d.mac,
       fabricante: d.fabricante,
       modelo: d.modelo,
+      // NEXON-108: gravador (NVR) tem vários canais no mesmo IP; quantos o modelo sugere.
+      gravador: ehGravador(d.modelo),
+      canais_sugeridos: ehGravador(d.modelo) ? canaisDoModelo(d.modelo) : null,
       serial: d.serial,
       porta_http: d.porta_http,
       porta_rtsp: d.porta_rtsp,
@@ -433,6 +438,7 @@ export class CamerasAgenteService {
     if (!d || !d.mac || !d.fabricante || !['intelbras', 'dahua'].includes(d.fabricante.toLowerCase())) {
       return { cadastrada: false, motivo: 'descoberta_invalida' };
     }
+    if (ehGravador(d.modelo)) return { cadastrada: false, motivo: 'gravador' };
     const cfg = await this.config.obter(agente.unidade_id, agente.planta_id);
     if (cfg.auto_cadastrar === false) return { cadastrada: false, motivo: 'auto_cadastro_desligado' };
     const mac = d.mac.toLowerCase();
@@ -487,6 +493,8 @@ export class CamerasAgenteService {
     // AUTO_CADASTRO_MAX_UNIDADE câmeras na usina (aparelho com problema não enche o cadastro).
     const novas = itens
       .filter((d) => d.inicializada === false && d.mac && !!d.fabricante && ['intelbras', 'dahua'].includes(d.fabricante.toLowerCase()))
+      // gravador (NVR) entra pela tela, escolhendo os canais: um só cadastro automático criaria só o canal 1
+      .filter((d) => !ehGravador(d.modelo))
       .slice(0, AUTO_CADASTRO_POR_VEZ);
     if (novas.length === 0 || !agente.unidade_id || !agente.planta_id) return;
     const cfg = await this.config.obter(agente.unidade_id, agente.planta_id);
@@ -552,7 +560,7 @@ export class CamerasAgenteService {
       where: { agente_id: agente.id, deleted_at: null },
       select: { id: true, nome: true, ip: true, mac: true, unidade_id: true },
     });
-    const ipsEmUso = new Set(cams.map((c) => c.ip));
+    // Câmeras de um gravador (NVR) dividem IP e MAC: mudam de IP juntas. Só não muda se o IP novo é de outro aparelho.
     for (const c of cams) {
       const mac = c.mac?.toLowerCase() ?? null;
       if (!mac) {
@@ -561,21 +569,22 @@ export class CamerasAgenteService {
         continue;
       }
       const achada = comMac.find((d) => d.mac!.toLowerCase() === mac);
-      if (!achada || achada.ip === c.ip || ipsEmUso.has(achada.ip)) continue;
+      if (!achada || achada.ip === c.ip) continue;
+      if (cams.some((o) => o.id !== c.id && o.ip === achada.ip && (o.mac?.toLowerCase() ?? null) !== mac)) continue;
+      const ipAntigo = c.ip;
       await this.prisma.cameras.update({ where: { id: c.id }, data: { ip: achada.ip } });
-      ipsEmUso.delete(c.ip);
-      ipsEmUso.add(achada.ip);
-      this.logger.log(`[cameras] câmera ${c.nome}: IP ${c.ip} -> ${achada.ip} (mesmo MAC ${mac})`);
+      c.ip = achada.ip;
+      this.logger.log(`[cameras] câmera ${c.nome}: IP ${ipAntigo} -> ${achada.ip} (mesmo MAC ${mac})`);
       const ctx = await this.auditoria.contextoUnidade(c.unidade_id);
       await this.auditoria.registrar('camera_ip_atualizado', {
-        mensagem: `Câmera "${c.nome}" mudou de endereço ${c.ip} → ${achada.ip} (mesmo MAC ${mac}) — ${ctx.unidade?.nome ?? c.unidade_id}${ctx.planta ? ` (${ctx.planta.nome})` : ''}`,
+        mensagem: `Câmera "${c.nome}" mudou de endereço ${ipAntigo} → ${achada.ip} (mesmo MAC ${mac}) — ${ctx.unidade?.nome ?? c.unidade_id}${ctx.planta ? ` (${ctx.planta.nome})` : ''}`,
         user: null,
         unidade: ctx.unidade,
         planta: ctx.planta,
         camera: { id: c.id, nome: c.nome, ip: achada.ip, unidade_id: c.unidade_id },
         objetoTipo: 'camera',
         objetoId: c.id,
-        extra: { ip_anterior: c.ip, ip_novo: achada.ip, mac, agente: { id: agente.id, nome: agente.nome } },
+        extra: { ip_anterior: ipAntigo, ip_novo: achada.ip, mac, agente: { id: agente.id, nome: agente.nome } },
       });
     }
   }
