@@ -35,6 +35,7 @@ import { customAlphabet } from 'nanoid';
 import { MailService } from '../../mail/mail.service';
 import { Papel, papelCanonico, podeCadastrar } from '../auth/papeis';
 import { AuditoriaAcessosService } from './auditoria-acessos.service';
+import { gerarSenhaTemporaria } from './senha-temporaria';
 import { AcaoGestao, avaliarGestao, mensagemPapel, permissoesAlemDoAutor } from './regras-gestao-usuario';
 
 /** Quem pede (payload do JWT em req.user). */
@@ -922,6 +923,50 @@ export class UsuariosService {
       console.error('Erro ao resetar senha:', error);
       throw new BadRequestException('Erro ao resetar senha');
     }
+  }
+
+  /**
+   * Gera uma senha nova e a envia por e-mail ao usuário (NEXON-129: botão
+   * "Reenviar senha por e-mail" no cadastro do proprietário). A senha antiga
+   * não é recuperável (só o hash existe), então "reenviar" = senha nova.
+   * O e-mail sai ANTES da troca: se o SMTP falhar, a senha atual continua
+   * valendo e ninguém fica trancado para fora.
+   */
+  async reenviarSenhaPorEmail(id: string, requester?: Requisitante) {
+    const usuario = await this.prisma.usuarios.findFirst({ where: { id, deleted_at: null } });
+    if (!usuario) throw new NotFoundException('Usuário não encontrado');
+
+    await this.assertPodeGerir(requester, id, 'senha');
+
+    const email = (usuario.email ?? '').trim();
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      throw new BadRequestException('Usuário sem e-mail válido cadastrado');
+    }
+    if (usuario.status !== 'Ativo' || usuario.is_active === false) {
+      throw new BadRequestException('Usuário inativo: reative o acesso antes de reenviar a senha');
+    }
+
+    const novaSenha = gerarSenhaTemporaria();
+    const envio = await this.mailService.sendSenhaReenviadaEmail(email, usuario.nome, novaSenha);
+
+    if (!envio.enviado) {
+      await this.trilha('senha_reenviada', requester, { id, nome: usuario.nome },
+        `Falha ao reenviar senha de ${usuario.nome} para ${email}`,
+        { campo: 'senha', email_destino: email, enviado: false, erro: envio.erro ?? null, papel: usuario.role ?? null });
+      throw new BadRequestException('Não foi possível enviar o e-mail. A senha atual não foi alterada.');
+    }
+
+    await this.prisma.usuarios.update({
+      where: { id },
+      data: { senha: await bcrypt.hash(novaSenha, 12), updated_at: new Date() },
+    });
+    await this.marcarSenhaAlterada(id);
+    await this.revogarSessoes(id, null);
+    await this.trilha('senha_reenviada', requester, { id, nome: usuario.nome },
+      `Nova senha de ${usuario.nome} enviada para ${email}`,
+      { campo: 'senha', email_destino: email, enviado: true, sessoes_revogadas: true, papel: usuario.role ?? null });
+
+    return { message: `Nova senha enviada para ${email}`, email };
   }
 
   // ==========================================================================

@@ -289,6 +289,18 @@ export class UsuariosController {
     return this.usuariosService.resetPassword(id, resetPasswordDto, currentUser ?? {});
   }
 
+  @Post(':id/reenviar-senha')
+  @Permissions('usuarios.manage')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Gera senha nova e envia por e-mail ao usuário (usuarios.manage + escopo)' })
+  @ApiParam({ name: 'id', description: 'ID do usuário' })
+  @ApiResponse({ status: 200, description: 'Nova senha enviada por e-mail' })
+  @ApiResponse({ status: 400, description: 'Sem e-mail, usuário inativo ou falha no envio (senha mantida)' })
+  @ApiResponse({ status: 403, description: 'Sem usuarios.manage ou usuário fora do escopo' })
+  reenviarSenha(@Param('id') id: string, @CurrentUser() currentUser?: any) {
+    return this.usuariosService.reenviarSenhaPorEmail(id, currentUser ?? {});
+  }
+
   @Post(':id/upload-avatar')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Upload de foto de perfil do usuário' })
