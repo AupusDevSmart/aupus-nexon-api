@@ -205,7 +205,7 @@ describe('Carregador OCPP com carregador simulado (NEXON-130)', () => {
       expect(fim.sessao_ativa).toBeNull();
       expect(fim.estado).toBe('disponivel');
       expect(fim.sessoes[0]).toMatchObject({ morador_nome: 'Bruno', status: 'encerrada', kwh_total: 7.5, motivo_fim: 'parado_no_nexon', motivo_fim_texto: 'Parada pelo NexON', origem: 'nexon' });
-      expect(fim.leitura).toMatchObject({ potencia_kw: 0, energia_sessao_kwh: 7.5 });
+      expect(fim.leitura).toMatchObject({ potencia_kw: 0, energia_sessao_kwh: null }); // sem recarga, sem energia de recarga
       expect(a.banco.transacoes[0]).toMatchObject({ status: 'encerrada', meterStartWh: 1000, meterStopWh: 8500, motivo: 'Remote' });
 
       // 5. Audit log: quem, o quê, em qual carregador, com a resposta do carregador.
@@ -368,6 +368,11 @@ describe('Carregador OCPP com carregador simulado (NEXON-130)', () => {
       const tx = await sim.iniciar(idTag, 0);
       await a.assentar();
       expect(a.banco.sessoes[0]).toMatchObject({ moradorId: 'mor-a', moradorNome: 'Ana', liberadoPor: 'morador' });
+      await sim.medir(tx.transactionId, { energiaWh: 2500, potenciaW: 7000 });
+      await a.assentar();
+      // A energia da recarga aparece para a dona dela e não para outro morador.
+      expect((await estado(ANA)).leitura).toMatchObject({ potencia_kw: 7, energia_sessao_kwh: 2.5 });
+      expect((await estado(BRUNO)).leitura).toMatchObject({ potencia_kw: 7, energia_sessao_kwh: null });
       await expect(a.carregador.pararRecarga('car-1', BRUNO)).rejects.toThrow('Só quem está carregando pode parar a recarga.');
       expect(comandosRecebidos(sim, 'RemoteStopTransaction')).toHaveLength(0);
       await expect(a.gestao.comando('car-1', 'bloquear', ANA)).rejects.toThrow(ForbiddenException);

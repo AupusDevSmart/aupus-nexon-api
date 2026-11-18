@@ -731,7 +731,11 @@ export class CarregadorEletricoService {
     const ocpp = est
       ? {
           ocpp: { conectado, ultima_comunicacao: iso(ultimaComunicacao), disponivel: est.disponivel, fabricante: est.vendor, modelo: est.model },
-          leitura: est.leitura ?? null,
+          // A energia da leitura é a da recarga em andamento: sem recarga não há o que mostrar, e o
+          // morador não vê a energia da recarga de outro (mesma regra do kWh da lista).
+          leitura: est.leitura
+            ? { ...est.leitura, energia_sessao_kwh: ativa && moradorVeValoresDa(p.papel, p.morador?.id, ativa.morador_id) ? est.leitura.energia_sessao_kwh ?? null : null }
+            : null,
           falha: falha ? { codigo: falha.codigo, ocpp: falha.ocpp, titulo: falha.titulo, solucao: falha.solucao, desde: iso(est.falhaDesde) } : null,
           limites: limitesParaTela(await this.repoOcpp!.config(eid)),
         }
