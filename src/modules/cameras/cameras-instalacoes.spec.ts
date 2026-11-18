@@ -38,6 +38,14 @@ describe('relato das instalações pelo computador', () => {
     expect(m.auditoria.registrar).not.toHaveBeenCalled();
     await expect(m.svc.relatar({ id: 'outro', role: 'super_admin' } as any, { sessao: 'abc12345-1' } as any)).rejects.toBeInstanceOf(ForbiddenException);
     await expect(m.svc.relatar(tecnico, { sessao: 'x' } as any)).rejects.toBeInstanceOf(BadRequestException);
+    // proprietário (sem cadastro técnico) não relata
+    await expect(montar().svc.relatar({ id: 'p1', role: 'proprietario' } as any, { sessao: 'abc12345-2' } as any)).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it('chave de vínculo de outra pessoa não define a usina', async () => {
+    const m = montar();
+    await m.svc.relatar({ id: 'b2', role: 'super_admin' } as any, { sessao: 'abc12345-3', vinculo: 'vin.ok' } as any);
+    expect(m.prisma.cameras_instalacoes.create.mock.calls[0][0].data.unidade_id).toBeNull();
   });
 
   it('lista só para administrador, com o nome da usina', async () => {
