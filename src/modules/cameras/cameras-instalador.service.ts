@@ -135,9 +135,11 @@ export class CamerasInstaladorService {
       .replace('__NEXON_IMAGEM_URL__', url)
       .replace('__NEXON_IMAGEM_SHA__', m.sha256)
       .replace('__NEXON_VINCULO__', vinculoOk)
-      .replace('__NEXON_SCRIPT_URL__', self);
+      .replace('__NEXON_SCRIPT_URL__', self)
+      // NEXON-108: o script relata andamento e erros (Configurações › Aparelhos das câmeras).
+      .replace('__NEXON_RELATO_URL__', `${this.base(req)}/relato?token=${encodeURIComponent(token)}`);
     // Defesa extra: no .ps1 os valores ficam entre aspas simples.
-    if (windows && /'/.test(url + self + vinculoOk)) throw new BadRequestException('Endereço inválido');
+    if (windows && /'/.test(url + self + vinculoOk + token)) throw new BadRequestException('Endereço inválido');
     if (windows) {
       res.setHeader('Content-Type', 'text/plain; charset=utf-8');
       res.setHeader('Cache-Control', 'private, no-store');
