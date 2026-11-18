@@ -40,6 +40,7 @@ import {
   ListarEventosDto,
   MarcarLidosDto,
   PedirTrechoDto,
+  RelatoAparelhoDto,
   RelatoInstalacaoDto,
 } from './dto/cameras.dto';
 import { UsuarioOuTokenMidiaGuard } from './guards/usuario-ou-token-midia.guard';
@@ -192,6 +193,21 @@ export class CamerasController {
   @ApiOperation({ summary: 'Andamento e erros do instalador do computador (JWT ou ?token=). Audit camera_instalacao no erro e no fim' })
   relatoInstalacao(@CurrentUser() user: Usuario, @Body() dto: RelatoInstalacaoDto, @Cliente() cliente?: ClienteInfo) {
     return this.instalacoes.relatar(user, dto, cliente);
+  }
+
+  @Public()
+  @Post('instalador/relato-aparelho')
+  @ApiOperation({ summary: 'Andamento do primeiro boot mandado pelo Raspberry (chave de vínculo). Audit camera_instalacao no erro e no fim' })
+  relatoAparelho(@Body() dto: RelatoAparelhoDto, @Cliente() cliente?: ClienteInfo) {
+    return this.instalacoes.relatarAparelho(dto, cliente);
+  }
+
+  @Public()
+  @UseGuards(UsuarioOuTokenMidiaGuard)
+  @Get('instalador/primeiro-boot')
+  @ApiOperation({ summary: 'primeiro-boot.sh atualizado que o instalador do PC grava no cartão/pendrive (JWT ou ?token=)' })
+  instaladorPrimeiroBoot(@CurrentUser() user: Usuario, @Req() req: Request, @Res() res: Response) {
+    return this.instaladorSvc.primeiroBoot(user, req, res);
   }
 
   @Get('instalacoes')

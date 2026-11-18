@@ -65,4 +65,17 @@ describe('relato das instalações pelo computador', () => {
   it('limparRegistro tira token, vínculo e token do agente', () => {
     expect(limparRegistro('a?token=abc.def&x=1 vin.zz.yy nxcam_123')).toBe('a?token=***&x=1 vin.*** nxcam_***');
   });
+
+  it('Raspberry relata o primeiro boot com a chave de vínculo (usina e autor vêm da chave)', async () => {
+    const m = montar();
+    await m.svc.relatarAparelho({ vinculo: 'vin.ok', estado: 'andamento', passo: 'internet', host: 'nexon-cam', ip_local: '192.168.0.10' } as any);
+    const data = m.prisma.cameras_instalacoes.create.mock.calls[0][0].data;
+    expect(data).toMatchObject({ sessao: 'pi-x', unidade_id: 'u1', usuario_nome: 'Fulano', passo: 'internet', estado: 'andamento' });
+    expect(data.sistema).toBe('Raspberry nexon-cam (192.168.0.10)');
+    expect(m.auditoria.registrar).not.toHaveBeenCalled();
+  });
+
+  it('chave inválida não relata', async () => {
+    await expect(montar().svc.relatarAparelho({ vinculo: 'vin.ruim' } as any)).rejects.toBeInstanceOf(ForbiddenException);
+  });
 });

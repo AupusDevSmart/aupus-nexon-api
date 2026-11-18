@@ -5,7 +5,7 @@ import { novoId26, type ClienteInfo } from '@/core/common/cliente-info';
 import { CamerasAuditoriaService } from './cameras-auditoria.service';
 import { CamerasMidiaService } from './cameras-midia.service';
 import type { Usuario } from './cameras.tipos';
-import type { RelatoInstalacaoDto } from './dto/cameras.dto';
+import type { RelatoAparelhoDto, RelatoInstalacaoDto } from './dto/cameras.dto';
 
 const ESTADOS = new Set(['andamento', 'erro', 'ok']);
 const MAX_REGISTRO = 60_000;
@@ -74,6 +74,54 @@ export class CamerasInstalacoesService {
         objetoTipo: 'camera_instalacao',
         objetoId: linha.id,
         extra: { sessao, estado, passo: linha.passo, sistema: linha.sistema, versao: linha.versao },
+      });
+    }
+    return { ok: true };
+  }
+
+  /**
+   * POST /cameras/instalador/relato-aparelho — o próprio Raspberry, no primeiro boot, conta onde está (ligou,
+   * internet, instalando, pronto, erro). Sem login: vale a chave de vínculo gravada no cartão/pendrive (assinada,
+   * 48 h, de quem gerou o comando). Uma linha por aparelho (sessão pi-<nonce>).
+   */
+  async relatarAparelho(dto: RelatoAparelhoDto, cliente?: ClienteInfo) {
+    const vinc = this.midia.lerVinculo(dto.vinculo);
+    if (!vinc) throw new ForbiddenException('Chave inválida ou vencida');
+    const sessao = `pi-${vinc.n}`;
+    const estado = ESTADOS.has(dto.estado ?? '') ? (dto.estado as string) : 'andamento';
+    const autor = vinc.by
+      ? await this.prisma.usuarios.findFirst({ where: { id: vinc.by.trim() }, select: { id: true, nome: true } })
+      : null;
+    const dados = {
+      usuario_id: autor?.id?.trim() ?? null,
+      usuario_nome: autor?.nome ?? null,
+      unidade_id: vinc.un.trim(),
+      sistema: `Raspberry${dto.host ? ` ${dto.host.slice(0, 60)}` : ''}${dto.ip_local ? ` (${dto.ip_local.slice(0, 40)})` : ''}`.slice(0, 160),
+      passo: dto.passo?.slice(0, 120) ?? null,
+      estado,
+      mensagem: dto.mensagem ? limparRegistro(dto.mensagem).slice(0, 2000) : null,
+      ...(dto.registro ? { registro: limparRegistro(dto.registro).slice(-MAX_REGISTRO) } : {}),
+      ip: cliente?.ip?.slice(0, 60) ?? null,
+      versao: dto.versao?.slice(0, 40) ?? null,
+    };
+    const antes = await this.prisma.cameras_instalacoes.findUnique({ where: { sessao }, select: { estado: true } });
+    const linha = antes
+      ? await this.prisma.cameras_instalacoes.update({ where: { sessao }, data: dados })
+      : await this.prisma.cameras_instalacoes.create({ data: { id: novoId26(), sessao, ...dados } });
+    if (estado !== 'andamento' && antes?.estado !== estado) {
+      const ctx = await this.auditoria.contextoUnidade(linha.unidade_id);
+      await this.auditoria.registrar('camera_instalacao', {
+        mensagem:
+          estado === 'ok'
+            ? `Raspberry terminou o primeiro boot${ctx.unidade ? ` em ${ctx.unidade.nome}` : ''}`
+            : `Primeiro boot do Raspberry falhou no passo "${linha.passo ?? '?'}": ${linha.mensagem ?? ''}`.slice(0, 480),
+        user: autor ? ({ id: autor.id, nome: autor.nome } as Usuario) : null,
+        cliente,
+        unidade: ctx.unidade,
+        planta: ctx.planta,
+        objetoTipo: 'camera_instalacao',
+        objetoId: linha.id,
+        extra: { sessao, estado, passo: linha.passo, sistema: linha.sistema, origem: 'raspberry' },
       });
     }
     return { ok: true };

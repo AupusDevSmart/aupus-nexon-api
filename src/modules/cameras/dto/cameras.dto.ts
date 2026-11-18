@@ -464,3 +464,45 @@ export class RelatoInstalacaoDto {
   @MaxLength(600)
   vinculo?: string;
 }
+
+/** NEXON-108: andamento do primeiro boot mandado pelo próprio Raspberry (autenticado pela chave de vínculo). */
+export class RelatoAparelhoDto {
+  @IsString()
+  @MaxLength(600)
+  vinculo!: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  estado?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  passo?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(4000)
+  mensagem?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(200000)
+  registro?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(60)
+  host?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  ip_local?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  versao?: string;
+}
