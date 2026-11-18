@@ -1,6 +1,6 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '@/core';
-import { papelCanonico } from '@/core/modules/auth/papeis';
+import { capacidades, papelCanonico } from '@/core/modules/auth/papeis';
 import { novoId26, type ClienteInfo } from '@/core/common/cliente-info';
 import { CamerasAuditoriaService } from './cameras-auditoria.service';
 import { CamerasMidiaService } from './cameras-midia.service';
@@ -32,11 +32,14 @@ export class CamerasInstalacoesService {
   ) {}
 
   async relatar(user: Usuario | undefined, dto: RelatoInstalacaoDto, cliente?: ClienteInfo) {
-    if (!user?.id) throw new ForbiddenException('Sem permissão');
+    // Só quem pode instalar aparelhos (o mesmo do comando do instalador) relata.
+    if (!user?.id || !capacidades(papelCanonico(user.role)).cadastroTecnico) throw new ForbiddenException('Sem permissão');
     const sessao = (dto.sessao ?? '').trim();
     if (!/^[A-Za-z0-9-]{8,40}$/.test(sessao)) throw new BadRequestException('Sessão inválida');
     const estado = ESTADOS.has(dto.estado ?? '') ? (dto.estado as string) : 'andamento';
-    const vinc = this.midia.lerVinculo(dto.vinculo);
+    // A usina só vale se a chave de vínculo foi gerada por quem relata.
+    const lida = this.midia.lerVinculo(dto.vinculo);
+    const vinc = lida && lida.by?.trim() === user.id.trim() ? lida : null;
     const dados = {
       usuario_id: user.id.trim(),
       usuario_nome: user.nome ?? null,
