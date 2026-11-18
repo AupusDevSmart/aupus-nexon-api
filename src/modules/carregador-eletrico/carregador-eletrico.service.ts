@@ -36,7 +36,7 @@ import {
   LIMITE_TEMPO_MAX,
   LIMITE_TEMPO_MIN,
   origemDaRecarga,
-  podeNoCarregador,
+  podeDeFato,
   textoMotivoFim,
 } from './carregador-ocpp.regras';
 
@@ -690,7 +690,7 @@ export class CarregadorEletricoService {
         AND (${so}::text IS NULL OR TRIM(s.morador_id) = ${so})
         AND (${plantas === null}::boolean OR TRIM(s.planta_id) = ANY(${plantas ?? []}::text[]))
         AND (${eqs === null}::boolean OR TRIM(s.equipamento_id) = ANY(${eqs ?? []}::text[]))
-      ORDER BY (s.status='ativa') DESC, s.inicio DESC
+      ORDER BY (s.status='ativa') DESC, s.inicio DESC, s.ocpp_transaction_id DESC NULLS LAST
       LIMIT ${Math.min(Number(limite) || 100, 500)}`;
     const comOrigem = rows.map((r) => ({ ...r, motivo_fim_texto: textoMotivoFim(r.motivo_fim), origem: origemDaRecarga(r.liberado_por) }));
     return this.ocultarValores(comOrigem, user, p);
@@ -738,7 +738,7 @@ export class CarregadorEletricoService {
       : { ocpp: null, leitura: null, falha: null, limites: null };
     return {
       ...ocpp,
-      pode: podeNoCarregador(p.papel),
+      pode: podeDeFato(p.papel, user ? ((user as any).role ?? null) : 'admin'),
       papel: p.papel,
       meu_morador: p.morador ? { id: String(p.morador.id).trim(), nome: p.morador.nome, apartamento: p.morador.apartamento, validade: p.morador.validade, ativo: p.morador.ativo } : null,
       soc: cfg?.ultimo_soc != null && cfg?.ultimo_soc_em && Date.now() - new Date(cfg.ultimo_soc_em).getTime() < 30 * 60000 ? Number(cfg.ultimo_soc) : null,

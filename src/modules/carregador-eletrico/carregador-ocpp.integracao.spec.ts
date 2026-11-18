@@ -926,7 +926,47 @@ describe('Carregador OCPP com carregador simulado (NEXON-130)', () => {
       const guardado = JSON.stringify([a.banco.auditoria, a.banco.trilhas]);
       expect(guardado).not.toContain(CHAVE);
       expect(guardado).not.toContain('segredo123');
-      expect(auditorias('carregador_ocpp').map((r) => r.detalhes.valor)).toEqual(['wss://plataforma.test/ocpp/•••/WALLBOX-1', '•••']);
+      expect(auditorias('carregador_ocpp').map((r) => r.detalhes.valor)).toEqual(['•••', '•••']);
+      // Parâmetro padrão do OCPP fica com o valor.
+      await a.gestao.mudarParametro('car-1', { chave: 'HeartbeatInterval', valor: '120' }, ADMIN, CLIENTE);
+      expect(auditorias('carregador_ocpp')[2].detalhes.valor).toBe('120');
+    });
+
+    it('papel sem nome com a planta no escopo inicia e para, mas não bloqueia nem mexe em limite', async () => {
+      const sim = await a.ligar();
+      const SEM_NOME = { id: 'u-cativo', nome: 'Cativo', role: 'cativo' };
+      a.banco.donos.set('u-cativo', ['pl-1']);
+      expect((await a.carregador.getEstado('car-1', SEM_NOME)).pode).toEqual({ comandar: true, limites: false, bloquear: false, tecnico: false });
+      await expect(a.gestao.comando('car-1', 'bloquear', SEM_NOME)).rejects.toThrow(ForbiddenException);
+      await expect(a.gestao.salvarLimites('car-1', { limite_tempo_min: 60 }, SEM_NOME)).rejects.toThrow(ForbiddenException);
+      await expect(a.gestao.conexao('car-1', SEM_NOME)).rejects.toThrow(ForbiddenException);
+      expect(comandosRecebidos(sim, 'ChangeAvailability')).toHaveLength(0);
+      await a.carregador.liberarRecarga('car-1', 'mor-b', SEM_NOME, {}); // como já era
+      await sim.esperar('RemoteStartTransaction');
+    });
+
+    it('carregador sem planta: nenhum cartão autoriza e o vínculo é recusado', async () => {
+      const sim = await a.ligar();
+      a.banco.estacoes[0].plantaId = null;
+      await a.ocpp.recarregarCadastro();
+      await sim.fechar();
+      const de_novo = new CarregadorSimulado(`${a.url}/${CHAVE}/WALLBOX-1`);
+      await de_novo.conectar();
+      expect(await de_novo.autorizar('04A1B2C3')).toBe('Invalid');
+      await de_novo.fechar();
+      a.banco.novoEquipamento('car-3', 'CAR-03', '');
+      await expect(a.gestao.vincular('car-3', { charge_point_id: 'SEM-PLANTA' }, ADMIN)).rejects.toThrow('instalação sem planta');
+    });
+
+    it('histórico bruto acompanha a estação: identidade reaproveitada por outro carregador não herda as transações', async () => {
+      const sim = await a.ligar();
+      const tx = await sim.iniciar('04A1B2C3', 0);
+      await sim.parar(tx.transactionId, 1000, 'Local');
+      await a.assentar();
+      await a.gestao.desvincular('car-1', ADMIN, CLIENTE);
+      expect(a.banco.transacoes[0].cp).not.toBe('WALLBOX-1');
+      await a.gestao.vincular('car-2', { charge_point_id: 'WALLBOX-1' }, ADMIN, CLIENTE);
+      expect(a.banco.transacoes.filter((t) => t.cp === 'WALLBOX-1')).toHaveLength(0);
     });
 
     it('registrador com fração e tag longa no fim não travam a recarga', async () => {

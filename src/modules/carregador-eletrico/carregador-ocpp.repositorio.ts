@@ -140,12 +140,21 @@ export class CarregadorOcppRepositorio {
     const existe = await this.prisma.$queryRaw<any[]>`
       SELECT 1 FROM ocpp_charge_points WHERE equipamento_id = ${eid}::bpchar AND deleted_at IS NULL LIMIT 1`;
     if (existe.length) {
+      // Mesma estação com identidade nova: o histórico bruto dela acompanha.
+      const antiga = await this.prisma.$queryRaw<Array<{ charge_point_id: string }>>`
+        SELECT charge_point_id FROM ocpp_charge_points WHERE equipamento_id = ${eid}::bpchar AND deleted_at IS NULL LIMIT 1`;
+      await this.renomearHistorico(antiga[0].charge_point_id, p.identidade);
       await this.prisma.$executeRaw`
         UPDATE ocpp_charge_points SET charge_point_id = ${p.identidade}, planta_id = ${p.plantaId}, updated_at = now()
         WHERE equipamento_id = ${eid}::bpchar AND deleted_at IS NULL`;
       return;
     }
-    // Linha antiga com a mesma identidade (excluída ou sem carregador): sai do caminho do UNIQUE.
+    // Linha antiga com a mesma identidade (excluída ou sem carregador): sai do caminho do UNIQUE,
+    // levando o histórico dela (senão ele apareceria como se fosse da estação nova).
+    const velhas = await this.prisma.$queryRaw<Array<{ antiga: string; nova: string }>>`
+      SELECT charge_point_id AS antiga, left(charge_point_id, 36) || '#' || TRIM(id) AS nova FROM ocpp_charge_points
+      WHERE lower(charge_point_id) = lower(${p.identidade}) AND (deleted_at IS NOT NULL OR equipamento_id IS NULL)`;
+    for (const v of velhas) await this.renomearHistorico(v.antiga, v.nova);
     await this.prisma.$executeRaw`
       UPDATE ocpp_charge_points SET charge_point_id = left(charge_point_id, 36) || '#' || TRIM(id), deleted_at = COALESCE(deleted_at, now())
       WHERE lower(charge_point_id) = lower(${p.identidade}) AND (deleted_at IS NOT NULL OR equipamento_id IS NULL)`;
@@ -159,8 +168,22 @@ export class CarregadorOcppRepositorio {
       UPDATE ocpp_charge_points SET chave_hash = ${chaveHash}, chave_gerada_em = now(), updated_at = now() WHERE id = ${estacaoId}::bpchar`;
   }
 
+  /**
+   * Transações e leituras brutas são presas à estação pela identidade (texto). Quando a
+   * identidade de uma estação muda ou é liberada, o histórico muda junto: outra estação
+   * que venha a usar a mesma identidade (outro carregador, outra planta) não o herda.
+   */
+  private async renomearHistorico(antiga: string, nova: string): Promise<void> {
+    if (antiga === nova) return;
+    await this.prisma.$executeRaw`UPDATE ocpp_transactions SET charge_point_id = ${nova}, updated_at = now() WHERE charge_point_id = ${antiga}`;
+    await this.prisma.$executeRaw`UPDATE ocpp_meter_values SET charge_point_id = ${nova} WHERE charge_point_id = ${antiga}`;
+  }
+
   /** Desfaz o vínculo sem apagar o histórico: a identidade fica livre para outro cadastro. */
   async desvincular(estacaoId: string): Promise<void> {
+    const r = await this.prisma.$queryRaw<Array<{ antiga: string; nova: string }>>`
+      SELECT charge_point_id AS antiga, left(charge_point_id, 36) || '#' || TRIM(id) AS nova FROM ocpp_charge_points WHERE id = ${estacaoId}::bpchar`;
+    if (r[0]) await this.renomearHistorico(r[0].antiga, r[0].nova);
     await this.prisma.$executeRaw`
       UPDATE ocpp_charge_points
       SET deleted_at = now(), conectado = false, chave_hash = NULL, charge_point_id = left(charge_point_id, 36) || '#' || TRIM(id), updated_at = now()
@@ -418,13 +441,17 @@ export class CarregadorOcppRepositorio {
   }
 
   // ---- moradores --------------------------------------------------------------
-  /** Morador dono do cartão, na planta do carregador (sem planta: qualquer planta). */
+  /**
+   * Morador dono do cartão, SÓ na planta do carregador. Carregador sem planta não autoriza
+   * cartão nenhum: sem a planta, o cartão de um condomínio abriria o carregador de outro.
+   */
   async moradorPorTag(plantaId: string | null, tag: string): Promise<MoradorTag | null> {
+    const planta = String(plantaId ?? '').trim();
+    if (!planta) return null;
     const r = await this.prisma.$queryRaw<any[]>`
       SELECT TRIM(id) AS id, nome, ativo, to_char(validade, 'YYYY-MM-DD') AS validade
       FROM moradores
-      WHERE UPPER(TRIM(tag_uid)) = ${tag.trim().toUpperCase()} AND deleted_at IS NULL
-        AND (${plantaId}::text IS NULL OR TRIM(planta_id) = ${plantaId})
+      WHERE UPPER(TRIM(tag_uid)) = ${tag.trim().toUpperCase()} AND deleted_at IS NULL AND TRIM(planta_id) = ${planta}
       ORDER BY ativo DESC LIMIT 1`;
     return r[0] ? { id: r[0].id, nome: r[0].nome, ativo: !!r[0].ativo, validade: r[0].validade ?? null } : null;
   }

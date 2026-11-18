@@ -1,5 +1,6 @@
 import { randomBytes } from 'crypto';
 import { CORRENTE_MIN_A, ID_TAG_MAX } from '../ocpp/ocpp-protocolo';
+import { capacidades, papelCanonico } from '../../core/modules/auth/papeis';
 import type { PapelCarregador } from './carregador.util';
 
 /**
@@ -254,8 +255,38 @@ export const grupoDoMorador = (moradorId: string): string =>
  */
 export const semSegredo = (texto: string): string => String(texto ?? '').replace(/[0-9a-f]{16,}/gi, '•••');
 
-/** Parâmetro cujo valor é segredo pelo nome (senha, chave, token). */
-export const parametroSecreto = (chave: string): boolean => /key|senha|password|secret|token/i.test(chave);
+/** Parâmetro cujo valor é segredo pelo nome (senha, chave, token, credencial, APN...). */
+export const parametroSecreto = (chave: string): boolean => /key|senha|pass|pwd|pin|secret|token|auth|cred|apn|user|login/i.test(chave);
+
+/**
+ * Chaves de configuração do próprio OCPP 1.6 (perfis Core, Local Auth List, Reservation e
+ * Smart Charging): valores sabidamente sem segredo. Só o valor destas vai inteiro para a
+ * trilha e o audit log; parâmetro do fabricante só mostra o valor se for número ou sim/não.
+ */
+const PARAMETROS_SEM_SEGREDO = new Set([
+  'allowofflinetxforunknownid', 'authorizationcacheenabled', 'authorizeremotetxrequests', 'blinkrepeat', 'clockaligneddatainterval',
+  'connectiontimeout', 'connectorphaserotation', 'connectorphaserotationmaxlength', 'getconfigurationmaxkeys', 'heartbeatinterval',
+  'lightintensity', 'localauthorizeoffline', 'localpreauthorize', 'maxenergyoninvalidid', 'metervaluesaligneddata',
+  'metervaluesaligneddatamaxlength', 'metervaluessampleddata', 'metervaluessampleddatamaxlength', 'metervaluesampleinterval',
+  'minimumstatusduration', 'numberofconnectors', 'resetretries', 'stoptransactiononevsidedisconnect', 'stoptransactiononinvalidid',
+  'stoptxnaligneddata', 'stoptxnaligneddatamaxlength', 'stoptxnsampleddata', 'stoptxnsampleddatamaxlength', 'supportedfeatureprofiles',
+  'supportedfeatureprofilesmaxlength', 'transactionmessageattempts', 'transactionmessageretryinterval', 'unlockconnectoronevsidedisconnect',
+  'websocketpinginterval', 'localauthlistenabled', 'localauthlistmaxlength', 'sendlocallistmaxlength', 'reserveconnectorzerosupported',
+  'chargeprofilemaxstacklevel', 'chargingscheduleallowedchargingrateunit', 'chargingschedulemaxperiods', 'connectorswitch3to1phasesupported',
+  'maxchargingprofilesinstalled',
+]);
+
+/**
+ * O que fica registrado do valor de um parâmetro alterado. O carregador recebe o valor
+ * inteiro; a trilha e o audit log, só o que não pode ser segredo.
+ */
+export function valorParaRegistro(chave: string, valor: string): string {
+  const k = String(chave ?? '').trim().toLowerCase();
+  const v = String(valor ?? '');
+  if (parametroSecreto(k) && !PARAMETROS_SEM_SEGREDO.has(k)) return '•••';
+  if (PARAMETROS_SEM_SEGREDO.has(k)) return semSegredo(v).slice(0, 200);
+  return /^(true|false|-?\d+([.,]\d+)?)$/i.test(v.trim()) ? v.trim() : '•••';
+}
 
 export interface PodeNoCarregador {
   /** Iniciar e parar (o morador, só a própria). */
@@ -274,6 +305,23 @@ export function podeNoCarregador(papel: PapelCarregador): PodeNoCarregador {
     limites: papel === 'analista' || papel === 'proprietario',
     bloquear: papel !== 'morador',
     tecnico: papel === 'analista',
+  };
+}
+
+/**
+ * O que o usuário pode de fato: o perfil do carregador E a capacidade do papel dele no NexON
+ * (ADR 0002). O perfil do carregador trata papel sem nome (cativo, associado...) como dono
+ * dentro do escopo, por compatibilidade com iniciar e parar; isso não basta para mexer em
+ * limite, bloquear ou configurar: aí vale a tabela de capacidades do papel.
+ */
+export function podeDeFato(papel: PapelCarregador, role: string | null | undefined): PodeNoCarregador {
+  const p = podeNoCarregador(papel);
+  const c = capacidades(papelCanonico(role ?? null));
+  return {
+    comandar: p.comandar,
+    limites: p.limites && c.configOperacional,
+    bloquear: p.bloquear && c.comandar,
+    tecnico: p.tecnico && c.configTecnica,
   };
 }
 

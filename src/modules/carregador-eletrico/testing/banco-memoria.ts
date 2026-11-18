@@ -120,13 +120,18 @@ export class BancoMemoria {
       },
       async vincular(p: any) {
         const e = b.estacoes.find((x) => x.equipamentoId === p.equipamentoId.trim() && !x.deletedAt);
-        if (e) Object.assign(e, { chargePointId: p.identidade, plantaId: p.plantaId });
+        if (e) {
+          b.transacoes.filter((t) => t.cp === e.chargePointId).forEach((t) => { t.cp = p.identidade; });
+          Object.assign(e, { chargePointId: p.identidade, plantaId: p.plantaId });
+        }
         else b.novaEstacao({ equipamentoId: p.equipamentoId.trim(), identidade: p.identidade, chaveHash: p.chaveHash, plantaId: p.plantaId });
       },
       async trocarChave(id: string, chaveHash: string) { Object.assign(b.estacaoPorId(id), { chaveHash, chaveGeradaEm: new Date() }); },
       async desvincular(id: string) {
         const e = b.estacaoPorId(id);
-        Object.assign(e, { deletedAt: new Date(), conectado: false, chaveHash: null, chargePointId: `${e.chargePointId}#${e.id}` });
+        const lapide = `${e.chargePointId}#${e.id}`;
+        b.transacoes.filter((t) => t.cp === e.chargePointId).forEach((t) => { t.cp = lapide; });
+        Object.assign(e, { deletedAt: new Date(), conectado: false, chaveHash: null, chargePointId: lapide });
       },
       async gravarStatus(id: string, p: any) {
         Object.assign(b.estacaoPorId(id), { status: p.status, errorCode: p.errorCode, vendorErrorCode: p.vendorErrorCode, info: p.info, statusEm: p.quando, falhaDesde: p.falhaDesde });
@@ -211,7 +216,8 @@ export class BancoMemoria {
       },
       async pedirParada(id: string, motivo: string) { Object.assign(b.sessoes.find((s) => s.id === id)!, { motivoFim: motivo, paradaPedidaEm: new Date() }); },
       async moradorPorTag(plantaId: string | null, tag: string) {
-        const m = b.moradores.filter((x) => (x.tagUid ?? '').toUpperCase() === tag.trim().toUpperCase() && (plantaId === null || x.plantaId === plantaId))
+        if (!plantaId) return null; // carregador sem planta não autoriza cartão
+        const m = b.moradores.filter((x) => (x.tagUid ?? '').toUpperCase() === tag.trim().toUpperCase() && x.plantaId === plantaId)
           .sort((a, c) => Number(c.ativo) - Number(a.ativo))[0];
         return m ? { id: m.id, nome: m.nome, ativo: m.ativo, validade: m.validade } : null;
       },

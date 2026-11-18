@@ -13,10 +13,9 @@ import {
   LIMITE_TEMPO_MIN,
   limiteEnergiaDe,
   limiteTempoDe,
-  parametroSecreto,
+  podeDeFato,
   PodeNoCarregador,
-  podeNoCarregador,
-  semSegredo,
+  valorParaRegistro,
 } from './carregador-ocpp.regras';
 import { CarregadorOcppRepositorio, ContextoCarregador, EstacaoCadastro } from './carregador-ocpp.repositorio';
 import { CarregadorOcppService, RespostaComando } from './carregador-ocpp.service';
@@ -77,7 +76,7 @@ export class CarregadorGestaoService {
   private async alvo(equipamentoId: string, user: ScopedUser | undefined, capacidade: keyof PodeNoCarregador): Promise<Alvo & { eid: string; plantaId: string | null }> {
     const eid = equipamentoId.trim();
     const { papel, plantaId } = await this.carregador.acesso(eid, user);
-    if (user && !podeNoCarregador(papel)[capacidade]) throw new ForbiddenException(MSG_SOMENTE_LEITURA);
+    if (user && !podeDeFato(papel, (user as any)?.role)[capacidade]) throw new ForbiddenException(MSG_SOMENTE_LEITURA);
     const ctx = await this.repo.contexto(eid);
     if (!ctx) throw new NotFoundException('Carregador não encontrado');
     return { eid, plantaId, ctx, est: await this.repo.estacaoDoEquipamento(eid) };
@@ -217,6 +216,8 @@ export class CarregadorGestaoService {
     if (await this.repo.identidadeEmUso(identidade, a.eid)) throw new ConflictException('Esta identidade já está ligada a outro carregador.');
     const anterior = a.est?.chargePointId ?? null;
     if (anterior === identidade) return { charge_point_id: identidade }; // nada mudou
+    // Sem planta não dá para saber de quem são os cartões nem quem enxerga o carregador.
+    if (!a.plantaId) throw new BadRequestException('Este carregador está numa instalação sem planta. Ligue a instalação a uma planta antes de vincular por OCPP.');
     // Carregador comandado pela TON mede e fecha a recarga pelo MQTT: os dois juntos brigam pela mesma recarga.
     if (!a.est && a.ctx.mqtt) {
       throw new BadRequestException('Este carregador é comandado pela TON (MQTT). Desligue o MQTT do equipamento antes de vincular por OCPP.');
@@ -277,8 +278,9 @@ export class CarregadorGestaoService {
     if (valor.length > 500) throw new BadRequestException('Valor passa de 500 caracteres.');
     // A chave de conexão não passa por aqui: troca só por "Gerar nova chave" (fica fora do log).
     if (chave.toLowerCase() === 'authorizationkey') throw new BadRequestException('A chave de conexão é trocada em "Gerar nova chave".');
-    // O valor pode carregar segredo (URL com chave, senha): não vai inteiro para a trilha nem para o audit log.
-    const visivel = parametroSecreto(chave) ? '•••' : semSegredo(valor);
+    // O carregador recebe o valor inteiro; a trilha e o audit log só o que não pode ser segredo
+    // (parâmetro padrão do OCPP, ou número/sim-não). Senha, URL com chave e afins viram •••.
+    const visivel = valorParaRegistro(chave, valor);
     const extra = { operacao: 'parametro', parametro: chave, valor: visivel, comando_ocpp: 'ChangeConfiguration' };
     let r: RespostaComando;
     try {
