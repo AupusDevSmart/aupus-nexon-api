@@ -94,7 +94,8 @@ export class CamerasInstaladorService {
       publicado_em: m.publicado_em ?? null,
       valido_ate,
       url_imagem: `${base}/imagem?${qImagem}`,
-      comando: `curl -fsSL '${base}/script?${q}' | bash`,
+      // Sem curl (Ubuntu de fábrica não traz), o wget baixa o script; o script instala o resto.
+      comando: `{ curl -fsSL '${base}/script?${q}' 2>/dev/null || wget -qO- '${base}/script?${q}'; } | bash`,
       // Windows: PowerShell; o script pede administrador sozinho (abre outra janela).
       comando_windows: `powershell -ExecutionPolicy Bypass -Command "irm '${base}/script?${q}&so=windows' | iex"`,
       vinculo_automatico: vinculo,
