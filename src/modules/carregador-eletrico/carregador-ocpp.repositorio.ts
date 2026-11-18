@@ -134,33 +134,36 @@ export class CarregadorOcppRepositorio {
     return r.length > 0;
   }
 
-  /** Cria o vínculo (com a chave) ou troca a identidade de um que já existe. */
+  /**
+   * Cria o vínculo (com a chave) ou troca a identidade de um que já existe. Tudo numa
+   * transação: primeiro tira do caminho qualquer linha antiga com a identidade pedida
+   * (excluída ou sem carregador), levando o histórico dela; depois a estação deste
+   * carregador recebe a identidade, com o próprio histórico. Assim o histórico de uma
+   * estação nunca passa para outra, em nenhum dos dois caminhos.
+   */
   async vincular(p: { equipamentoId: string; plantaId: string | null; identidade: string; chaveHash: string | null }): Promise<void> {
     const eid = p.equipamentoId.trim();
-    const existe = await this.prisma.$queryRaw<any[]>`
-      SELECT 1 FROM ocpp_charge_points WHERE equipamento_id = ${eid}::bpchar AND deleted_at IS NULL LIMIT 1`;
-    if (existe.length) {
-      // Mesma estação com identidade nova: o histórico bruto dela acompanha.
-      const antiga = await this.prisma.$queryRaw<Array<{ charge_point_id: string }>>`
+    await this.prisma.$transaction(async (tx) => {
+      const velhas = await tx.$queryRaw<Array<{ antiga: string; nova: string }>>`
+        SELECT charge_point_id AS antiga, left(charge_point_id, 36) || '#' || TRIM(id) AS nova FROM ocpp_charge_points
+        WHERE lower(charge_point_id) = lower(${p.identidade}) AND (deleted_at IS NOT NULL OR equipamento_id IS NULL)`;
+      for (const v of velhas) await this.renomearHistorico(tx, v.antiga, v.nova);
+      await tx.$executeRaw`
+        UPDATE ocpp_charge_points SET charge_point_id = left(charge_point_id, 36) || '#' || TRIM(id), deleted_at = COALESCE(deleted_at, now())
+        WHERE lower(charge_point_id) = lower(${p.identidade}) AND (deleted_at IS NOT NULL OR equipamento_id IS NULL)`;
+      const atual = await tx.$queryRaw<Array<{ charge_point_id: string }>>`
         SELECT charge_point_id FROM ocpp_charge_points WHERE equipamento_id = ${eid}::bpchar AND deleted_at IS NULL LIMIT 1`;
-      await this.renomearHistorico(antiga[0].charge_point_id, p.identidade);
-      await this.prisma.$executeRaw`
-        UPDATE ocpp_charge_points SET charge_point_id = ${p.identidade}, planta_id = ${p.plantaId}, updated_at = now()
-        WHERE equipamento_id = ${eid}::bpchar AND deleted_at IS NULL`;
-      return;
-    }
-    // Linha antiga com a mesma identidade (excluída ou sem carregador): sai do caminho do UNIQUE,
-    // levando o histórico dela (senão ele apareceria como se fosse da estação nova).
-    const velhas = await this.prisma.$queryRaw<Array<{ antiga: string; nova: string }>>`
-      SELECT charge_point_id AS antiga, left(charge_point_id, 36) || '#' || TRIM(id) AS nova FROM ocpp_charge_points
-      WHERE lower(charge_point_id) = lower(${p.identidade}) AND (deleted_at IS NOT NULL OR equipamento_id IS NULL)`;
-    for (const v of velhas) await this.renomearHistorico(v.antiga, v.nova);
-    await this.prisma.$executeRaw`
-      UPDATE ocpp_charge_points SET charge_point_id = left(charge_point_id, 36) || '#' || TRIM(id), deleted_at = COALESCE(deleted_at, now())
-      WHERE lower(charge_point_id) = lower(${p.identidade}) AND (deleted_at IS NOT NULL OR equipamento_id IS NULL)`;
-    await this.prisma.$executeRaw`
-      INSERT INTO ocpp_charge_points (id, charge_point_id, equipamento_id, planta_id, chave_hash, chave_gerada_em, conectado, created_at, updated_at)
-      VALUES (${this.novoId()}, ${p.identidade}, ${eid}, ${p.plantaId}, ${p.chaveHash}, now(), false, now(), now())`;
+      if (atual[0]) {
+        await this.renomearHistorico(tx, atual[0].charge_point_id, p.identidade);
+        await tx.$executeRaw`
+          UPDATE ocpp_charge_points SET charge_point_id = ${p.identidade}, planta_id = ${p.plantaId}, updated_at = now()
+          WHERE equipamento_id = ${eid}::bpchar AND deleted_at IS NULL`;
+        return;
+      }
+      await tx.$executeRaw`
+        INSERT INTO ocpp_charge_points (id, charge_point_id, equipamento_id, planta_id, chave_hash, chave_gerada_em, conectado, created_at, updated_at)
+        VALUES (${this.novoId()}, ${p.identidade}, ${eid}, ${p.plantaId}, ${p.chaveHash}, now(), false, now(), now())`;
+    });
   }
 
   async trocarChave(estacaoId: string, chaveHash: string): Promise<void> {
@@ -173,21 +176,23 @@ export class CarregadorOcppRepositorio {
    * identidade de uma estação muda ou é liberada, o histórico muda junto: outra estação
    * que venha a usar a mesma identidade (outro carregador, outra planta) não o herda.
    */
-  private async renomearHistorico(antiga: string, nova: string): Promise<void> {
+  private async renomearHistorico(tx: Pick<PrismaService, '$executeRaw'>, antiga: string, nova: string): Promise<void> {
     if (antiga === nova) return;
-    await this.prisma.$executeRaw`UPDATE ocpp_transactions SET charge_point_id = ${nova}, updated_at = now() WHERE charge_point_id = ${antiga}`;
-    await this.prisma.$executeRaw`UPDATE ocpp_meter_values SET charge_point_id = ${nova} WHERE charge_point_id = ${antiga}`;
+    await tx.$executeRaw`UPDATE ocpp_transactions SET charge_point_id = ${nova}, updated_at = now() WHERE charge_point_id = ${antiga}`;
+    await tx.$executeRaw`UPDATE ocpp_meter_values SET charge_point_id = ${nova} WHERE charge_point_id = ${antiga}`;
   }
 
-  /** Desfaz o vínculo sem apagar o histórico: a identidade fica livre para outro cadastro. */
+  /** Desfaz o vínculo sem apagar o histórico (que fica com a estação antiga): a identidade fica livre para outro cadastro. */
   async desvincular(estacaoId: string): Promise<void> {
-    const r = await this.prisma.$queryRaw<Array<{ antiga: string; nova: string }>>`
-      SELECT charge_point_id AS antiga, left(charge_point_id, 36) || '#' || TRIM(id) AS nova FROM ocpp_charge_points WHERE id = ${estacaoId}::bpchar`;
-    if (r[0]) await this.renomearHistorico(r[0].antiga, r[0].nova);
-    await this.prisma.$executeRaw`
-      UPDATE ocpp_charge_points
-      SET deleted_at = now(), conectado = false, chave_hash = NULL, charge_point_id = left(charge_point_id, 36) || '#' || TRIM(id), updated_at = now()
-      WHERE id = ${estacaoId}::bpchar`;
+    await this.prisma.$transaction(async (tx) => {
+      const r = await tx.$queryRaw<Array<{ antiga: string; nova: string }>>`
+        SELECT charge_point_id AS antiga, left(charge_point_id, 36) || '#' || TRIM(id) AS nova FROM ocpp_charge_points WHERE id = ${estacaoId}::bpchar`;
+      if (r[0]) await this.renomearHistorico(tx, r[0].antiga, r[0].nova);
+      await tx.$executeRaw`
+        UPDATE ocpp_charge_points
+        SET deleted_at = now(), conectado = false, chave_hash = NULL, charge_point_id = left(charge_point_id, 36) || '#' || TRIM(id), updated_at = now()
+        WHERE id = ${estacaoId}::bpchar`;
+    });
   }
 
   async gravarStatus(estacaoId: string, p: { status: string; errorCode: string; vendorErrorCode: string | null; info: string | null; quando: Date; falhaDesde: Date | null }): Promise<void> {
