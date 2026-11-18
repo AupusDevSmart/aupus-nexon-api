@@ -27,7 +27,9 @@ describe('instalador do Raspberry', () => {
   it('devolve comando do Terminal com token e audita', async () => {
     const m = montar();
     const r = await m.svc.info(admin, req);
-    expect(r.comando).toBe("curl -fsSL 'https://api.exemplo/api/v1/cameras/instalador/script?token=tk.1' | bash");
+    expect(r.comando).toBe(
+      "{ curl -fsSL 'https://api.exemplo/api/v1/cameras/instalador/script?token=tk.1' 2>/dev/null || wget -qO- 'https://api.exemplo/api/v1/cameras/instalador/script?token=tk.1'; } | bash",
+    );
     expect(m.auditoria.registrar.mock.calls[0][0]).toBe('camera_instalador');
   });
 
