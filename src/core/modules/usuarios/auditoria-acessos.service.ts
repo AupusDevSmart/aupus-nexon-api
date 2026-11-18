@@ -64,7 +64,13 @@ export type AcaoAuditoria =
   | 'camera_trecho_pedido'
   // NEXON-103 (calibração do ângulo do pivô): gravada na TON e restaurada
   | 'pivo_calibracao'
-  | 'pivo_calibracao_restaurada';
+  | 'pivo_calibracao_restaurada'
+  // NEXON-130 (carregador de veículo elétrico por OCPP): comando ao carregador (iniciar, parar,
+  // bloquear, liberar, destravar, reiniciar, atualizar), configuração (limites, valor do kWh) e
+  // conexão OCPP (vínculo, chave, parâmetro do equipamento)
+  | 'carregador_comando'
+  | 'carregador_config'
+  | 'carregador_ocpp';
 
 export interface RegistroAcesso {
   autorId: string | null;

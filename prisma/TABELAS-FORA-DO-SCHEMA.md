@@ -20,6 +20,7 @@ monorepo mas nunca modeladas.
 | `carregador_config` | idem | idem |
 | `carregador_sessoes` | idem | idem |
 | `carregador_pedidos_vaga` | idem | idem |
+| `ocpp_charge_points`, `ocpp_transactions`, `ocpp_meter_values` (+ sequência `ocpp_transaction_seq`) | AupusNexOn — central OCPP 1.6-J dos carregadores (NEXON-130) | `.../2026-08-28_ocpp.sql` e `2026-11-18d_carregador_ocpp.sql` (este também acrescenta colunas em `carregador_config` e `carregador_sessoes`) |
 | `iot_comissionamento` | AupusNexOn — comissionamento (2026-08) | `.../2026-08-25_comissionamento.sql` e `2026-08-26_comissionamento_fotos.sql` |
 | `auditoria_acessos` | AupusNexOn — apps v2 (AUPU-70), trilha de acesso | `.../2026-09-28_1-logs-mqtt-trilha.sql` |
 | `usuario_notificacoes`, `dispositivos_push` | idem, conta do app | `.../2026-09-28_2-usuarios-conta.sql` |

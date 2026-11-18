@@ -1,4 +1,4 @@
-import { Injectable, Logger, ForbiddenException, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, Logger, ForbiddenException, NotFoundException, BadRequestException, ConflictException, GatewayTimeoutException, HttpException, Optional } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import { randomBytes } from 'node:crypto';
 import { MailService } from '../../core/mail/mail.service';
@@ -18,6 +18,53 @@ import {
 import { MSG_SOMENTE_LEITURA } from '../../core/modules/auth/papeis';
 import { PrismaService, PermissionScopeService, ScopedUser } from '@/core';
 import { MqttService } from '../../shared/mqtt/mqtt.service';
+import type { ClienteInfo } from '@/core/common/cliente-info';
+import { ErroOcpp } from '../ocpp/ocpp.service';
+import { CORRENTE_MIN_A } from '../ocpp/ocpp-protocolo';
+import { CarregadorAuditoriaService } from './carregador-auditoria.service';
+import { CarregadorOcppRepositorio, ConfigCarregador, EstacaoCadastro } from './carregador-ocpp.repositorio';
+import { CarregadorOcppService } from './carregador-ocpp.service';
+import {
+  descreverFalha,
+  estadoDoStatus,
+  gerarIdTag,
+  limiteDaRecarga,
+  limiteEnergiaDe,
+  limiteTempoDe,
+  LIMITE_ENERGIA_MAX,
+  LIMITE_ENERGIA_MIN,
+  LIMITE_TEMPO_MAX,
+  LIMITE_TEMPO_MIN,
+  origemDaRecarga,
+  podeNoCarregador,
+  textoMotivoFim,
+} from './carregador-ocpp.regras';
+
+/** Erro da chamada ao carregador → resposta HTTP com mensagem de tela. */
+export function erroDoCarregador(e: unknown): HttpException {
+  if (e instanceof HttpException) return e;
+  if (e instanceof ErroOcpp) {
+    if (e.tipo === 'offline') return new BadRequestException('Carregador sem comunicação. Confira a internet do local e tente de novo.');
+    if (e.tipo === 'timeout') return new GatewayTimeoutException('O carregador não respondeu ao comando. Tente de novo.');
+    return new ConflictException(`O carregador não aceitou o comando (${e.codigo ?? 'erro'}).`);
+  }
+  return new BadRequestException(e instanceof Error ? e.message : 'Falha ao falar com o carregador.');
+}
+
+/** Limites do carregador no formato da tela (`/estado` e resposta do `PUT /config`). */
+export function limitesParaTela(cfg: ConfigCarregador) {
+  return {
+    tempo_min: cfg.limiteTempoMin,
+    energia_kwh: cfg.limiteEnergiaKwh,
+    inicio_automatico: cfg.inicioAutomatico,
+    corrente_a: cfg.limiteCorrenteA,
+    corrente_min_a: CORRENTE_MIN_A,
+    corrente_max_a: cfg.correnteMaxA,
+    corrente_suportada: cfg.correnteSuportada,
+  };
+}
+
+const iso = (d: Date | null | undefined): string | null => (d ? new Date(d).toISOString().replace(/\.\d{3}Z$/, 'Z') : null);
 
 /**
  * Carregador Elétrico (EV) — recarga por morador em condomínio.
@@ -43,7 +90,36 @@ export class CarregadorEletricoService {
     private readonly scope: PermissionScopeService,
     private readonly mqtt: MqttService,
     private readonly mail: MailService,
-  ) {}
+    // Carregador ligado por OCPP (NEXON-130). Opcionais: sem eles vale só o fluxo da TON.
+    @Optional() private readonly ocpp?: CarregadorOcppService,
+    @Optional() private readonly repoOcpp?: CarregadorOcppRepositorio,
+    @Optional() private readonly auditoria?: CarregadorAuditoriaService,
+  ) {
+    // Acesso que venceu durante a recarga expira assim que ela fecha.
+    this.ocpp?.quandoEncerrar(() => void this.cuidarValidades());
+  }
+
+  /** Estação OCPP do carregador, ou null: aí o carregador é o da TON (MQTT). */
+  private async estacaoOcpp(eid: string): Promise<EstacaoCadastro | null> {
+    if (!this.ocpp || !this.repoOcpp) return null;
+    return this.ocpp.estacao(eid);
+  }
+
+  /**
+   * Confere o acesso ao carregador (escopo; morador pela planta) e devolve o perfil.
+   * Usado pelas rotas de gestão (limites, comandos, conexão OCPP).
+   */
+  async acesso(equipamentoId: string, user?: ScopedUser): Promise<{ papel: PapelCarregador; morador: any | null; plantaId: string | null }> {
+    const eid = equipamentoId.trim();
+    const plantaId = await this.plantaDoCarregador(eid);
+    const p = user ? await this.papel(user) : { papel: 'analista' as PapelCarregador, morador: null };
+    await this.assertCarregador(eid, plantaId, user, p);
+    return { ...p, plantaId };
+  }
+
+  private quem(user: ScopedUser | undefined, padrao: string): string {
+    return String((user as any)?.nome || (user as any)?.name || (user as any)?.email || padrao);
+  }
 
   // ===== Perfil (analista | proprietario | morador) =====
   /** Morador ligado ao usuário logado (moradores.usuario_id ou e-mail igual ao do usuário). */
@@ -121,7 +197,7 @@ export class CarregadorEletricoService {
   }
 
   // ===== Configuração do carregador (valor do kWh) =====
-  async salvarConfig(equipamentoId: string, body: any, user?: ScopedUser): Promise<any> {
+  async salvarConfig(equipamentoId: string, body: any, user?: ScopedUser, cliente?: ClienteInfo): Promise<any> {
     const eid = equipamentoId.trim();
     await this.assertPlantaNoEscopo(user, (await this.plantaDoCarregador(eid)) || '');
     // Valor do kWh = configuração técnica (PER-33a): Admin e analistas.
@@ -136,6 +212,8 @@ export class CarregadorEletricoService {
     }
     const antes = atual?.tarifa_kwh != null ? Number(atual.tarifa_kwh).toFixed(2).replace('.', ',') : '—';
     await this.trilha(eid, `Valor do kWh alterado: R$ ${antes} → R$ ${tarifa.toFixed(2).replace('.', ',')} (vale para recargas iniciadas a partir de agora)`, 'carregador.tarifa', user);
+    await this.auditar('carregador_config', eid, `Valor do kWh alterado: R$ ${antes} → R$ ${tarifa.toFixed(2).replace('.', ',')}`, user, cliente, 'ok',
+      { campo: 'tarifa_kwh', antes: atual?.tarifa_kwh != null ? Number(atual.tarifa_kwh) : null, depois: tarifa });
     return { tarifa_kwh: tarifa };
   }
 
@@ -145,7 +223,7 @@ export class CarregadorEletricoService {
    * Trilha de comando (logs_mqtt tipo='comando'): quem liberou, parou ou pediu a vaga.
    * Aparece em Registros do carregador e na busca de logs. Nunca lança.
    */
-  private async trilha(equipamentoId: string, mensagem: string, semantico: string, user?: ScopedUser): Promise<void> {
+  async trilha(equipamentoId: string, mensagem: string, semantico: string, user?: ScopedUser): Promise<void> {
     try {
       await this.prisma.logs_mqtt.create({
         data: {
@@ -358,14 +436,17 @@ export class CarregadorEletricoService {
   }
 
   // ===== Sessão: liberar (porteiro) =====
-  async liberarRecarga(equipamentoId: string, moradorId: string, user?: ScopedUser): Promise<any> {
+  async liberarRecarga(
+    equipamentoId: string, moradorId: string, user?: ScopedUser,
+    opts: { limiteTempoMin?: unknown; limiteEnergiaKwh?: unknown; cliente?: ClienteInfo } = {},
+  ): Promise<any> {
     const eid = equipamentoId.trim();
     const plantaId = await this.plantaDoCarregador(eid);
     const p = await this.papel(user);
     await this.assertCarregador(eid, plantaId, user, p);
     const alvo = p.papel === 'morador' ? String(p.morador?.id ?? '') : moradorId.trim();
     const mor = (await this.prisma.$queryRaw<any[]>`
-      SELECT id, nome, ativo, to_char(validade,'YYYY-MM-DD') AS validade FROM moradores WHERE id=${alvo} AND deleted_at IS NULL LIMIT 1`)[0];
+      SELECT id, nome, ativo, tag_uid, to_char(validade,'YYYY-MM-DD') AS validade FROM moradores WHERE id=${alvo} AND deleted_at IS NULL LIMIT 1`)[0];
     if (!mor) throw new NotFoundException('Morador não encontrado');
     if (!mor.ativo || situacaoValidade(mor.validade, hojeSP()) === 'vencido') {
       throw new BadRequestException(`O acesso de ${mor.nome} ao carregador está ${mor.ativo ? `vencido desde ${dataBR(mor.validade)}` : 'desativado'}.`);
@@ -375,17 +456,89 @@ export class CarregadorEletricoService {
     const ativa = (await this.prisma.$queryRaw<any[]>`SELECT id FROM carregador_sessoes WHERE TRIM(equipamento_id)=${eid} AND status='ativa' LIMIT 1`)[0];
     if (ativa) throw new BadRequestException('Já existe uma sessão ativa nesta vaga. Encerre a atual (desconecte o carro) antes.');
 
+    const quem = this.quem(user, 'porteiro');
+    const est = await this.estacaoOcpp(eid);
+    if (est) return this.liberarPorOcpp(est, { eid, plantaId, mor, quem, porMorador: p.papel === 'morador', user, opts });
+
     const cfg = (await this.prisma.$queryRaw<any[]>`SELECT ultima_leitura_kwh, tarifa_kwh, ultimo_soc FROM carregador_config WHERE TRIM(equipamento_id)=${eid} LIMIT 1`)[0];
     const kwhInicio = cfg?.ultima_leitura_kwh ?? null;
     const id = this.genId();
-    const quem = String((user as any)?.name || (user as any)?.email || 'porteiro');
     // O valor do kWh fica gravado na recarga: mudar a tarifa depois não recalcula recarga fechada.
     await this.prisma.$executeRaw`
       INSERT INTO carregador_sessoes (id, equipamento_id, planta_id, morador_id, morador_nome, inicio, kwh_inicio, liberado_por, liberado_por_user, status, tarifa_kwh, soc_inicio)
       VALUES (${id}, ${eid}, ${plantaId}, ${mor.id}, ${mor.nome}, now(), ${kwhInicio}, ${p.papel === 'morador' ? 'morador' : 'porteiro'}, ${quem}, 'ativa', ${cfg?.tarifa_kwh ?? null}, ${cfg?.ultimo_soc ?? null})`;
     await this.enviarComando(eid, { carregador: 'habilitar', sessao: id, morador: mor.nome });
     await this.trilha(eid, `Recarga iniciada · ${mor.nome} · por ${quem}`, 'carregador.iniciar', user);
+    await this.auditar('carregador_comando', eid, `Recarga iniciada · ${mor.nome}`, user, opts.cliente, 'ok', { comando: 'iniciar', via: 'ton', sessao: id, morador: { id: String(mor.id).trim(), nome: mor.nome } });
     return { id, morador: mor.nome };
+  }
+
+  /**
+   * Iniciar em carregador OCPP: a recarga nasce "aguardando" com a tag (só dela) que o carregador
+   * vai devolver, e só então sai o RemoteStartTransaction (ele pode pedir a autorização
+   * da tag antes de responder). Recusa ou falha no envio desfaz a recarga.
+   */
+  private async liberarPorOcpp(
+    est: EstacaoCadastro,
+    a: { eid: string; plantaId: string | null; mor: any; quem: string; porMorador: boolean; user?: ScopedUser; opts: { limiteTempoMin?: unknown; limiteEnergiaKwh?: unknown; cliente?: ClienteInfo } },
+  ): Promise<any> {
+    const { eid, mor, quem, user, opts } = a;
+    const morador = { id: String(mor.id).trim(), nome: mor.nome };
+    const falhar = async (erro: HttpException, extra: Record<string, unknown> = {}): Promise<never> => {
+      await this.auditar('carregador_comando', eid, `Recarga não iniciada · ${mor.nome}: ${erro.message}`, user, opts.cliente, 'erro',
+        { comando: 'iniciar', via: 'ocpp', charge_point_id: est.chargePointId, morador, ...extra });
+      throw erro;
+    };
+    const tempo = limiteTempoDe(opts.limiteTempoMin);
+    if (tempo === undefined) throw new BadRequestException(`Limite de tempo inválido (${LIMITE_TEMPO_MIN} a ${LIMITE_TEMPO_MAX} min).`);
+    const energia = limiteEnergiaDe(opts.limiteEnergiaKwh);
+    if (energia === undefined) throw new BadRequestException(`Limite de energia inválido (${LIMITE_ENERGIA_MIN} a ${LIMITE_ENERGIA_MAX} kWh).`);
+    if (!this.ocpp!.conectado(est)) await falhar(erroDoCarregador(new ErroOcpp('offline', '')));
+    if (!est.disponivel) await falhar(new BadRequestException('Carregador bloqueado. Libere o carregador antes de iniciar.'));
+    const falha = descreverFalha(est);
+    if (est.status === 'Faulted') await falhar(new BadRequestException(`Carregador em falha${falha ? `: ${falha.titulo}` : ''}.`), { falha });
+
+    const cfg = await this.repoOcpp!.config(eid);
+    const limiteTempoMin = limiteDaRecarga(tempo, cfg.limiteTempoMin);
+    const limiteEnergiaKwh = limiteDaRecarga(energia, cfg.limiteEnergiaKwh);
+    // Tag descartável, nunca o cartão do morador: recarga cancelada não deixa uma autorização
+    // válida no carregador. O cartão dele ainda para a recarga (mesmo grupo, ver `autorizar`).
+    const idTag = gerarIdTag();
+    const id = await this.repoOcpp!.criarSessao({
+      equipamentoId: eid, plantaId: a.plantaId, moradorId: morador.id, moradorNome: mor.nome, inicio: new Date(), kwhInicio: null,
+      liberadoPor: a.porMorador ? 'morador' : 'porteiro', liberadoPorUser: quem, tarifaKwh: cfg.tarifaKwh, socInicio: null,
+      transactionId: null, idTag, limiteTempoMin, limiteEnergiaKwh,
+    });
+    const limites = { tempo_min: limiteTempoMin, energia_kwh: limiteEnergiaKwh };
+    let r: { resposta: string; ms: number };
+    try {
+      r = await this.ocpp!.iniciarRemoto(est, idTag);
+    } catch (e) {
+      await this.repoOcpp!.cancelar(id);
+      return falhar(erroDoCarregador(e), { comando_ocpp: 'RemoteStartTransaction', limites });
+    }
+    if (r.resposta !== 'Accepted') {
+      await this.repoOcpp!.cancelar(id);
+      return falhar(
+        new ConflictException(`O carregador recusou o início (resposta: ${r.resposta || 'vazia'}). Confira se o carro está conectado e se não há outra recarga em andamento.`),
+        { comando_ocpp: 'RemoteStartTransaction', resposta: r.resposta, latencia_ms: r.ms, limites },
+      );
+    }
+    const textoLimite = [limiteTempoMin ? `${limiteTempoMin} min` : null, limiteEnergiaKwh ? `${String(limiteEnergiaKwh).replace('.', ',')} kWh` : null].filter(Boolean).join(' · ');
+    await this.trilha(eid, `Recarga liberada · ${mor.nome} · por ${quem}${textoLimite ? ` · limite ${textoLimite}` : ''}`, 'carregador.iniciar', user);
+    await this.auditar('carregador_comando', eid, `Recarga iniciada · ${mor.nome}`, user, opts.cliente, 'ok',
+      { comando: 'iniciar', via: 'ocpp', charge_point_id: est.chargePointId, comando_ocpp: 'RemoteStartTransaction', resposta: r.resposta, latencia_ms: r.ms, sessao: id, morador, limites });
+    return { id, morador: mor.nome, aguardando_inicio: true };
+  }
+
+  /** Audit log (auditoria_acessos) com carregador, instalação e planta. Nunca lança. */
+  private async auditar(
+    acao: 'carregador_comando' | 'carregador_config' | 'carregador_ocpp', eid: string, mensagem: string,
+    user: ScopedUser | undefined, cliente: ClienteInfo | undefined, resultado: 'ok' | 'erro', extra: Record<string, unknown>,
+  ): Promise<void> {
+    if (!this.auditoria || !this.repoOcpp) return;
+    const contexto = await this.repoOcpp.contexto(eid).catch(() => null);
+    await this.auditoria.registrar(acao, { mensagem, user: user as any, cliente, contexto, resultado, extra });
   }
 
   // ===== Pedir a vaga (marca início do ocioso da sessão que ocupa) =====
@@ -411,7 +564,7 @@ export class CarregadorEletricoService {
   }
 
   // ===== Parar recarga pela tela (corta o contator e fecha a sessão) =====
-  async pararRecarga(equipamentoId: string, user?: ScopedUser): Promise<any> {
+  async pararRecarga(equipamentoId: string, user?: ScopedUser, cliente?: ClienteInfo): Promise<any> {
     const eid = equipamentoId.trim();
     const plantaId = await this.plantaDoCarregador(eid);
     const p = await this.papel(user);
@@ -424,11 +577,49 @@ export class CarregadorEletricoService {
       const dono = (await this.prisma.$queryRaw<any[]>`SELECT morador_id FROM carregador_sessoes WHERE id=${ativa.id}`)[0];
       if (String(dono?.morador_id ?? '').trim() !== String(p.morador?.id ?? '').trim()) throw new ForbiddenException('Só quem está carregando pode parar a recarga.');
     }
+    const quem = this.quem(user, 'usuário');
+    const est = await this.estacaoOcpp(eid);
+    if (est) return this.pararPorOcpp(est, eid, ativa, quem, user, cliente);
     const cfg = (await this.prisma.$queryRaw<any[]>`SELECT ultima_leitura_kwh FROM carregador_config WHERE TRIM(equipamento_id)=${eid} LIMIT 1`)[0];
     const r = await this.encerrarSessao(eid, cfg?.ultima_leitura_kwh ?? null, 'parado_no_nexon');
-    const quem = String((user as any)?.name || (user as any)?.email || 'usuário');
     await this.trilha(eid, `Recarga parada · ${ativa.morador_nome ?? '—'} · por ${quem}`, 'carregador.parar', user);
+    await this.auditar('carregador_comando', eid, `Recarga parada · ${ativa.morador_nome ?? '—'}`, user, cliente, 'ok', { comando: 'parar', via: 'ton', sessao: String(ativa.id).trim() });
     return r;
+  }
+
+  /**
+   * Parar em carregador OCPP: manda RemoteStopTransaction e a recarga fecha quando o
+   * carregador confirma, com a leitura final dele. Recarga que ainda aguardava o início
+   * é só cancelada.
+   */
+  private async pararPorOcpp(est: EstacaoCadastro, eid: string, ativa: any, quem: string, user?: ScopedUser, cliente?: ClienteInfo): Promise<any> {
+    const s = await this.repoOcpp!.sessaoAtiva(eid);
+    const nome = ativa.morador_nome ?? '—';
+    const base = { comando: 'parar', via: 'ocpp', charge_point_id: est.chargePointId, sessao: String(ativa.id).trim() };
+    if (!s || s.transactionId === null) {
+      if (s) await this.repoOcpp!.cancelar(s.id);
+      await this.trilha(eid, `Recarga cancelada antes de começar · ${nome} · por ${quem}`, 'carregador.parar', user);
+      await this.auditar('carregador_comando', eid, `Recarga cancelada antes de começar · ${nome}`, user, cliente, 'ok', base);
+      return { ok: true, sessao: String(ativa.id).trim(), cancelada: true };
+    }
+    const extra = { ...base, comando_ocpp: 'RemoteStopTransaction', transaction_id: s.transactionId };
+    let r: { resposta: string; ms: number };
+    try {
+      r = await this.ocpp!.pararRemoto(est, s.transactionId);
+    } catch (e) {
+      const erro = erroDoCarregador(e);
+      await this.auditar('carregador_comando', eid, `Recarga não parada · ${nome}: ${erro.message}`, user, cliente, 'erro', extra);
+      throw erro;
+    }
+    if (r.resposta !== 'Accepted') {
+      const erro = new ConflictException(`O carregador recusou a parada (resposta: ${r.resposta || 'vazia'}).`);
+      await this.auditar('carregador_comando', eid, `Recarga não parada · ${nome}: ${erro.message}`, user, cliente, 'erro', { ...extra, resposta: r.resposta, latencia_ms: r.ms });
+      throw erro;
+    }
+    await this.repoOcpp!.pedirParada(s.id, 'parado_no_nexon');
+    await this.trilha(eid, `Recarga parada · ${nome} · por ${quem}`, 'carregador.parar', user);
+    await this.auditar('carregador_comando', eid, `Recarga parada · ${nome}`, user, cliente, 'ok', { ...extra, resposta: r.resposta, latencia_ms: r.ms });
+    return { ok: true, sessao: s.id, aguardando_carregador: true };
   }
 
   // ===== Encerrar sessão (chamado pela ingestão MQTT ao desconectar) =====
@@ -444,7 +635,7 @@ export class CarregadorEletricoService {
       SET fim=now(), kwh_fim=${kwhFim},
           kwh_total = CASE WHEN ${kwhFim}::numeric IS NOT NULL AND kwh_inicio IS NOT NULL THEN GREATEST(${kwhFim}::numeric - kwh_inicio, 0) ELSE kwh_total END,
           ocioso_min = CASE WHEN ocioso_inicio IS NOT NULL THEN GREATEST(EXTRACT(EPOCH FROM (now() - ocioso_inicio))/60, 0)::int ELSE 0 END,
-          status='encerrada', updated_at=now()
+          motivo_fim=${motivo.slice(0, 24)}, status='encerrada', updated_at=now()
       WHERE id=${ativa.id}`;
     // Corta o fornecimento (garantia — a TON já cortou no hardware).
     await this.enviarComando(eid, { carregador: 'desabilitar', motivo });
@@ -488,8 +679,11 @@ export class CarregadorEletricoService {
       SELECT s.id, TRIM(s.equipamento_id) AS equipamento_id, s.morador_nome, s.status, TRIM(s.morador_id) AS morador_id,
              s.kwh_total, s.ocioso_min, s.liberado_por, s.liberado_por_user, s.ocioso_por_nome, s.planta_id,
              COALESCE(s.tarifa_kwh, c.tarifa_kwh) AS tarifa_kwh,
-             to_char(s.inicio,'DD/MM HH24:MI') AS inicio, to_char(s.fim,'DD/MM HH24:MI') AS fim,
-             to_char(s.inicio,'YYYY-MM-DD"T"HH24:MI:SS') AS inicio_iso, to_char(s.fim,'YYYY-MM-DD"T"HH24:MI:SS') AS fim_iso
+             to_char((s.inicio AT TIME ZONE 'UTC') AT TIME ZONE 'America/Sao_Paulo','DD/MM HH24:MI') AS inicio,
+             to_char((s.fim AT TIME ZONE 'UTC') AT TIME ZONE 'America/Sao_Paulo','DD/MM HH24:MI') AS fim,
+             to_char(s.inicio,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS inicio_iso, to_char(s.fim,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS fim_iso,
+             GREATEST(EXTRACT(EPOCH FROM (COALESCE(s.fim, now()::timestamp) - s.inicio))/60, 0)::int AS duracao_min,
+             s.motivo_fim
       FROM carregador_sessoes s
       LEFT JOIN carregador_config c ON TRIM(c.equipamento_id)=TRIM(s.equipamento_id)
       WHERE (${equipamentoId ?? null}::text IS NULL OR TRIM(s.equipamento_id) = ${equipamentoId ?? null})
@@ -498,7 +692,8 @@ export class CarregadorEletricoService {
         AND (${eqs === null}::boolean OR TRIM(s.equipamento_id) = ANY(${eqs ?? []}::text[]))
       ORDER BY (s.status='ativa') DESC, s.inicio DESC
       LIMIT ${Math.min(Number(limite) || 100, 500)}`;
-    return this.ocultarValores(rows, user, p);
+    const comOrigem = rows.map((r) => ({ ...r, motivo_fim_texto: textoMotivoFim(r.motivo_fim), origem: origemDaRecarga(r.liberado_por) }));
+    return this.ocultarValores(comOrigem, user, p);
   }
 
   async getEstado(equipamentoId: string, user?: ScopedUser): Promise<any> {
@@ -509,20 +704,49 @@ export class CarregadorEletricoService {
     const cfg = (await this.prisma.$queryRaw<any[]>`SELECT * FROM carregador_config WHERE TRIM(equipamento_id)=${eid} LIMIT 1`)[0] ?? null;
     const ativa = (await this.prisma.$queryRaw<any[]>`
       SELECT id, morador_nome, TRIM(morador_id) AS morador_id, kwh_total, tarifa_kwh, soc_inicio,
-             to_char(inicio,'DD/MM HH24:MI') AS inicio, to_char(inicio,'YYYY-MM-DD"T"HH24:MI:SS') AS inicio_iso, ocioso_inicio, ocioso_por_nome
-      FROM carregador_sessoes WHERE TRIM(equipamento_id)=${eid} AND status='ativa' LIMIT 1`)[0] ?? null;
+             to_char((inicio AT TIME ZONE 'UTC') AT TIME ZONE 'America/Sao_Paulo','DD/MM HH24:MI') AS inicio,
+             to_char(inicio,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS inicio_iso, ocioso_inicio, ocioso_por_nome,
+             GREATEST(EXTRACT(EPOCH FROM (now()::timestamp - inicio))/60, 0)::int AS duracao_min,
+             limite_tempo_min, limite_energia_kwh, liberado_por, ocpp_transaction_id
+      FROM carregador_sessoes WHERE TRIM(equipamento_id)=${eid} AND status='ativa' ORDER BY inicio DESC LIMIT 1`)[0] ?? null;
     const ultimas = await this.listarSessoes(user, eid, 8);
     // Valores: operador sem "Ver R$" não vê R$/kWh; morador não vê os da recarga de outro.
     const veTarifa = p.papel !== 'operador' || !user || (await this.scope.podeVerValores(eid, user));
-    const [ativaVis] = ativa ? await this.ocultarValores([{ ...ativa, equipamento_id: eid }], user, p) : [null];
+    const est = await this.estacaoOcpp(eid);
+    const conectado = est ? this.ocpp!.conectado(est) : false;
+    const ativaTela = ativa
+      ? (({ liberado_por, ocpp_transaction_id, limite_tempo_min, limite_energia_kwh, ...resto }) => ({
+          ...resto,
+          aguardando_inicio: !!est && ocpp_transaction_id == null,
+          origem: origemDaRecarga(liberado_por),
+          limite_tempo_min: limite_tempo_min == null ? null : Number(limite_tempo_min),
+          limite_energia_kwh: limite_energia_kwh == null ? null : Number(limite_energia_kwh),
+        }))(ativa)
+      : null;
+    const [ativaVis] = ativaTela ? await this.ocultarValores([{ ...ativaTela, equipamento_id: eid }], user, p) : [null];
+    const falha = est ? descreverFalha(est) : null;
+    const ultimaComunicacao = est
+      ? [est.ultimaConexao, est.ultimoHeartbeat, est.statusEm, est.leituraEm].filter((d): d is Date => !!d).sort((a, b) => b.getTime() - a.getTime())[0] ?? null
+      : null;
+    const ocpp = est
+      ? {
+          ocpp: { conectado, ultima_comunicacao: iso(ultimaComunicacao), disponivel: est.disponivel, fabricante: est.vendor, modelo: est.model },
+          leitura: est.leitura ?? null,
+          falha: falha ? { codigo: falha.codigo, ocpp: falha.ocpp, titulo: falha.titulo, solucao: falha.solucao, desde: iso(est.falhaDesde) } : null,
+          limites: limitesParaTela(await this.repoOcpp!.config(eid)),
+        }
+      : { ocpp: null, leitura: null, falha: null, limites: null };
     return {
+      ...ocpp,
+      pode: podeNoCarregador(p.papel),
       papel: p.papel,
       meu_morador: p.morador ? { id: String(p.morador.id).trim(), nome: p.morador.nome, apartamento: p.morador.apartamento, validade: p.morador.validade, ativo: p.morador.ativo } : null,
       soc: cfg?.ultimo_soc != null && cfg?.ultimo_soc_em && Date.now() - new Date(cfg.ultimo_soc_em).getTime() < 30 * 60000 ? Number(cfg.ultimo_soc) : null,
       capacidade_bateria_kwh: cfg?.capacidade_bateria_kwh ?? null,
       potencia_kw: cfg?.potencia_kw ?? null,
-      estado: cfg?.ultimo_estado ?? 'desconhecido',
-      fonte_kwh: cfg?.fonte_kwh ?? 'ton',
+      // OCPP: o estado é o do carregador agora; sem conexão, o último estado não vale mais.
+      estado: est ? (conectado ? estadoDoStatus(est.status) : 'sem_comunicacao') : cfg?.ultimo_estado ?? 'desconhecido',
+      fonte_kwh: est ? 'ocpp' : cfg?.fonte_kwh ?? 'ton',
       tarifa_kwh: veTarifa ? cfg?.tarifa_kwh ?? null : null,
       ultima_leitura_kwh: cfg?.ultima_leitura_kwh ?? null,
       ultima_leitura: cfg?.ultima_leitura ?? null,
@@ -544,7 +768,8 @@ export class CarregadorEletricoService {
     // Valor = kWh × R$/kWh gravado na recarga (fallback: o do carregador).
     const det = await this.prisma.$queryRaw<any[]>`
       SELECT COALESCE(m.apartamento, '') AS apartamento, s.morador_nome AS morador, TRIM(e.nome) AS vaga,
-             to_char(s.inicio,'DD/MM/YYYY HH24:MI') AS inicio, to_char(s.fim,'DD/MM/YYYY HH24:MI') AS fim,
+             to_char((s.inicio AT TIME ZONE 'UTC') AT TIME ZONE 'America/Sao_Paulo','DD/MM/YYYY HH24:MI') AS inicio,
+             to_char((s.fim AT TIME ZONE 'UTC') AT TIME ZONE 'America/Sao_Paulo','DD/MM/YYYY HH24:MI') AS fim,
              GREATEST(EXTRACT(EPOCH FROM (s.fim - s.inicio))/60, 0)::int AS duracao_min,
              ROUND(COALESCE(s.kwh_total,0)::numeric, 3) AS kwh, COALESCE(s.ocioso_min,0)::int AS ocioso_min,
              COALESCE(s.tarifa_kwh, c.tarifa_kwh) AS tarifa_kwh,
@@ -555,8 +780,8 @@ export class CarregadorEletricoService {
       LEFT JOIN moradores m ON m.id = s.morador_id
       LEFT JOIN equipamentos e ON TRIM(e.id) = TRIM(s.equipamento_id)
       WHERE s.status='encerrada'
-        AND s.inicio >= ${inicioMes}::date
-        AND s.inicio < (${inicioMes}::date + interval '1 month')
+        AND ((s.inicio AT TIME ZONE 'UTC') AT TIME ZONE 'America/Sao_Paulo') >= ${inicioMes}::date
+        AND ((s.inicio AT TIME ZONE 'UTC') AT TIME ZONE 'America/Sao_Paulo') < (${inicioMes}::date + interval '1 month')
         AND (${plantaId ?? null}::text IS NULL OR s.planta_id = ${plantaId ?? null})
       ORDER BY m.apartamento NULLS LAST, s.morador_nome, s.inicio`;
     const detalhe = plantas ? det.filter((r) => !!r.planta_id && plantas.includes(String(r.planta_id).trim())) : det;
