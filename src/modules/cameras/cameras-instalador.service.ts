@@ -150,4 +150,19 @@ export class CamerasInstaladorService {
     res.setHeader('Cache-Control', 'private, no-store');
     res.send(texto);
   }
+
+  /** GET /cameras/instalador/primeiro-boot?token= — primeiro-boot.sh mais novo, com o endereço do relato do aparelho. */
+  async primeiroBoot(user: Usuario | undefined, req: Request, res: Response) {
+    this.exigir(user);
+    let texto: string;
+    try {
+      texto = await readFile(this.storage.absoluto(`${PASTA}/primeiro-boot.sh`), 'utf8');
+    } catch {
+      throw new NotFoundException('primeiro-boot.sh não publicado');
+    }
+    texto = texto.replace('__NEXON_RELATO_APARELHO_URL__', `${this.base(req)}/relato-aparelho`);
+    res.setHeader('Content-Type', 'text/x-shellscript; charset=utf-8');
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.send(texto);
+  }
 }

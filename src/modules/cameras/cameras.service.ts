@@ -183,7 +183,7 @@ export class CamerasService {
       ? !!(await this.prisma.cameras_descobertas.findFirst({ where: { agente_id: c.agente_id, ip: c.ip, inicializada: false } }))
       : false;
     await this.auditoria.registrar('camera_cadastro', {
-      mensagem: `Câmera "${c.nome}" (${c.ip}) cadastrada${deFabrica ? ' (de fábrica: o aparelho cria a senha do admin)' : ''} — ${ctx.unidade.nome} (${ctx.planta.nome})`,
+      mensagem: `Câmera "${c.nome}" (${c.ip}${c.canal > 1 ? ` canal ${c.canal}` : ""}) cadastrada${deFabrica ? ' (de fábrica: o aparelho cria a senha do admin)' : ''} — ${ctx.unidade.nome} (${ctx.planta.nome})`,
       user,
       cliente,
       unidade: ctx.unidade,
@@ -253,7 +253,7 @@ export class CamerasService {
     const alteracoes = this.alteracoes(this.semSenha(atual), this.semSenha(c));
     if (dto.senha !== undefined) alteracoes.senha = { de: '***', para: '*** (alterada)' };
     await this.auditoria.registrar('camera_edicao', {
-      mensagem: `Câmera "${c.nome}" (${c.ip}) editada — ${ctx.unidade?.nome ?? c.unidade_id}${ctx.planta ? ` (${ctx.planta.nome})` : ''}: ${Object.keys(alteracoes).join(', ') || 'sem mudança'}`,
+      mensagem: `Câmera "${c.nome}" (${c.ip}${c.canal > 1 ? ` canal ${c.canal}` : ""}) editada — ${ctx.unidade?.nome ?? c.unidade_id}${ctx.planta ? ` (${ctx.planta.nome})` : ''}: ${Object.keys(alteracoes).join(', ') || 'sem mudança'}`,
       user,
       cliente,
       unidade: ctx.unidade,
@@ -279,7 +279,7 @@ export class CamerasService {
     await this.storage.remover(this.storage.caminhoMiniatura(c.id));
     const ctx = await this.auditoria.contextoUnidade(c.unidade_id);
     await this.auditoria.registrar('camera_exclusao', {
-      mensagem: `Câmera "${c.nome}" (${c.ip}) excluída — ${ctx.unidade?.nome ?? c.unidade_id}${ctx.planta ? ` (${ctx.planta.nome})` : ''}`,
+      mensagem: `Câmera "${c.nome}" (${c.ip}${c.canal > 1 ? ` canal ${c.canal}` : ""}) excluída — ${ctx.unidade?.nome ?? c.unidade_id}${ctx.planta ? ` (${ctx.planta.nome})` : ''}`,
       user,
       cliente,
       unidade: ctx.unidade,
@@ -306,7 +306,7 @@ export class CamerasService {
     const c = await this.buscar(id, user);
     const ctx = await this.auditoria.contextoUnidade(c.unidade_id);
     await this.auditoria.registrar('camera_senha_vista', {
-      mensagem: `Senha da câmera "${c.nome}" (${c.ip}) vista — ${ctx.unidade?.nome ?? c.unidade_id}${ctx.planta ? ` (${ctx.planta.nome})` : ''}`,
+      mensagem: `Senha da câmera "${c.nome}" (${c.ip}${c.canal > 1 ? ` canal ${c.canal}` : ""}) vista — ${ctx.unidade?.nome ?? c.unidade_id}${ctx.planta ? ` (${ctx.planta.nome})` : ''}`,
       user,
       cliente,
       unidade: ctx.unidade,
@@ -355,7 +355,7 @@ export class CamerasService {
     if (!agente || !agenteOnline(agente.ultimo_contato_em)) {
       const motivo = agente ? 'agente sem contato há mais de 3 min' : 'câmera sem agente';
       await this.auditoria.registrar('camera_comando', {
-        mensagem: `Foto da câmera "${c.nome}" (${c.ip}) recusada: ${motivo} — ${ctx.unidade?.nome ?? c.unidade_id}`,
+        mensagem: `Foto da câmera "${c.nome}" (${c.ip}${c.canal > 1 ? ` canal ${c.canal}` : ""}) recusada: ${motivo} — ${ctx.unidade?.nome ?? c.unidade_id}`,
         user,
         cliente,
         unidade: ctx.unidade,
@@ -374,7 +374,7 @@ export class CamerasService {
     });
     this.despertar?.despertar(agente.id);
     await this.auditoria.registrar('camera_comando', {
-      mensagem: `Foto pedida à câmera "${c.nome}" (${c.ip}) — ${ctx.unidade?.nome ?? c.unidade_id}${ctx.planta ? ` (${ctx.planta.nome})` : ''}`,
+      mensagem: `Foto pedida à câmera "${c.nome}" (${c.ip}${c.canal > 1 ? ` canal ${c.canal}` : ""}) — ${ctx.unidade?.nome ?? c.unidade_id}${ctx.planta ? ` (${ctx.planta.nome})` : ''}`,
       user,
       cliente,
       unidade: ctx.unidade,
