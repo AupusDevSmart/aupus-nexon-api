@@ -40,9 +40,12 @@ export class CamerasInstalacoesService {
     // A usina só vale se a chave de vínculo foi gerada por quem relata.
     const lida = this.midia.lerVinculo(dto.vinculo);
     const vinc = lida && lida.by?.trim() === user.id.trim() ? lida : null;
+    // Pelo token de mídia o nome não vem: busca uma vez no cadastro.
+    const nomeUsuario =
+      user.nome ?? (await this.prisma.usuarios.findFirst({ where: { id: user.id.trim() }, select: { nome: true } }))?.nome ?? null;
     const dados = {
       usuario_id: user.id.trim(),
-      usuario_nome: user.nome ?? null,
+      usuario_nome: nomeUsuario,
       unidade_id: vinc?.un?.trim() ?? null,
       sistema: dto.sistema?.slice(0, 160) ?? null,
       passo: dto.passo?.slice(0, 120) ?? null,
