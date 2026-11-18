@@ -722,6 +722,11 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
   private async ingerirCarregador(equipamentoId: string, d: any): Promise<void> {
     try {
       const eid = equipamentoId.trim();
+      // NEXON-130: carregador ligado por OCPP é medido e fechado pela central OCPP. A TON não
+      // mexe na recarga dele (outro registrador de energia daria total errado e limite falso).
+      const porOcpp = await this.prisma.$queryRaw<any[]>`
+        SELECT 1 FROM ocpp_charge_points WHERE equipamento_id = ${eid}::bpchar AND deleted_at IS NULL LIMIT 1`.catch(() => []);
+      if (porOcpp.length) return;
       const kwh = d.kwh ?? d.energia ?? d.kwh_total ?? null;
       const estado = d.estado ?? null;
       // Bateria do carro (%), quando o carregador informa (OCPP SoC / campo soc).
