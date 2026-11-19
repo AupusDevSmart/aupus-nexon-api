@@ -110,6 +110,12 @@ describe('demanda (R3: média projetada nunca acima do contrato)', () => {
 describe('FP horário', () => {
   const base = { janela: 'ind' as const, fp_lim: 0.92, fp_alvo: 0.93, banda_kvar: 3, margem_q3: 0, Q_ufv_atual: 0, Q_disp_total: 500, desdeUltimoAjuste: 9999, t_min_ajuste: 300 };
 
+  it('sobra de reativo sem nada aplicado nas UFVs → nada (não "devolver")', () => {
+    const r = decidirFp({ ...base, E_P_h: 100, E_Q_h: 0, P_hat: 200, Q_med: 0, t_rest_hora: 1800 });
+    expect(r.acao).toBe('nada');
+    expect(decidirFp({ ...base, E_P_h: 100, E_Q_h: 0, P_hat: 200, Q_med: 0, t_rest_hora: 1800, Q_ufv_atual: 50 }).acao).toBe('devolver');
+  });
+
   it('indutivo demais → compensar ΔQ', () => {
     // 100 kWh e 80 kvarh na hora, 30 min restantes a 200 kW e 150 kvar
     const r = decidirFp({ ...base, E_P_h: 100, E_Q_h: 80, P_hat: 200, Q_med: 150, t_rest_hora: 1800 });
@@ -135,6 +141,8 @@ describe('FP horário', () => {
     expect(janelaReativa({ ...minuto(), ts: Date.parse('2026-11-05T05:00:00Z') }, p)).toBe('cap');   // 02:00 em SP
     expect(janelaReativa({ ...minuto(), ts: Date.parse('2026-11-05T15:00:00Z') }, p)).toBe('ind');
     expect(janelaReativa({ ...minuto(), posto_reativo: 1 }, p)).toBe('cap');
+    // bancada: ignora o posto do medidor e usa a janela cadastrada
+    expect(janelaReativa({ ...minuto(), posto_reativo: 1, ts: Date.parse('2026-11-05T15:00:00Z') }, { ...p, posto_reativo_medidor: 0 })).toBe('ind');
   });
 });
 

@@ -739,6 +739,7 @@ export function sanitizarParams(b: any): Params {
     fp_lim_ind: fp(b.fp_lim_ind, P.fp_lim_ind), fp_lim_cap: fp(b.fp_lim_cap, P.fp_lim_cap),
     fp_alvo_ind: fp(b.fp_alvo_ind, P.fp_alvo_ind), fp_alvo_cap: fp(b.fp_alvo_cap, P.fp_alvo_cap),
     janela_cap_ini: hhmm(b.janela_cap_ini, P.janela_cap_ini), janela_cap_fim: hhmm(b.janela_cap_fim, P.janela_cap_fim),
+    posto_reativo_medidor: Math.round(n(b.posto_reativo_medidor, P.posto_reativo_medidor, 0, 1) as number),
     margem_q3_kvar: n(b.margem_q3_kvar, P.margem_q3_kvar, 0) as number,
     banda_pct: n(b.banda_pct, P.banda_pct, 0, 20) as number,
     t_min_ajuste_fp_s: n(b.t_min_ajuste_fp_s, P.t_min_ajuste_fp_s, 60, 3600) as number,
