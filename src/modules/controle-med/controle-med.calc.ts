@@ -146,7 +146,10 @@ export function portaoMedidor(m: MinutoSsu, ant: EstadoAnterior | null, p: Param
   if (lacuna) motivos.push('Faltou minuto do medidor no intervalo (orçamento incerto)');
   const g = grandezas(m);
   // Quadrante coerente com o fluxo: importando → Q1/Q4; exportando → Q2/Q3 (só com fluxo claro).
-  if (m.q != null && m.q >= 1 && m.q <= 4) {
+  // Só com reativo de verdade no minuto: com Q ≈ 0 (FP 1, ex.: exportação pura a 180°) o quadrante do
+  // último segundo fica na fronteira e o medidor alterna Q1/Q2 — reprovava minuto bom (bancada 19/11).
+  const comReativo = g.Q_ind + g.Q_cap >= 0.05 * Math.max(g.P_imp, g.P_exp);
+  if (comReativo && m.q != null && m.q >= 1 && m.q <= 4) {
     const imp = g.P_imp > 1 && g.P_exp < 0.1 * g.P_imp;
     const exp = g.P_exp > 1 && g.P_imp < 0.1 * g.P_exp;
     if ((imp && (m.q === 2 || m.q === 3)) || (exp && (m.q === 1 || m.q === 4))) {

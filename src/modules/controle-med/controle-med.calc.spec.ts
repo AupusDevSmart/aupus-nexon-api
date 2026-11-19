@@ -52,10 +52,14 @@ describe('portão de qualidade do medidor', () => {
   const agora = Date.parse('2026-11-05T15:00:30Z');
   it('aprova minuto coerente', () => {
     expect(portaoMedidor(minuto({ mphf: 1000, q: 1 }), null, PARAMS_PADRAO, agora).ok).toBe(true);
+    // exportação pura (Q = 0) com quadrante Q1 no último segundo: não reprova
+    expect(portaoMedidor(minuto({ mphr: 1000, q: 1 }), null, PARAMS_PADRAO, agora).ok).toBe(true);
+    // com reativo, Q1 exportando continua incoerente
+    expect(portaoMedidor(minuto({ mphr: 1000, mqhfi: 300, q: 1 }), null, PARAMS_PADRAO, agora).ok).toBe(false);
   });
   it('reprova: sts=0, erro subindo, minuto faltando e quadrante trocado', () => {
     const ant = { nsu: 3, seg: 780, ssu_err: 0, ts: null };
-    const r = portaoMedidor(minuto({ sts: 0, ssu_err: 9, seg: 600, mphf: 1000, q: 3 }), ant, PARAMS_PADRAO, agora);
+    const r = portaoMedidor(minuto({ sts: 0, ssu_err: 9, seg: 600, mphf: 1000, mqhfi: 300, q: 3 }), ant, PARAMS_PADRAO, agora);
     expect(r.ok).toBe(false);
     expect(r.lacuna).toBe(true);
     expect(r.motivos.join(' ')).toMatch(/sts=0/);
