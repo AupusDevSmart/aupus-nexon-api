@@ -271,7 +271,8 @@ export class ControleMedService implements OnModuleInit {
         E_kwh: E_exp, P_kw: g.P_exp, seg: m.seg, T: g.T, contrato: p.d_contr_g_kw, alvo_pct: p.alvo_g_pct, corteMax: P_ufvs,
         t_resposta_s: p.t_resposta_s, projAnt: est.projG, aguardando: est.aguardG, banda_pct: p.banda_pct, folgaLimitada: folgaG,
       });
-      est.projG = pedG.D_proj; est.aguardG = pedG.acao === 'aguardar';
+      // já esperou (ou já cortou) neste intervalo: daqui até o fechamento corta direto, sem novo minuto de espera
+      est.projG = pedG.D_proj; est.aguardG = est.aguardG || pedG.acao === 'aguardar' || pedG.acao === 'reduzir';   // zera no fechamento (fim=1)
       if (pedG.acao === 'reduzir' && pedG.dP > P_ufvs + 0.5) eventos.push(`Demanda de geração: cortar ${fmt(pedG.dP)} kW mas só há ${fmt(P_ufvs)} kW nas UFVs controladas`);
       pedidos.demanda_g = pedG;
     }

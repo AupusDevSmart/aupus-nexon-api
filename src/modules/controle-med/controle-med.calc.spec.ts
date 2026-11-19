@@ -159,6 +159,21 @@ describe('carta e divisão de Q', () => {
 describe('despachante', () => {
   const vivo = (P: Record<string, number>) => Object.fromEntries(Object.entries(P).map(([id, p]) => [id, { id, P_kw: p, disponivel: true }]));
 
+  it('corte parte do limite já dado (não do P medido) e o teto R4 não devolve potência à UFV cortada', () => {
+    const ufvs = [ufv('perto', 1), ufv('longe', 2)];
+    // os dois já em 72,5 (teto 145), medindo 100 (emulador ainda não obedeceu); corta 12,9
+    const atuais = { 'perto-1': { p_lim_kw: 72.5, q_kvar: 0 }, 'longe-1': { p_lim_kw: 72.5, q_kvar: 0 } };
+    const r = despachar({ ufvs, vivo: vivo({ 'perto-1': 100, 'longe-1': 100 }), atuais, dP_g: 12.9, dP_c: 0, Q_alvo_total: null, noite: false, tetoPlim: 145, degrau_min_pct: 3 });
+    const c = Object.fromEntries(r.comandos.map((x) => [x.inversor_id, x]));
+    expect(c['longe-1'].p_lim_kw).toBeCloseTo(59.6, 1);
+    expect(c['perto-1'].p_lim_kw).toBe(72.5);
+    // teto apertado: o excesso sai da mais distante primeiro
+    const t = despachar({ ufvs, vivo: vivo({ 'perto-1': 100, 'longe-1': 100 }), atuais: {}, dP_g: 0, dP_c: 0, Q_alvo_total: null, noite: false, tetoPlim: 145, degrau_min_pct: 3 });
+    const d = Object.fromEntries(t.comandos.map((x) => [x.inversor_id, x]));
+    expect(d['perto-1'].p_lim_kw).toBe(100);
+    expect(d['longe-1'].p_lim_kw).toBe(45);
+  });
+
   it('corta primeiro a UFV mais distante e libera primeiro a mais próxima', () => {
     const ufvs = [ufv('perto', 1), ufv('longe', 2)];
     const r = despachar({ ufvs, vivo: vivo({ 'perto-1': 80, 'longe-1': 80 }), atuais: {}, dP_g: 100, dP_c: 0, Q_alvo_total: null, noite: false, tetoPlim: null, degrau_min_pct: 3 });

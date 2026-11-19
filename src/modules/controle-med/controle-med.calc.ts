@@ -366,12 +366,14 @@ export function despachar(a: {
   for (const u of ordemDesc) {
     if (corte <= 1e-6) break;
     const doU = invs.filter((x) => x.u.id === u.id && x.disp);
-    const P_u = doU.reduce((s, x) => s + x.P, 0);
+    // base do corte = o que o inversor pode estar entregando: P medido, mas nunca acima do limite já dado
+    const base = (x: (typeof doU)[number]) => Math.min(x.P, sp[x.i.id].p_lim_kw);
+    const P_u = doU.reduce((s, x) => s + base(x), 0);
     if (P_u <= 0) continue;
     const c = Math.min(corte, P_u);
     for (const x of doU) {
-      const parte = c * (x.P / P_u);
-      sp[x.i.id].p_lim_kw = Math.max(0, x.P - parte);
+      const parte = c * (base(x) / P_u);
+      sp[x.i.id].p_lim_kw = Math.max(0, base(x) - parte);
       motivos[x.i.id].push(`demanda de geração: −${fmt(parte)} kW`);
     }
     corte -= c;
@@ -400,10 +402,19 @@ export function despachar(a: {
     }
   }
   if (controlaP && a.tetoPlim != null && a.tetoPlim >= 0) {
-    const soma = invs.reduce((s, x) => s + sp[x.i.id].p_lim_kw, 0);
-    if (soma > a.tetoPlim + 1e-6) {
-      const f = a.tetoPlim > 0 ? a.tetoPlim / soma : 0;
-      for (const x of invs) { sp[x.i.id].p_lim_kw *= f; motivos[x.i.id].push('R4: teto do limite pelo pior caso'); }
+    // Excesso sobre o teto sai primeiro da UFV mais distante (mesma ordem do corte), não proporcional —
+    // senão o R4 devolvia potência à UFV que acabou de ser cortada.
+    let excesso = invs.reduce((s, x) => s + sp[x.i.id].p_lim_kw, 0) - a.tetoPlim;
+    for (const u of ordemDesc) {
+      if (excesso <= 1e-6) break;
+      for (const x of invs.filter((y) => y.u.id === u.id)) {
+        if (excesso <= 1e-6) break;
+        const tira = Math.min(excesso, sp[x.i.id].p_lim_kw);
+        if (tira <= 0) continue;
+        sp[x.i.id].p_lim_kw -= tira;
+        excesso -= tira;
+        motivos[x.i.id].push('R4: teto do limite pelo pior caso');
+      }
     }
   }
 
