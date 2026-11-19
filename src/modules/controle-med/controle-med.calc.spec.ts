@@ -140,7 +140,8 @@ describe('FP horário', () => {
     const p = { ...PARAMS_PADRAO, janela_cap_ini: '00:00', janela_cap_fim: '06:00' };
     expect(janelaReativa({ ...minuto(), ts: Date.parse('2026-11-05T05:00:00Z') }, p)).toBe('cap');   // 02:00 em SP
     expect(janelaReativa({ ...minuto(), ts: Date.parse('2026-11-05T15:00:00Z') }, p)).toBe('ind');
-    expect(janelaReativa({ ...minuto(), posto_reativo: 1 }, p)).toBe('cap');
+    // o posto do medidor não manda: à tarde é indutivo mesmo com pr=1
+    expect(janelaReativa({ ...minuto(), posto_reativo: 1, ts: Date.parse('2026-11-05T15:00:00Z') }, p)).toBe('ind');
   });
 });
 

@@ -20,6 +20,7 @@ export interface Params {
   d_contr_c_kw: number | null;      // demanda de carga (verde: valor único; azul: fora de ponta)
   d_contr_c_ponta_kw: number | null;
   alvo_c_pct: number;
+  tol_c_pct: number;                // tolerância de ultrapassagem da Aneel acima do contrato de carga (limite = contrato × (1 + tol))
   fp_lim_ind: number; fp_lim_cap: number;
   fp_alvo_ind: number; fp_alvo_cap: number;
   janela_cap_ini: string;           // "HH:MM" — até a TON publicar o posto reativo da SSU
@@ -41,7 +42,7 @@ export interface Params {
 }
 
 export const PARAMS_PADRAO: Params = {
-  d_contr_g_kw: null, alvo_g_pct: 95, d_contr_c_kw: null, d_contr_c_ponta_kw: null, alvo_c_pct: 95,
+  d_contr_g_kw: null, alvo_g_pct: 95, d_contr_c_kw: null, d_contr_c_ponta_kw: null, alvo_c_pct: 95, tol_c_pct: 5,
   fp_lim_ind: 0.92, fp_lim_cap: 0.92, fp_alvo_ind: 0.93, fp_alvo_cap: 0.93,
   janela_cap_ini: '00:00', janela_cap_fim: '06:00', margem_q3_kvar: 0,
   banda_pct: 3, t_min_ajuste_fp_s: 300, t_resposta_s: 60, degrau_min_pct: 3,
@@ -214,10 +215,12 @@ export interface PedidoFp {
   espera_s?: number;                // aguardar_ritmo: segundos até o próximo ajuste permitido
 }
 
-/** Janela do reativo: bit da SSU quando houver; senão a janela capacitiva cadastrada (hora local). */
+/**
+ * Janela do reativo pelo HORÁRIO cadastrado (hora local): capacitivo só na janela da madrugada
+ * (padrão 00h–06h), indutivo no resto do dia. O posto reativo da SSU (`pr`) fica só registrado —
+ * decisão do usuário 19/11: o E750 da bancada marcava capacitivo 24 h e o controle não atuava à tarde.
+ */
 export function janelaReativa(m: MinutoSsu, p: Params, tz = 'America/Sao_Paulo'): Janela {
-  if (m.posto_reativo === 1) return 'cap';
-  if (m.posto_reativo === 2) return 'ind';
   const hm = new Intl.DateTimeFormat('pt-BR', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(m.ts));
   const min = (s: string) => { const [h, mm] = s.split(':').map(Number); return (h % 24) * 60 + (mm || 0); };
   const t = min(hm), a = min(p.janela_cap_ini), b = min(p.janela_cap_fim);

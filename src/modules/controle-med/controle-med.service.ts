@@ -199,7 +199,8 @@ export class ControleMedService implements OnModuleInit {
     // Fechamento do intervalo: confere a demanda final contra o contrato (registro de ultrapassagem).
     if (m.fim === 1) {
       const Dg = (g.E_exp * 3600) / g.T, Dc = (g.E_imp * 3600) / g.T;
-      const contrC = m.posto === 1 ? (p.d_contr_c_ponta_kw ?? p.d_contr_c_kw) : p.d_contr_c_kw;
+      const contrC0 = m.posto === 1 ? (p.d_contr_c_ponta_kw ?? p.d_contr_c_kw) : p.d_contr_c_kw;
+      const contrC = contrC0 ? contrC0 * (1 + p.tol_c_pct / 100) : contrC0;   // multa só acima da tolerância
       if (p.d_contr_g_kw && Dg > p.d_contr_g_kw) eventos.push(`Ultrapassagem de geração: intervalo fechou em ${fmt(Dg)} kW / ${fmt(p.d_contr_g_kw)} kW`);
       if (contrC && Dc > contrC) eventos.push(`Ultrapassagem de carga: intervalo fechou em ${fmt(Dc)} kW / ${fmt(contrC)} kW`);
       est.projG = null; est.projC = null; est.aguardG = false; est.aguardC = false;
@@ -252,7 +253,9 @@ export class ControleMedService implements OnModuleInit {
     // Demanda de carga (prioridade 2) e de geração (3)
     let pedC: PedidoDemanda | null = null, pedG: PedidoDemanda | null = null;
     if (modos.demanda_c !== 'desligado') {
-      const contr = m.posto === 1 ? (p.d_contr_c_ponta_kw ?? p.d_contr_c_kw) : p.d_contr_c_kw;
+      const contr0 = m.posto === 1 ? (p.d_contr_c_ponta_kw ?? p.d_contr_c_kw) : p.d_contr_c_kw;
+      // Limite = contrato + tolerância da Aneel (ultrapassagem só acima dela); o alvo % vale sobre esse limite.
+      const contr = contr0 ? contr0 * (1 + p.tol_c_pct / 100) : contr0;
       pedC = decidirDemanda({
         E_kwh: E_imp, P_kw: g.P_imp, seg: m.seg, T: g.T, contrato: contr, alvo_pct: p.alvo_c_pct, corteMax: folgaLimitada,
         t_resposta_s: p.t_resposta_s, projAnt: est.projC, aguardando: est.aguardC, banda_pct: p.banda_pct, folgaLimitada: 0,
@@ -736,6 +739,7 @@ export function sanitizarParams(b: any): Params {
     d_contr_g_kw: n(b.d_contr_g_kw, null, 0), alvo_g_pct: n(b.alvo_g_pct, P.alvo_g_pct, 50, 100) as number,
     d_contr_c_kw: n(b.d_contr_c_kw, null, 0), d_contr_c_ponta_kw: n(b.d_contr_c_ponta_kw, null, 0),
     alvo_c_pct: n(b.alvo_c_pct, P.alvo_c_pct, 50, 100) as number,
+    tol_c_pct: n(b.tol_c_pct, P.tol_c_pct, 0, 20) as number,
     fp_lim_ind: fp(b.fp_lim_ind, P.fp_lim_ind), fp_lim_cap: fp(b.fp_lim_cap, P.fp_lim_cap),
     fp_alvo_ind: fp(b.fp_alvo_ind, P.fp_alvo_ind), fp_alvo_cap: fp(b.fp_alvo_cap, P.fp_alvo_cap),
     janela_cap_ini: hhmm(b.janela_cap_ini, P.janela_cap_ini), janela_cap_fim: hhmm(b.janela_cap_fim, P.janela_cap_fim),
