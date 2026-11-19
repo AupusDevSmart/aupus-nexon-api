@@ -244,11 +244,9 @@ export class ControleMedService implements OnModuleInit {
     const disponiveis = ufvs.flatMap((u) => u.inversores).filter((i) => vivo[i.id]?.disponivel);
     const P_ufvs = disponiveis.reduce((a, i) => a + Math.max(0, vivo[i.id]?.P_kw ?? 0), 0);
     const folgaLimitada = disponiveis.reduce((a, i) => a + Math.max(0, i.pn_kw - (est.setpoints[i.id]?.p_lim_kw ?? i.pn_kw)), 0);
-    // Folga de GERAÇÃO não passa do teto R4: senão "liberar" só redistribui entre as UFVs (o R4
-    // reescala a soma) e reescreve os inversores todo minuto sem subir a geração.
-    const val = validarCadastro(p, ufvs, g.T);
-    const somaPlim = ufvs.flatMap((u) => u.inversores).reduce((a, i) => a + (est.setpoints[i.id]?.p_lim_kw ?? i.pn_kw), 0);
-    const folgaG = val.tetoPlim != null ? Math.min(folgaLimitada, Math.max(0, val.tetoPlim - somaPlim)) : folgaLimitada;
+    // Decisão 19/11: sem teto R4 no despacho — abaixo do contrato libera até 100 % (o piso garante o corte).
+    // O R4 fica só como aviso de cadastro (validarCadastro); a proteção na queda de comunicação é a validade + P estático na TON.
+    const folgaG = folgaLimitada;
 
     // Demanda de carga (prioridade 2) e de geração (3)
     let pedC: PedidoDemanda | null = null, pedG: PedidoDemanda | null = null;
@@ -306,7 +304,7 @@ export class ControleMedService implements OnModuleInit {
       ufvs, vivo, atuais: est.setpoints,
       dP_g: pedG?.acao === 'reduzir' ? pedG.dP : pedG?.acao === 'liberar' ? -pedG.dP : 0,
       dP_c: pedC?.acao === 'reduzir' ? Math.min(pedC.dP, folgaLimitada) : 0,
-      Q_alvo_total, noite, tetoPlim: val.tetoPlim, degrau_min_pct: p.degrau_min_pct,
+      Q_alvo_total, noite, tetoPlim: null, degrau_min_pct: p.degrau_min_pct,
       controlaP: modos.demanda_g !== 'desligado' || modos.demanda_c !== 'desligado',
       pisoTotal: modos.demanda_g !== 'desligado' ? p.d_contr_g_kw : null,
     });
