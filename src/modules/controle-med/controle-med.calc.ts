@@ -291,7 +291,7 @@ export function dividirQ(Q_total: number, disp: Array<{ id: string; q_disp: numb
  * validade vencer e depois no P_estatico até o estágio 2. Devolve o maior Σp_lim que ainda fecha
  * o intervalo ≤ contrato, e avisos do cadastro.
  */
-export function validarCadastro(p: Params, ufvs: Ufv[]) {
+export function validarCadastro(p: Params, ufvs: Ufv[], T_intervalo_s = 900) {
   const avisos: string[] = [];
   const bloqueios: string[] = [];   // impedem o modo ativo
   const contrato = p.d_contr_g_kw;
@@ -301,7 +301,7 @@ export function validarCadastro(p: Params, ufvs: Ufv[]) {
   let tetoPlim: number | null = null;
   if (contrato && contrato > 0 && ufvs.length) {
     const alvo = contrato * p.alvo_g_pct / 100;
-    const T = 900;
+    const T = T_intervalo_s > 0 ? T_intervalo_s : 900;   // intervalo do medidor (bancada: 5 min)
     if (somaEst > contrato) avisos.push(`Σ P estático (${fmt(somaEst)} kW) passa do contrato de geração (${fmt(contrato)} kW): o estágio 2 precisa ser curto o bastante.`);
     const folga = (contrato - alvo) * T - Math.max(0, somaEst - alvo) * p.t_estagio2_s;
     tetoPlim = tVal > 0 ? alvo + folga / tVal : null;
@@ -334,8 +334,7 @@ export interface ComandoInv {
 
 /**
  * Um par P/Q por inversor a partir dos pedidos (4): demanda de carga > geração > FP.
- *  - reduzir geração: corta primeiro a UFV mais distante (maior `ordem`);
- *  - liberar: devolve primeiro a mais próxima;
+ *  - reduzir/liberar geração: proporcional entre os inversores, nunca abaixo do piso (parte do contrato);
  *  - R2: UFV sem watchdog nativo validado nunca passa do P estático; R4: Σp_lim ≤ teto;
  *  - Q pela divisão 5.2, dentro da carta (P atual);
  *  - só "muda" o que passou do degrau mínimo (EEPROM) — redução de P sempre muda.
@@ -347,7 +346,8 @@ export function despachar(a: {
   Q_alvo_total: number | null;   // null = FP não pede nada (mantém)
   noite: boolean; tetoPlim: number | null; degrau_min_pct: number;
   controlaP?: boolean;           // algum controle de demanda ligado (sem ele, P não é mexido)
-}): { comandos: ComandoInv[]; Q_disp_total: number; Q_ufv_atual: number } {
+  pisoTotal?: number | null;     // contrato de geração: Σ piso dos limites (repartido por Pn)
+}): { comandos: ComandoInv[]; Q_disp_total: number; Q_ufv_atual: number; noPiso: boolean } {
   const invs: Array<{ u: Ufv; i: Inversor; P: number; disp: boolean }> = [];
   for (const u of a.ufvs) for (const i of u.inversores) {
     const v = a.vivo[i.id];
@@ -360,36 +360,40 @@ export function despachar(a: {
     motivos[x.i.id] = [];
   }
 
-  // P: corte/liberação por UFV, na ordem de distância
-  const ordemDesc = [...a.ufvs].sort((x, y) => y.ordem - x.ordem);
-  let corte = Math.max(0, a.dP_g);
-  for (const u of ordemDesc) {
-    if (corte <= 1e-6) break;
-    const doU = invs.filter((x) => x.u.id === u.id && x.disp);
-    // base do corte = o que o inversor pode estar entregando: P medido, mas nunca acima do limite já dado
-    const base = (x: (typeof doU)[number]) => Math.min(x.P, sp[x.i.id].p_lim_kw);
-    const P_u = doU.reduce((s, x) => s + base(x), 0);
-    if (P_u <= 0) continue;
-    const c = Math.min(corte, P_u);
-    for (const x of doU) {
-      const parte = c * (base(x) / P_u);
-      sp[x.i.id].p_lim_kw = Math.max(0, base(x) - parte);
-      motivos[x.i.id].push(`demanda de geração: −${fmt(parte)} kW`);
+  // P (decisão 19/11): corte e liberação PROPORCIONAIS entre todos os inversores, com PISO = parte do
+  // contrato de geração de cada um (contrato × Pn/ΣPn). Com Σlimite ≤ contrato a exportação nunca passa
+  // do contrato (exportação = geração − consumo, consumo ≥ 0) → cortar abaixo do piso nunca é preciso.
+  const somaPnTot = invs.reduce((s, x) => s + x.i.pn_kw, 0);
+  const piso: Record<string, number> = {};
+  for (const x of invs) piso[x.i.id] = a.pisoTotal && a.pisoTotal > 0 && somaPnTot > 0 ? a.pisoTotal * x.i.pn_kw / somaPnTot : 0;
+  const ativos = invs.filter((x) => x.disp);
+  /** distribui `total` entre `lista` proporcional a `peso`, sem passar de `peso` (sobra volta). */
+  const repartir = (total: number, lista: typeof invs, peso: (x: (typeof invs)[number]) => number, aplica: (x: (typeof invs)[number], v: number) => void) => {
+    const soma = lista.reduce((s, x) => s + Math.max(0, peso(x)), 0);
+    if (soma <= 1e-9 || total <= 1e-9) return total;
+    const usa = Math.min(total, soma);
+    for (const x of lista) { const v = usa * Math.max(0, peso(x)) / soma; if (v > 1e-9) aplica(x, v); }
+    return total - usa;
+  };
+  let noPiso = false;
+  const corte = Math.max(0, a.dP_g);
+  if (corte > 1e-6) {
+    // base = o que o inversor pode estar entregando: P medido, nunca acima do limite já dado
+    for (const x of ativos) sp[x.i.id].p_lim_kw = Math.max(piso[x.i.id], Math.min(x.P, sp[x.i.id].p_lim_kw));
+    const sobra = repartir(corte, ativos, (x) => sp[x.i.id].p_lim_kw - piso[x.i.id], (x, v) => {
+      sp[x.i.id].p_lim_kw -= v;
+      motivos[x.i.id].push(`demanda de geração: −${fmt(v)} kW`);
+    });
+    if (sobra > 0.5) {
+      noPiso = true;
+      for (const x of ativos) if (sp[x.i.id].p_lim_kw <= piso[x.i.id] + 1e-6) motivos[x.i.id].push(`no piso (${fmt(piso[x.i.id])} kW = parte do contrato)`);
     }
-    corte -= c;
   }
-  let libera = Math.max(0, -a.dP_g) + Math.max(0, a.dP_c);
-  for (const u of [...ordemDesc].reverse()) {
-    if (libera <= 1e-6) break;
-    for (const x of invs.filter((y) => y.u.id === u.id && y.disp)) {
-      const folga = x.i.pn_kw - sp[x.i.id].p_lim_kw;
-      if (folga <= 0 || libera <= 0) continue;
-      const l = Math.min(folga, libera);
-      sp[x.i.id].p_lim_kw += l;
-      libera -= l;
-      motivos[x.i.id].push(`${a.dP_c > 0 ? 'demanda de carga' : 'folga'}: +${fmt(l)} kW`);
-    }
-  }
+  const libera = Math.max(0, -a.dP_g) + Math.max(0, a.dP_c);
+  repartir(libera, ativos, (x) => x.i.pn_kw - sp[x.i.id].p_lim_kw, (x, v) => {
+    sp[x.i.id].p_lim_kw += v;
+    motivos[x.i.id].push(`${a.dP_c > 0 ? 'demanda de carga' : 'folga'}: +${fmt(v)} kW`);
+  });
   // R2 (P estático por UFV sem watchdog nativo) e R4 (teto do Σp_lim) — só com limite dinâmico em uso
   const controlaP = a.controlaP !== false;
   for (const u of controlaP ? a.ufvs : []) {
@@ -402,19 +406,14 @@ export function despachar(a: {
     }
   }
   if (controlaP && a.tetoPlim != null && a.tetoPlim >= 0) {
-    // Excesso sobre o teto sai primeiro da UFV mais distante (mesma ordem do corte), não proporcional —
-    // senão o R4 devolvia potência à UFV que acabou de ser cortada.
-    let excesso = invs.reduce((s, x) => s + sp[x.i.id].p_lim_kw, 0) - a.tetoPlim;
-    for (const u of ordemDesc) {
-      if (excesso <= 1e-6) break;
-      for (const x of invs.filter((y) => y.u.id === u.id)) {
-        if (excesso <= 1e-6) break;
-        const tira = Math.min(excesso, sp[x.i.id].p_lim_kw);
-        if (tira <= 0) continue;
-        sp[x.i.id].p_lim_kw -= tira;
-        excesso -= tira;
+    // Σlimite ≤ contrato já é seguro em qualquer caso → o teto nunca fica abaixo do piso total
+    const teto = Math.max(a.tetoPlim, a.pisoTotal ?? 0);
+    const excesso = invs.reduce((s, x) => s + sp[x.i.id].p_lim_kw, 0) - teto;
+    if (excesso > 1e-6) {
+      repartir(excesso, invs, (x) => sp[x.i.id].p_lim_kw - piso[x.i.id], (x, v) => {
+        sp[x.i.id].p_lim_kw -= v;
         motivos[x.i.id].push('R4: teto do limite pelo pior caso');
-      }
+      });
     }
   }
 
@@ -449,7 +448,7 @@ export function despachar(a: {
       motivo: x.disp ? motivos[x.i.id] : [a.vivo[x.i.id]?.motivo ?? 'indisponível'],
     };
   });
-  return { comandos, Q_disp_total, Q_ufv_atual };
+  return { comandos, Q_disp_total, Q_ufv_atual, noPiso };
 }
 
 export function fmt(v: number | null | undefined, d = 1): string {

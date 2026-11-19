@@ -33,7 +33,7 @@ function montar(modos: Record<string, string>, P_inv_w = 90_000, ton = tonSim())
   const prisma: any = {
     $queryRaw: jest.fn(async (s: TemplateStringsArray) => {
       const sql = s.join('?');
-      if (sql.includes('FROM equipamentos e LEFT JOIN unidades')) return [{ dc: 500, dg: 100 }];
+      if (sql.includes('FROM equipamentos e LEFT JOIN unidades')) return [{ dc: 500, dg: 50 }];   // contrato 50 < Pn 100: sobra o que cortar acima do piso
       if (sql.includes('FROM controle_med_config WHERE')) return [{ params: { alvo_g_pct: 95 }, ufvs: UFVS, modos: { ...MODOS_PADRAO, ...modos }, versao: 1 }];
       if (sql.includes('FROM equipamentos_dados d')) return [{ id: 'INV1', ts: new Date(), p_w: P_inv_w, kw: null }];
       if (sql.includes('FROM ssu_minutos')) return [];

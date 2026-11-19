@@ -159,34 +159,39 @@ describe('carta e divisão de Q', () => {
 describe('despachante', () => {
   const vivo = (P: Record<string, number>) => Object.fromEntries(Object.entries(P).map(([id, p]) => [id, { id, P_kw: p, disponivel: true }]));
 
-  it('corte parte do limite já dado (não do P medido) e o teto R4 não devolve potência à UFV cortada', () => {
+  it('corte proporcional (10 % de cada) e liberação proporcional', () => {
     const ufvs = [ufv('perto', 1), ufv('longe', 2)];
-    // os dois já em 72,5 (teto 145), medindo 100 (emulador ainda não obedeceu); corta 12,9
-    const atuais = { 'perto-1': { p_lim_kw: 72.5, q_kvar: 0 }, 'longe-1': { p_lim_kw: 72.5, q_kvar: 0 } };
-    const r = despachar({ ufvs, vivo: vivo({ 'perto-1': 100, 'longe-1': 100 }), atuais, dP_g: 12.9, dP_c: 0, Q_alvo_total: null, noite: false, tetoPlim: 145, degrau_min_pct: 3 });
+    const r = despachar({ ufvs, vivo: vivo({ 'perto-1': 100, 'longe-1': 100 }), atuais: {}, dP_g: 20, dP_c: 0, Q_alvo_total: null, noite: false, tetoPlim: null, degrau_min_pct: 3, pisoTotal: 100 });
     const c = Object.fromEntries(r.comandos.map((x) => [x.inversor_id, x]));
-    expect(c['longe-1'].p_lim_kw).toBeCloseTo(59.6, 1);
-    expect(c['perto-1'].p_lim_kw).toBe(72.5);
-    // teto apertado: o excesso sai da mais distante primeiro
-    const t = despachar({ ufvs, vivo: vivo({ 'perto-1': 100, 'longe-1': 100 }), atuais: {}, dP_g: 0, dP_c: 0, Q_alvo_total: null, noite: false, tetoPlim: 145, degrau_min_pct: 3 });
-    const d = Object.fromEntries(t.comandos.map((x) => [x.inversor_id, x]));
-    expect(d['perto-1'].p_lim_kw).toBe(100);
-    expect(d['longe-1'].p_lim_kw).toBe(45);
+    expect(c['perto-1'].p_lim_kw).toBe(90);
+    expect(c['longe-1'].p_lim_kw).toBe(90);
+    expect(r.noPiso).toBe(false);
+    const atuais = { 'perto-1': { p_lim_kw: 60, q_kvar: 0 }, 'longe-1': { p_lim_kw: 80, q_kvar: 0 } };
+    const l = despachar({ ufvs, vivo: vivo({ 'perto-1': 60, 'longe-1': 80 }), atuais, dP_g: -30, dP_c: 0, Q_alvo_total: null, noite: false, tetoPlim: null, degrau_min_pct: 3, pisoTotal: 100 });
+    const d = Object.fromEntries(l.comandos.map((x) => [x.inversor_id, x]));
+    expect(d['perto-1'].p_lim_kw).toBe(80);   // folga 40 de 60 → 2/3 dos 30
+    expect(d['longe-1'].p_lim_kw).toBe(90);   // folga 20 de 60 → 1/3
   });
 
-  it('corta primeiro a UFV mais distante e libera primeiro a mais próxima', () => {
+  it('piso = parte do contrato: nunca abaixo de 50 % (contrato 100, 2 × 100 kW) e avisa', () => {
     const ufvs = [ufv('perto', 1), ufv('longe', 2)];
-    const r = despachar({ ufvs, vivo: vivo({ 'perto-1': 80, 'longe-1': 80 }), atuais: {}, dP_g: 100, dP_c: 0, Q_alvo_total: null, noite: false, tetoPlim: null, degrau_min_pct: 3 });
+    const r = despachar({ ufvs, vivo: vivo({ 'perto-1': 100, 'longe-1': 100 }), atuais: {}, dP_g: 150, dP_c: 0, Q_alvo_total: null, noite: false, tetoPlim: null, degrau_min_pct: 3, pisoTotal: 100 });
     const c = Object.fromEntries(r.comandos.map((x) => [x.inversor_id, x]));
-    expect(c['longe-1'].p_lim_kw).toBe(0);
-    expect(c['perto-1'].p_lim_kw).toBe(60);
-    expect(c['longe-1'].muda_p && c['perto-1'].muda_p).toBe(true);
+    expect(c['perto-1'].p_lim_kw).toBe(50);
+    expect(c['longe-1'].p_lim_kw).toBe(50);
+    expect(r.noPiso).toBe(true);
+    // limite já no piso e P medido alto (inversor/mala não obedeceu): não desce mais
+    const de = despachar({ ufvs, vivo: vivo({ 'perto-1': 100, 'longe-1': 100 }), atuais: { 'perto-1': { p_lim_kw: 50, q_kvar: 0 }, 'longe-1': { p_lim_kw: 50, q_kvar: 0 } }, dP_g: 30, dP_c: 0, Q_alvo_total: null, noite: false, tetoPlim: null, degrau_min_pct: 3, pisoTotal: 100 });
+    expect(de.comandos.every((x) => x.p_lim_kw === 50 && !x.muda_p)).toBe(true);
+    expect(de.noPiso).toBe(true);
+  });
 
-    const atuais = { 'perto-1': { p_lim_kw: 60, q_kvar: 0 }, 'longe-1': { p_lim_kw: 0, q_kvar: 0 } };
-    const l = despachar({ ufvs, vivo: vivo({ 'perto-1': 60, 'longe-1': 0 }), atuais, dP_g: -50, dP_c: 0, Q_alvo_total: null, noite: false, tetoPlim: null, degrau_min_pct: 3 });
-    const d = Object.fromEntries(l.comandos.map((x) => [x.inversor_id, x]));
-    expect(d['perto-1'].p_lim_kw).toBe(100);
-    expect(d['longe-1'].p_lim_kw).toBe(10);
+  it('teto R4 proporcional e nunca abaixo do contrato', () => {
+    const ufvs = [ufv('perto', 1), ufv('longe', 2)];
+    const r = despachar({ ufvs, vivo: vivo({ 'perto-1': 100, 'longe-1': 100 }), atuais: {}, dP_g: 0, dP_c: 0, Q_alvo_total: null, noite: false, tetoPlim: 145, degrau_min_pct: 3, pisoTotal: 100 });
+    expect(r.comandos.map((x) => x.p_lim_kw)).toEqual([72.5, 72.5]);
+    const b = despachar({ ufvs, vivo: vivo({ 'perto-1': 100, 'longe-1': 100 }), atuais: {}, dP_g: 0, dP_c: 0, Q_alvo_total: null, noite: false, tetoPlim: 95, degrau_min_pct: 3, pisoTotal: 100 });
+    expect(b.comandos.map((x) => x.p_lim_kw)).toEqual([50, 50]);
   });
 
   it('R2: sem watchdog nativo o limite não passa do P estático; R4: teto do Σp_lim', () => {

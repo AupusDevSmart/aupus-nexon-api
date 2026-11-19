@@ -246,7 +246,7 @@ export class ControleMedService implements OnModuleInit {
     const folgaLimitada = disponiveis.reduce((a, i) => a + Math.max(0, i.pn_kw - (est.setpoints[i.id]?.p_lim_kw ?? i.pn_kw)), 0);
     // Folga de GERAÇÃO não passa do teto R4: senão "liberar" só redistribui entre as UFVs (o R4
     // reescala a soma) e reescreve os inversores todo minuto sem subir a geração.
-    const val = validarCadastro(p, ufvs);
+    const val = validarCadastro(p, ufvs, g.T);
     const somaPlim = ufvs.flatMap((u) => u.inversores).reduce((a, i) => a + (est.setpoints[i.id]?.p_lim_kw ?? i.pn_kw), 0);
     const folgaG = val.tetoPlim != null ? Math.min(folgaLimitada, Math.max(0, val.tetoPlim - somaPlim)) : folgaLimitada;
 
@@ -302,13 +302,17 @@ export class ControleMedService implements OnModuleInit {
       Object.assign(entradas, { hora: h, janela });
     }
 
-    const { comandos } = despachar({
+    const { comandos, noPiso } = despachar({
       ufvs, vivo, atuais: est.setpoints,
       dP_g: pedG?.acao === 'reduzir' ? pedG.dP : pedG?.acao === 'liberar' ? -pedG.dP : 0,
       dP_c: pedC?.acao === 'reduzir' ? Math.min(pedC.dP, folgaLimitada) : 0,
       Q_alvo_total, noite, tetoPlim: val.tetoPlim, degrau_min_pct: p.degrau_min_pct,
       controlaP: modos.demanda_g !== 'desligado' || modos.demanda_c !== 'desligado',
+      pisoTotal: modos.demanda_g !== 'desligado' ? p.d_contr_g_kw : null,
     });
+    if (noPiso && pedG?.acao === 'reduzir') {
+      eventos.push(`Medidor acima do contrato com a geração já no piso (Σ limites = contrato ${fmt(p.d_contr_g_kw)} kW): com os inversores obedecendo isso é impossível — verificar a medição ou os inversores`);
+    }
 
     const ativoP = modos.demanda_g === 'ativo' || modos.demanda_c === 'ativo';
     const sombraP = modos.demanda_g === 'sombra' || modos.demanda_c === 'sombra';
@@ -626,7 +630,7 @@ export class ControleMedService implements OnModuleInit {
     return {
       params: cfg.params, ufvs: cfg.ufvs, modos: cfg.modos, versao: cfg.versao, existe: cfg.existe,
       padrao: PARAMS_PADRAO,
-      validacao: validarCadastro(cfg.params, cfg.ufvs),
+      validacao: validarCadastro(cfg.params, cfg.ufvs, Number(ult[0]?.entradas?.T) || 900),
       candidatos: pode ? await this.candidatos(unidadeId, plantaId) : [],
       ultimo_ciclo: ult[0] ?? null,
       tons: Object.entries(this.estados.get(id)?.modoTon ?? {}).map(([ton_id, modo]) => ({ ton_id, modo, texto: MODO_TON_TEXTO[modo] ?? modo })),
