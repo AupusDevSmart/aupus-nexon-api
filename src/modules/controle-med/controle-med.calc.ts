@@ -87,14 +87,19 @@ const pulsos = (o: any): Pulsos => ({
 
 /** Payload da SSU (TON-V2, plano ou com min{}) → MinutoSsu. null = não é minuto do medidor. */
 export function lerMinuto(d: any, ts: number): MinutoSsu | null {
-  if (!d || typeof d !== 'object' || d.phf === undefined || d.seg === undefined) return null;
+  if (!d || typeof d !== 'object' || d.seg === undefined) return null;
+  // Satélite LoRa manda plano (phf no topo); TON-V2 direta (WiFi/Eth) manda o acumulado em data{} (formato A-966).
+  const acc = d.phf !== undefined ? d : d.data && typeof d.data === 'object' && d.data.phf !== undefined ? d.data : null;
+  if (!acc) return null;
   const min = d.min ?? { phf: d.mphf, phr: d.mphr, qhfi: d.mqhfi, qhfc: d.mqhfc, qhri: d.mqhri, qhrc: d.mqhrc };
   const ke = num(d.ke) > 0 ? num(d.ke) : 0.0003;
+  const cdo = num(d.cdo ?? acc.cdo);
+  const sts = d.sts ?? acc.sts;
   return {
-    ts, nsu: d.NSU == null ? null : num(d.NSU), seg: Math.max(0, num(d.seg)), cdo: num(d.cdo) > 0 ? num(d.cdo) : 15, ke,
-    sts: d.sts == null ? null : num(d.sts), ssu_err: d.ssu_err == null ? null : num(d.ssu_err),
+    ts, nsu: d.NSU == null ? null : num(d.NSU), seg: Math.max(0, num(d.seg)), cdo: cdo > 0 ? cdo : 15, ke,
+    sts: sts == null ? null : num(sts), ssu_err: d.ssu_err == null ? null : num(d.ssu_err),
     q: d.q == null ? null : num(d.q), posto: d.posto == null ? null : num(d.posto),
-    fim: num(d.fim) === 1 ? 1 : 0, acc: pulsos(d), min: pulsos(min),
+    fim: num(d.fim) === 1 ? 1 : 0, acc: pulsos(acc), min: pulsos(min),
     posto_reativo: d.pr == null ? null : num(d.pr),
   };
 }

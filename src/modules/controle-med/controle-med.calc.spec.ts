@@ -16,6 +16,22 @@ const ufv = (id: string, ordem: number, invs = [inv(`${id}-1`)], o: Partial<Ufv>
 });
 
 describe('entrada da SSU', () => {
+  it('lê o payload da TON-V2 direta (acumulado em data{}, cdo string)', () => {
+    const m = lerMinuto({
+      q: 2, ke: 0.009, NSU: 1183, fim: 0, fmt: 2, seg: 119, posto: 0, ssu_err: 1,
+      min: { phf: 0, phr: 147, qhfc: 0, qhfi: 0, qhrc: 0, qhri: 0 },
+      data: { cdo: '5', phf: 0, phr: 245, sts: 1, qhfc: 0, qhfi: 0, qhrc: 0, qhri: 0 },
+    }, Date.parse('2026-11-19T16:53:07Z'))!;
+    expect(m).not.toBeNull();
+    expect(m.cdo).toBe(5);
+    expect(m.sts).toBe(1);
+    expect(m.acc.phr).toBe(245);
+    const g = grandezas(m);
+    expect(g.T).toBe(300);
+    expect(g.P_exp).toBeCloseTo(147 * 0.009 * 60, 6);   // 79,4 kW
+    expect(g.E_exp).toBeCloseTo(245 * 0.009, 6);
+  });
+
   it('lê o payload plano do satélite (m*) e converte pulsos em kW/kWh', () => {
     const m = minuto({ phr: 2000, mphr: 3000, mqhfi: 500, mqhrc: 100 });
     const g = grandezas(m);
