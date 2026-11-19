@@ -243,6 +243,11 @@ export class ControleMedService implements OnModuleInit {
     const disponiveis = ufvs.flatMap((u) => u.inversores).filter((i) => vivo[i.id]?.disponivel);
     const P_ufvs = disponiveis.reduce((a, i) => a + Math.max(0, vivo[i.id]?.P_kw ?? 0), 0);
     const folgaLimitada = disponiveis.reduce((a, i) => a + Math.max(0, i.pn_kw - (est.setpoints[i.id]?.p_lim_kw ?? i.pn_kw)), 0);
+    // Folga de GERAÇÃO não passa do teto R4: senão "liberar" só redistribui entre as UFVs (o R4
+    // reescala a soma) e reescreve os inversores todo minuto sem subir a geração.
+    const val = validarCadastro(p, ufvs);
+    const somaPlim = ufvs.flatMap((u) => u.inversores).reduce((a, i) => a + (est.setpoints[i.id]?.p_lim_kw ?? i.pn_kw), 0);
+    const folgaG = val.tetoPlim != null ? Math.min(folgaLimitada, Math.max(0, val.tetoPlim - somaPlim)) : folgaLimitada;
 
     // Demanda de carga (prioridade 2) e de geração (3)
     let pedC: PedidoDemanda | null = null, pedG: PedidoDemanda | null = null;
@@ -261,7 +266,7 @@ export class ControleMedService implements OnModuleInit {
     if (modos.demanda_g !== 'desligado') {
       pedG = decidirDemanda({
         E_kwh: E_exp, P_kw: g.P_exp, seg: m.seg, T: g.T, contrato: p.d_contr_g_kw, alvo_pct: p.alvo_g_pct, corteMax: P_ufvs,
-        t_resposta_s: p.t_resposta_s, projAnt: est.projG, aguardando: est.aguardG, banda_pct: p.banda_pct, folgaLimitada,
+        t_resposta_s: p.t_resposta_s, projAnt: est.projG, aguardando: est.aguardG, banda_pct: p.banda_pct, folgaLimitada: folgaG,
       });
       est.projG = pedG.D_proj; est.aguardG = pedG.acao === 'aguardar';
       if (pedG.acao === 'reduzir' && pedG.dP > P_ufvs + 0.5) eventos.push(`Demanda de geração: cortar ${fmt(pedG.dP)} kW mas só há ${fmt(P_ufvs)} kW nas UFVs controladas`);
@@ -293,7 +298,6 @@ export class ControleMedService implements OnModuleInit {
       Object.assign(entradas, { hora: h, janela });
     }
 
-    const val = validarCadastro(p, ufvs);
     const { comandos } = despachar({
       ufvs, vivo, atuais: est.setpoints,
       dP_g: pedG?.acao === 'reduzir' ? pedG.dP : pedG?.acao === 'liberar' ? -pedG.dP : 0,
