@@ -24,7 +24,6 @@ export interface Params {
   fp_alvo_ind: number; fp_alvo_cap: number;
   janela_cap_ini: string;           // "HH:MM" — até a TON publicar o posto reativo da SSU
   janela_cap_fim: string;
-  posto_reativo_medidor: number;    // 1 = janela pelo posto reativo da SSU (quando vem); 0 = sempre a cadastrada (bancada)
   margem_q3_kvar: number;
   banda_pct: number;                // folga antes de devolver Q / liberar P (% do limite)
   t_min_ajuste_fp_s: number;
@@ -44,7 +43,7 @@ export interface Params {
 export const PARAMS_PADRAO: Params = {
   d_contr_g_kw: null, alvo_g_pct: 95, d_contr_c_kw: null, d_contr_c_ponta_kw: null, alvo_c_pct: 95,
   fp_lim_ind: 0.92, fp_lim_cap: 0.92, fp_alvo_ind: 0.93, fp_alvo_cap: 0.93,
-  janela_cap_ini: '00:00', janela_cap_fim: '06:00', posto_reativo_medidor: 1, margem_q3_kvar: 0,
+  janela_cap_ini: '00:00', janela_cap_fim: '06:00', margem_q3_kvar: 0,
   banda_pct: 3, t_min_ajuste_fp_s: 300, t_resposta_s: 60, degrau_min_pct: 3,
   t_validade_internet_s: 180, t_validade_lora_s: 300, t_estagio2_s: 600, n_retomada: 3, rampa_pct_min: 10,
   ssu_err_max_min: 5, idade_max_ssu_s: 120, idade_max_inv_internet_s: 120, idade_max_inv_lora_s: 300,
@@ -217,10 +216,8 @@ export interface PedidoFp {
 
 /** Janela do reativo: bit da SSU quando houver; senão a janela capacitiva cadastrada (hora local). */
 export function janelaReativa(m: MinutoSsu, p: Params, tz = 'America/Sao_Paulo'): Janela {
-  if (p.posto_reativo_medidor !== 0) {
-    if (m.posto_reativo === 1) return 'cap';
-    if (m.posto_reativo === 2) return 'ind';
-  }
+  if (m.posto_reativo === 1) return 'cap';
+  if (m.posto_reativo === 2) return 'ind';
   const hm = new Intl.DateTimeFormat('pt-BR', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(m.ts));
   const min = (s: string) => { const [h, mm] = s.split(':').map(Number); return (h % 24) * 60 + (mm || 0); };
   const t = min(hm), a = min(p.janela_cap_ini), b = min(p.janela_cap_fim);

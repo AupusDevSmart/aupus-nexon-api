@@ -141,8 +141,6 @@ describe('FP horário', () => {
     expect(janelaReativa({ ...minuto(), ts: Date.parse('2026-11-05T05:00:00Z') }, p)).toBe('cap');   // 02:00 em SP
     expect(janelaReativa({ ...minuto(), ts: Date.parse('2026-11-05T15:00:00Z') }, p)).toBe('ind');
     expect(janelaReativa({ ...minuto(), posto_reativo: 1 }, p)).toBe('cap');
-    // bancada: ignora o posto do medidor e usa a janela cadastrada
-    expect(janelaReativa({ ...minuto(), posto_reativo: 1, ts: Date.parse('2026-11-05T15:00:00Z') }, { ...p, posto_reativo_medidor: 0 })).toBe('ind');
   });
 });
 
