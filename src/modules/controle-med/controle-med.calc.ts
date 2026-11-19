@@ -211,6 +211,7 @@ export interface PedidoFp {
   acao: 'nada' | 'compensar' | 'devolver' | 'aguardar_ritmo' | 'sem_atuador' | 'hora_perdida';
   janela: Janela; Q_med: number; Q_perm_alvo: number; Q_perm_lim: number; dQ: number; fp_hora: number | null;
   t_rest_hora: number; motivo: string;
+  espera_s?: number;                // aguardar_ritmo: segundos até o próximo ajuste permitido
 }
 
 /** Janela do reativo: bit da SSU quando houver; senão a janela capacitiva cadastrada (hora local). */
@@ -249,7 +250,8 @@ export function decidirFp(a: {
   }
   if (Math.abs(dQ) <= a.banda_kvar) return { acao: 'nada', ...base, motivo: `ΔQ ${fmt(dQ)} kvar dentro da banda` };
   if (a.desdeUltimoAjuste < a.t_min_ajuste) {
-    return { acao: 'aguardar_ritmo', ...base, motivo: `Ajuste de FP há ${Math.round(a.desdeUltimoAjuste)} s (mínimo ${a.t_min_ajuste} s)` };
+    const espera = Math.max(0, Math.round(a.t_min_ajuste - a.desdeUltimoAjuste));
+    return { acao: 'aguardar_ritmo', ...base, espera_s: espera, motivo: `Fora do alvo (ΔQ ${fmt(dQ)} kvar): aguardando o efeito da última correção — próximo ajuste em ${espera} s` };
   }
   if (dQ > 0) {
     if (a.Q_disp_total - a.Q_ufv_atual <= 0) return { acao: 'sem_atuador', ...base, motivo: `Falta ${fmt(dQ)} kvar e não há Q disponível nas UFVs` };
