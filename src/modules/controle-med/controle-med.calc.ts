@@ -26,6 +26,7 @@ export interface Params {
   janela_cap_ini: string;           // "HH:MM" — até a TON publicar o posto reativo da SSU
   janela_cap_fim: string;
   margem_q3_kvar: number;
+  prioridade_q: number;             // 1 = reativo tem prioridade: reduz P para caber o Q pedido na carta (S² = P² + Q²)
   banda_pct: number;                // folga antes de devolver Q / liberar P (% do limite)
   t_min_ajuste_fp_s: number;
   t_resposta_s: number;             // nuvem → TON → inversor + rampa
@@ -44,7 +45,7 @@ export interface Params {
 export const PARAMS_PADRAO: Params = {
   d_contr_g_kw: null, alvo_g_pct: 95, d_contr_c_kw: null, d_contr_c_ponta_kw: null, alvo_c_pct: 95, tol_c_pct: 5,
   fp_lim_ind: 0.92, fp_lim_cap: 0.92, fp_alvo_ind: 0.93, fp_alvo_cap: 0.93,
-  janela_cap_ini: '00:00', janela_cap_fim: '06:00', margem_q3_kvar: 0,
+  janela_cap_ini: '00:00', janela_cap_fim: '06:00', margem_q3_kvar: 0, prioridade_q: 1,
   banda_pct: 3, t_min_ajuste_fp_s: 300, t_resposta_s: 60, degrau_min_pct: 3,
   t_validade_internet_s: 180, t_validade_lora_s: 300, t_estagio2_s: 600, n_retomada: 3, rampa_pct_min: 10,
   ssu_err_max_min: 5, idade_max_ssu_s: 120, idade_max_inv_internet_s: 120, idade_max_inv_lora_s: 300,
@@ -332,7 +333,7 @@ export interface InvAoVivo { id: string; P_kw: number | null; disponivel: boolea
 export interface ComandoInv {
   inversor_id: string; nome: string; ufv: string;
   p_lim_kw: number; p_pct: number; q_kvar: number; q_pct: number;
-  muda_p: boolean; muda_q: boolean; motivo: string[];
+  muda_p: boolean; muda_q: boolean; p_por_q?: boolean; motivo: string[];
 }
 
 /**
@@ -350,6 +351,7 @@ export function despachar(a: {
   noite: boolean; tetoPlim: number | null; degrau_min_pct: number;
   controlaP?: boolean;           // algum controle de demanda ligado (sem ele, P não é mexido)
   pisoTotal?: number | null;     // contrato de geração: Σ piso dos limites (repartido por Pn)
+  prioridadeQ?: boolean;         // reativo prioritário: reduz o limite de P para abrir espaço ao Q na carta
 }): { comandos: ComandoInv[]; Q_disp_total: number; Q_ufv_atual: number; noPiso: boolean } {
   const invs: Array<{ u: Ufv; i: Inversor; P: number; disp: boolean }> = [];
   for (const u of a.ufvs) for (const i of u.inversores) {
@@ -420,8 +422,15 @@ export function despachar(a: {
     }
   }
 
-  // Q: divisão pelo disponível na carta
-  const disp = invs.filter((x) => x.disp).map((x) => ({ id: x.i.id, q_disp: qDisponivel(x.i, Math.min(x.P, sp[x.i.id].p_lim_kw), a.noite) }));
+  // Q: divisão pelo disponível. Com prioridade do reativo, o disponível é o teto do equipamento (Q máx da
+  // carta com P reduzido); sem ela, o que cabe na carta com o P atual (o inversor dá prioridade ao P e corta o Q).
+  const qTeto = (x: (typeof invs)[number]) => (a.noite && !x.i.q_noturno ? 0 : Math.max(0, Math.min(x.i.smax_kva * x.i.qmax_pct / 100, x.i.smax_kva)));
+  const prioQ = !!a.prioridadeQ;
+  // sem controle de demanda, o limite de P só existe para abrir espaço ao Q: recomeça de Pn a cada ciclo
+  if (!controlaP && prioQ) for (const x of invs) sp[x.i.id].p_lim_kw = x.i.pn_kw;
+  const disp = invs.filter((x) => x.disp).map((x) => ({
+    id: x.i.id, q_disp: prioQ ? qTeto(x) : qDisponivel(x.i, Math.min(x.P, sp[x.i.id].p_lim_kw), a.noite),
+  }));
   const Q_disp_total = disp.reduce((s, d) => s + d.q_disp, 0);
   const Q_ufv_atual = invs.reduce((s, x) => s + (a.atuais[x.i.id]?.q_kvar ?? 0), 0);
   if (a.Q_alvo_total != null) {
@@ -432,22 +441,36 @@ export function despachar(a: {
       sp[x.i.id].q_kvar = q;
     }
   }
-  for (const x of invs) {   // carta com o P limitado
+  const pPorQ: Record<string, boolean> = {};
+  for (const x of invs) {   // carta: S² ≥ P² + Q²
+    const q = sp[x.i.id].q_kvar;
+    if (prioQ && x.disp && Math.abs(q) > 1e-6) {
+      // reativo prioritário: Q até o teto do equipamento e P limitado ao que sobra na carta
+      const qOk = Math.sign(q) * Math.min(Math.abs(q), qTeto(x));
+      const pMax = Math.sqrt(Math.max(0, x.i.smax_kva ** 2 - qOk ** 2));
+      sp[x.i.id].q_kvar = qOk;
+      if (sp[x.i.id].p_lim_kw > pMax + 1e-6) {
+        sp[x.i.id].p_lim_kw = Math.min(pMax, x.i.pn_kw);
+        pPorQ[x.i.id] = true;
+        motivos[x.i.id].push(`reativo prioritário: P ≤ ${fmt(pMax)} kW para caber ${fmt(Math.abs(qOk))} kvar (Smax ${fmt(x.i.smax_kva)} kVA)`);
+      }
+      continue;
+    }
     const qmax = qDisponivel(x.i, Math.min(x.P, sp[x.i.id].p_lim_kw), a.noite);
-    if (Math.abs(sp[x.i.id].q_kvar) > qmax) sp[x.i.id].q_kvar = Math.sign(sp[x.i.id].q_kvar) * qmax;
+    if (Math.abs(q) > qmax) sp[x.i.id].q_kvar = Math.sign(q) * qmax;
   }
 
   const comandos: ComandoInv[] = invs.map((x) => {
     const at = a.atuais[x.i.id] ?? { p_lim_kw: x.i.pn_kw, q_kvar: 0 };
     const novo = sp[x.i.id];
     const degrau = x.i.smax_kva * a.degrau_min_pct / 100;
-    const muda_p = controlaP && x.disp && (novo.p_lim_kw < at.p_lim_kw - 0.05 || novo.p_lim_kw - at.p_lim_kw >= degrau);
+    const muda_p = (controlaP || prioQ) && x.disp && (novo.p_lim_kw < at.p_lim_kw - 0.05 || novo.p_lim_kw - at.p_lim_kw >= degrau);
     const muda_q = x.disp && Math.abs(novo.q_kvar - at.q_kvar) >= degrau;
     return {
       inversor_id: x.i.id, nome: x.i.nome ?? x.i.id, ufv: x.u.nome,
       p_lim_kw: arred(novo.p_lim_kw), p_pct: arred(x.i.pn_kw > 0 ? (novo.p_lim_kw / x.i.pn_kw) * 100 : 100, 1),
       q_kvar: arred(novo.q_kvar), q_pct: arred(x.i.pn_kw > 0 ? (novo.q_kvar / x.i.pn_kw) * 100 * x.i.sinal_q : 0, 1),
-      muda_p, muda_q,
+      muda_p, muda_q, p_por_q: !!pPorQ[x.i.id],
       motivo: x.disp ? motivos[x.i.id] : [a.vivo[x.i.id]?.motivo ?? 'indisponível'],
     };
   });

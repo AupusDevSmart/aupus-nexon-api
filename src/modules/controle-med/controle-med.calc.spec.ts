@@ -10,7 +10,7 @@ const minuto = (o: Record<string, unknown> = {}) => lerMinuto({
   seg: 600, posto: 2, ssu_err: 0, fim: 0, mphf: 0, mphr: 0, mqhfi: 0, mqhfc: 0, mqhri: 0, mqhrc: 0, ...o,
 }, Date.parse('2026-11-05T15:00:00Z'))!;
 
-const inv = (id: string, pn = 100) => ({ id, nome: id, pn_kw: pn, smax_kva: pn * 1.1, qmax_pct: 60, sinal_q: 1 as const, q_noturno: false });
+const inv = (id: string, pn = 100) => ({ id, nome: id, pn_kw: pn, smax_kva: pn * 1.1, qmax_pct: 60, sinal_q: 1 as 1 | -1, q_noturno: false });
 const ufv = (id: string, ordem: number, invs = [inv(`${id}-1`)], o: Partial<Ufv> = {}): Ufv => ({
   id, nome: id, ordem, p_estatico_kw: 1000, zera_estagio2: false, watchdog_nativo: true, rota: 'internet', inversores: invs, ...o,
 });
@@ -162,6 +162,30 @@ describe('carta e divisão de Q', () => {
 
 describe('despachante', () => {
   const vivo = (P: Record<string, number>) => Object.fromEntries(Object.entries(P).map(([id, p]) => [id, { id, P_kw: p, disponivel: true }]));
+
+  it('reativo prioritário: reduz P para caber o Q na carta e manda os dois; sem prioridade, Q é cortado', () => {
+    const inv44 = (id: string) => ({ ...inv(id), qmax_pct: 44 });       // Pn 100, Smax 110 → Q teto 48,4
+    const ufvs = [ufv('a', 1, [inv44('a-1')]), ufv('b', 2, [inv44('b-1')])];
+    const base = { ufvs, vivo: vivo({ 'a-1': 100, 'b-1': 100 }), atuais: {}, dP_g: 0, dP_c: 0, Q_alvo_total: 120, noite: false, tetoPlim: null, degrau_min_pct: 3, controlaP: false };
+    const r = despachar({ ...base, prioridadeQ: true });
+    for (const c of r.comandos) {
+      expect(c.q_kvar).toBeCloseTo(48.4, 1);                              // teto do equipamento
+      expect(c.p_lim_kw).toBeCloseTo(Math.sqrt(110 ** 2 - 48.4 ** 2), 1); // ≈ 98,8 kW
+      expect(c.muda_p && c.muda_q && c.p_por_q).toBe(true);
+    }
+    const s = despachar({ ...base, prioridadeQ: false });
+    for (const c of s.comandos) {
+      expect(c.q_kvar).toBeCloseTo(Math.sqrt(110 ** 2 - 100 ** 2), 1);    // ≈ 45,8: o P manda
+      expect(c.muda_p).toBe(false);
+    }
+  });
+
+  it('sinal do Q%: inversor com sinal −1 (Sungrow) fornece reativo com percentual negativo', () => {
+    const ufvs = [ufv('a', 1, [{ ...inv('a-1'), sinal_q: -1 as 1 | -1 }])];
+    const r = despachar({ ufvs, vivo: vivo({ 'a-1': 50 }), atuais: {}, dP_g: 0, dP_c: 0, Q_alvo_total: 30, noite: false, tetoPlim: null, degrau_min_pct: 3, controlaP: false, prioridadeQ: true });
+    expect(r.comandos[0].q_kvar).toBe(30);
+    expect(r.comandos[0].q_pct).toBe(-30);
+  });
 
   it('corte proporcional (10 % de cada) e liberação proporcional', () => {
     const ufvs = [ufv('perto', 1), ufv('longe', 2)];

@@ -283,7 +283,10 @@ export class ControleMedService implements OnModuleInit {
     if (modos.fp !== 'desligado') {
       const h = await this.horaSsu(ssuId, m);
       const janela = janelaReativa(m, p);
-      const Q_disp_total = disponiveis.reduce((a, i) => a + qDisponivel(i, Math.max(0, vivo[i.id]?.P_kw ?? 0), noite), 0);
+      // reativo prioritário: o disponível é o teto do equipamento (o despacho reduz P para caber)
+      const Q_disp_total = disponiveis.reduce((a, i) => a + (p.prioridade_q === 1
+        ? (noite && !i.q_noturno ? 0 : Math.min(i.smax_kva * i.qmax_pct / 100, i.smax_kva))
+        : qDisponivel(i, Math.max(0, vivo[i.id]?.P_kw ?? 0), noite)), 0);
       pedFp = decidirFp({
         janela, E_P_h: h.E_P, E_Q_h: janela === 'ind' ? h.E_ind : h.E_cap, P_hat: h.P_hat,
         Q_med: janela === 'ind' ? g.Q_ind : g.Q_cap, t_rest_hora: h.t_rest,
@@ -307,22 +310,35 @@ export class ControleMedService implements OnModuleInit {
       Q_alvo_total, noite, tetoPlim: null, degrau_min_pct: p.degrau_min_pct,
       controlaP: modos.demanda_g !== 'desligado' || modos.demanda_c !== 'desligado',
       pisoTotal: modos.demanda_g !== 'desligado' ? p.d_contr_g_kw : null,
+      prioridadeQ: p.prioridade_q === 1 && modos.fp !== 'desligado',
     });
     if (noPiso && pedG?.acao === 'reduzir') {
       eventos.push(`Medidor acima do contrato com a geração já no piso (Σ limites = contrato ${fmt(p.d_contr_g_kw)} kW): com os inversores obedecendo isso é impossível — verificar a medição ou os inversores`);
     }
 
-    const ativoP = modos.demanda_g === 'ativo' || modos.demanda_c === 'ativo';
-    const sombraP = modos.demanda_g === 'sombra' || modos.demanda_c === 'sombra';
+    // P também é comandado pelo FP quando o reativo é prioritário (reduz P para caber o Q na carta)
+    const pPeloFp = p.prioridade_q === 1 && modos.fp !== 'desligado';
+    const demP = modos.demanda_g !== 'desligado' || modos.demanda_c !== 'desligado';
+    const ativoDem = modos.demanda_g === 'ativo' || modos.demanda_c === 'ativo';
+    const sombraDem = !ativoDem && demP;
     const ativoQ = modos.fp === 'ativo';
+    /** Modo do P deste inversor: a demanda manda no P; o FP só quando o P mudou para caber o Q (ou sem demanda ligada). */
+    const modoP = (c: ComandoInv): Modo => {
+      const peloQ = pPeloFp && (!!c.p_por_q || !demP);
+      if (ativoDem || (peloQ && ativoQ)) return 'ativo';
+      if (sombraDem || peloQ) return 'sombra';
+      return 'desligado';
+    };
+    const ativoP = ativoDem || (pPeloFp && ativoQ);
     const resultado: Array<ComandoInv & { enviado_p?: string; enviado_q?: string }> = [];
     const pend = new Map<string, { p_pct?: number; q_pct?: number }>();   // o que muda no ATIVO
     let mudouQ = false;
     for (const c of comandos) {
       const r: ComandoInv & { enviado_p?: string; enviado_q?: string } = { ...c };
       const sp = { ...(est.setpoints[c.inversor_id] ?? { p_lim_kw: c.p_lim_kw, q_kvar: 0 }) };
-      if (c.muda_p && (ativoP || sombraP)) {
-        if (ativoP) pend.set(c.inversor_id, { ...pend.get(c.inversor_id), p_pct: c.p_pct });
+      const mp = modoP(c);
+      if (c.muda_p && mp !== 'desligado') {
+        if (mp === 'ativo') pend.set(c.inversor_id, { ...pend.get(c.inversor_id), p_pct: c.p_pct });
         else { r.enviado_p = 'sombra'; sp.p_lim_kw = c.p_lim_kw; }
       }
       if (c.muda_q && modos.fp !== 'desligado') {
@@ -336,7 +352,7 @@ export class ControleMedService implements OnModuleInit {
       // Fase B: um "ctl" por TON por ciclo — renova a validade mesmo sem mudança (heartbeat).
       // Inversor sem pedido anterior (backend reiniciado / cadastro salvo): o que o ciclo decidiu agora;
       // P só com demanda ATIVA (sombra não mexe no inversor), Q só com FP ativo.
-      const padrao = new Map(comandos.map((c) => [c.inversor_id, { p_pct: ativoP ? c.p_pct : 100, q_pct: ativoQ ? c.q_pct : 0 }]));
+      const padrao = new Map(comandos.map((c) => [c.inversor_id, { p_pct: modoP(c) === 'ativo' ? c.p_pct : 100, q_pct: ativoQ ? c.q_pct : 0 }]));
       const res = await this.enviarTons(ufvs, p, est, pend, eventos, padrao);
       for (const r of resultado) {
         const pe = pend.get(r.inversor_id);
@@ -612,6 +628,13 @@ export class ControleMedService implements OnModuleInit {
         id: r.id, nome: r.nome.trim(), modelo: sp?.modelo ?? null,
         pn_kw: Number.isFinite(pn) && pn > 0 ? (pn > 5000 ? pn / 1000 : pn) : null,
         limite_p: ids.has('sp_limite_pct'), reativo_q: ids.has('sp_q_pct'),
+        // sinal do Q% que FORNECE reativo (corrige indutivo): catálogo (sinal_fornece) ou Sungrow = negativo (campo, 19/11)
+        sinal_q_padrao: (() => {
+          const sq = (sp?.setpoints ?? []).find((s: any) => s.id === 'sp_q_pct') as any;
+          const v = Number(sq?.sinal_fornece);
+          if (v === -1 || v === 1) return v;
+          return /sungrow/i.test(`${sp?.modelo ?? ''} ${(sp as any)?.fabricante ?? ''}`) ? -1 : 1;
+        })(),
       });
     }
     return out;
@@ -747,6 +770,7 @@ export function sanitizarParams(b: any): Params {
     fp_alvo_ind: fp(b.fp_alvo_ind, P.fp_alvo_ind), fp_alvo_cap: fp(b.fp_alvo_cap, P.fp_alvo_cap),
     janela_cap_ini: hhmm(b.janela_cap_ini, P.janela_cap_ini), janela_cap_fim: hhmm(b.janela_cap_fim, P.janela_cap_fim),
     margem_q3_kvar: n(b.margem_q3_kvar, P.margem_q3_kvar, 0) as number,
+    prioridade_q: Math.round(n(b.prioridade_q, P.prioridade_q, 0, 1) as number),
     banda_pct: n(b.banda_pct, P.banda_pct, 0, 20) as number,
     t_min_ajuste_fp_s: n(b.t_min_ajuste_fp_s, P.t_min_ajuste_fp_s, 60, 3600) as number,
     t_resposta_s: n(b.t_resposta_s, P.t_resposta_s, 5, 600) as number,
