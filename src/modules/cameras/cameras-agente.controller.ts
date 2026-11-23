@@ -86,8 +86,11 @@ export class CamerasAgenteController {
 
   @Post('heartbeat')
   @HttpCode(HttpStatus.OK)
-  heartbeat(@Agente() agente: AgenteInfo, @Body() dto: HeartbeatDto) {
-    return this.agentes.heartbeat(agente, dto);
+  async heartbeat(@Agente() agente: AgenteInfo, @Body() dto: HeartbeatDto) {
+    const r = await this.agentes.heartbeat(agente, dto);
+    // NEXON-108: aparelho novo numa versão velha se atualiza sozinho (falha aqui não derruba o heartbeat)
+    await this.aparelho.atualizarSozinho(agente.id, dto.versao).catch(() => undefined);
+    return r;
   }
 
   @Post('miniaturas')
