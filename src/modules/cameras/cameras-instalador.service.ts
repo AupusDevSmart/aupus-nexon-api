@@ -151,6 +151,16 @@ export class CamerasInstaladorService {
     res.send(texto);
   }
 
+  /**
+   * GET /cameras/instalador/fonte5?token= — pacote oficial de recuperação do Raspberry 5 (raspberrypi/usbboot
+   * recovery5) com o EEPROM já configurado: BOOT_ORDER microSD → pendrive → NVMe e PSU_MAX_CURRENT=5000. O
+   * instalador do PC grava pelo cabo USB-C para o Raspberry ligar pelo pendrive com carregador de celular.
+   */
+  async fonte5(user: Usuario | undefined, req: Request, res: Response) {
+    this.exigir(user);
+    await this.storage.servir(req, res, `${PASTA}/fonte5.tar.gz`, 'application/gzip', 'private, no-store', 'fonte5.tar.gz');
+  }
+
   /** GET /cameras/instalador/primeiro-boot?token= — primeiro-boot.sh mais novo, com o endereço do relato do aparelho. */
   async primeiroBoot(user: Usuario | undefined, req: Request, res: Response) {
     this.exigir(user);

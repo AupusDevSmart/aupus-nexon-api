@@ -80,6 +80,13 @@ describe('instalador do Raspberry', () => {
     expect(res.send).not.toHaveBeenCalled();
   });
 
+  it('pacote que libera o carregador comum: serve o tar.gz e exige permissão', async () => {
+    const { svc, storage } = montar();
+    await svc.fonte5(admin, req, {} as any);
+    expect(storage.servir).toHaveBeenCalledWith(req, {}, 'instalador/fonte5.tar.gz', 'application/gzip', 'private, no-store', 'fonte5.tar.gz');
+    await expect(svc.fonte5({ id: 'x', role: 'operador' } as any, req, {} as any)).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
   it('sem permissão ou sem publicação recusa', async () => {
     await expect(montar().svc.info({ id: 'x', role: 'operador' } as any, req)).rejects.toBeInstanceOf(ForbiddenException);
     await expect(montar(false).svc.info(admin, req)).rejects.toBeInstanceOf(NotFoundException);
