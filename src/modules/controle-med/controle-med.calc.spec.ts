@@ -32,6 +32,17 @@ describe('entrada da SSU', () => {
     expect(g.E_exp).toBeCloseTo(245 * 0.009, 6);
   });
 
+  it('parcial de 30 s ("dur":30): kW = pulsos × ke × 120; sem dur = 60 s', () => {
+    const m = minuto({ dur: 30, mphr: 1500 });
+    expect(m.dur).toBe(30);
+    expect(grandezas(m).P_exp).toBeCloseTo(180);       // 1500 pulsos em 30 s × 0,001 × 120
+    expect(minuto({ mphr: 1500 }).dur).toBe(60);
+    // lacuna só quando falta mais de 1,5 parcial
+    const ant = { nsu: 3, seg: 640, ssu_err: 0, ts: 0 };
+    expect(portaoMedidor(minuto({ dur: 30, seg: 610 }), ant, PARAMS_PADRAO, Date.parse('2026-11-05T15:00:00Z')).lacuna).toBe(false);
+    expect(portaoMedidor(minuto({ dur: 30, seg: 580 }), ant, PARAMS_PADRAO, Date.parse('2026-11-05T15:00:00Z')).lacuna).toBe(true);
+  });
+
   it('lê o payload plano do satélite (m*) e converte pulsos em kW/kWh', () => {
     const m = minuto({ phr: 2000, mphr: 3000, mqhfi: 500, mqhrc: 100 });
     const g = grandezas(m);

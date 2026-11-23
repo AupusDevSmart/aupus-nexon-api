@@ -80,6 +80,7 @@ export interface MinutoSsu {
   acc: Pulsos;                      // acumulado do intervalo
   min: Pulsos;                      // último minuto
   posto_reativo?: number | null;    // 1 capacitivo, 2 indutivo (quando a TON publicar)
+  dur?: number;                     // s da parcial (60 antigo; 30 = ciclo de 30 s)
 }
 
 const num = (v: unknown, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
@@ -103,19 +104,21 @@ export function lerMinuto(d: any, ts: number): MinutoSsu | null {
     q: d.q == null ? null : num(d.q), posto: d.posto == null ? null : num(d.posto),
     fim: num(d.fim) === 1 ? 1 : 0, acc: pulsos(acc), min: pulsos(min),
     posto_reativo: d.pr == null ? null : num(d.pr),
+    dur: num(d.dur) >= 5 && num(d.dur) <= 900 ? Math.trunc(num(d.dur)) : 60,
   };
 }
 
 /** Grandezas do minuto (convenção do A-966: indutivo = qhfi+qhri, capacitivo = qhfc+qhrc). */
 export function grandezas(m: MinutoSsu) {
   const k = m.ke;
+  const f = 3600 / (m.dur || 60);   // pulsos da parcial → kW
   const T = m.cdo * 60;
   return {
     T,
     E_imp: m.acc.phf * k, E_exp: m.acc.phr * k,                 // kWh no intervalo
-    P_imp: m.min.phf * k * 60, P_exp: m.min.phr * k * 60,       // kW (média do minuto)
-    Q_ind: (m.min.qhfi + m.min.qhri) * k * 60,
-    Q_cap: (m.min.qhfc + m.min.qhrc) * k * 60,
+    P_imp: m.min.phf * k * f, P_exp: m.min.phr * k * f,         // kW (média da parcial: 60 ou 30 s)
+    Q_ind: (m.min.qhfi + m.min.qhri) * k * f,
+    Q_cap: (m.min.qhfc + m.min.qhrc) * k * f,
   };
 }
 
@@ -140,8 +143,8 @@ export function portaoMedidor(m: MinutoSsu, ant: EstadoAnterior | null, p: Param
     motivos.push(`Erros de leitura da SSU subindo (+${m.ssu_err - ant.ssu_err} no minuto)`);
   }
   if (ant && ant.nsu != null && m.nsu != null && ant.seg != null) {
-    // mesmo intervalo: o seg cai ~60 por minuto; intervalo novo: o NSU sobe 1
-    if (m.nsu === ant.nsu && m.fim === 0 && ant.seg - m.seg > 90) lacuna = true;
+    // mesmo intervalo: o seg cai ~dur por parcial; intervalo novo: o NSU sobe 1
+    if (m.nsu === ant.nsu && m.fim === 0 && ant.seg - m.seg > 1.5 * (m.dur || 60)) lacuna = true;
     if (m.nsu > ant.nsu + 1) lacuna = true;
   }
   if (lacuna) motivos.push('Faltou minuto do medidor no intervalo (orçamento incerto)');
@@ -178,7 +181,7 @@ export interface PedidoDemanda {
 export function decidirDemanda(a: {
   E_kwh: number; P_kw: number; seg: number; T: number;
   contrato: number | null; alvo_pct: number; corteMax: number; t_resposta_s: number;
-  projAnt: number | null; aguardando: boolean; banda_pct: number; folgaLimitada: number;
+  projAnt: number | null; aguardando: boolean; banda_pct: number; folgaLimitada: number; dur?: number;
 }): PedidoDemanda {
   if (!a.contrato || a.contrato <= 0) {
     return { acao: 'sem_contrato', D_proj: null, P_perm: null, dP: 0, contrato: null, alvo: null, motivo: 'Contrato não cadastrado' };
@@ -197,8 +200,8 @@ export function decidirDemanda(a: {
     }
     return { acao: 'nada', ...base, dP: 0, motivo: `Projeção ${fmt(D_proj)} kW abaixo do contrato ${fmt(a.contrato)} kW` };
   }
-  // Ainda dá para esperar 1 min? P mantido por 60 s + t_resposta, depois o corte máximo.
-  const espera = 60 + a.t_resposta_s;
+  // Ainda dá para esperar 1 ciclo? P mantido por dur (60/30 s) + t_resposta, depois o corte máximo.
+  const espera = (a.dur ?? 60) + a.t_resposta_s;
   const P_pos = Math.max(0, a.P_kw - a.corteMax);
   const podeEsperar = a.seg > espera
     && a.E_kwh * 3600 + a.P_kw * espera + P_pos * (a.seg - espera) <= a.contrato * a.T;

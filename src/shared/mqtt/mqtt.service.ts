@@ -2234,17 +2234,17 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
    * useGatewayGraficos.ts / a966-modal.tsx — extrair pra util compartilhada
    * num próximo refactor (ver "depois vamos revisar essa função").
    */
-  /** Parcial de 1 min da SSU → ssu_minutos (retenção 7 dias). Nunca lança. */
+  /** Parcial da SSU (60 s, ou 30 s com "dur":30) → ssu_minutos (retenção 7 dias). Nunca lança. */
   private async salvarParcialSsu(equipamentoId: string, dados: any, ts: Date) {
     try {
       const m = dados?.min ?? {};
       const n = (v: any) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Math.trunc(Number(v)) : 0);
       const ke = keDoBloco(dados);
       await this.prisma.$executeRaw`
-        INSERT INTO ssu_minutos (equipamento_id, ts, nsu, seg, ke, q, posto, phf, phr, qhfi, qhfc, qhri, qhrc)
+        INSERT INTO ssu_minutos (equipamento_id, ts, nsu, seg, ke, q, posto, phf, phr, qhfi, qhfc, qhri, qhrc, dur)
         VALUES (${equipamentoId.trim()}, ${emSegundos(ts)}, ${n(dados?.NSU)}, ${n(dados?.seg)}, ${ke},
                 ${dados?.q == null ? null : n(dados.q)}, ${dados?.posto == null ? null : n(dados.posto)},
-                ${n(m.phf)}, ${n(m.phr)}, ${n(m.qhfi)}, ${n(m.qhfc)}, ${n(m.qhri)}, ${n(m.qhrc)})
+                ${n(m.phf)}, ${n(m.phr)}, ${n(m.qhfi)}, ${n(m.qhfc)}, ${n(m.qhri)}, ${n(m.qhrc)}, ${durParcial(dados)})
         ON CONFLICT (equipamento_id, ts) DO NOTHING`;
       if (Math.random() < 0.01) {
         await this.prisma.$executeRaw`DELETE FROM ssu_minutos WHERE ts < ${new Date(Date.now() - 7 * 86_400_000)}`;
@@ -3257,4 +3257,10 @@ export function motivoDoReinicio(rr: string | null): { texto: string; severidade
   }
   if (r.startsWith('software')) return { texto: 'reinício por software', severidade: 'WARN' };
   return { texto: `motivo ${rr}`, severidade: 'WARN' };
+}
+
+/** Duração da parcial da SSU em s ("dur" do firmware; sem o campo = 60, formato antigo). */
+export function durParcial(d: any): number {
+  const v = Math.trunc(Number(d?.dur));
+  return Number.isFinite(v) && v >= 5 && v <= 900 ? v : 60;
 }

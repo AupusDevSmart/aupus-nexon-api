@@ -317,16 +317,17 @@ export class GatewayDashboardService {
     // 5. Minuto a minuto (parcial da TON-V2, ssu_minutos): potência "agora" + última hora.
     //    Só exibição — energia e demanda acima vêm dos blocos do medidor.
     const minutosRaw = await this.prisma.$queryRaw<any[]>`
-      SELECT ts, ke, nsu, seg, q, posto, phf, phr, qhfi, qhfc, qhri, qhrc
+      SELECT ts, ke, nsu, seg, q, posto, phf, phr, qhfi, qhfc, qhri, qhrc, dur
         FROM ssu_minutos
        WHERE equipamento_id = ${id}::bpchar AND ts >= ${new Date(Date.now() - 60 * 60_000)}
        ORDER BY ts`.catch(() => [] as any[]);
     const serieMinutos = minutosRaw.map((m) => {
       const k = Number(m.ke) || kd;
-      const kW_consumo = Number(m.phf) * k * 60;
-      const kW_injecao = Number(m.phr) * k * 60;
-      const kvar_ind = (Number(m.qhfi) + Number(m.qhri)) * k * 60;
-      const kvar_cap = (Number(m.qhfc) + Number(m.qhrc)) * k * 60;
+      const f = 3600 / (Number(m.dur) || 60);   // parcial de 60 s (antiga) ou 30 s
+      const kW_consumo = Number(m.phf) * k * f;
+      const kW_injecao = Number(m.phr) * k * f;
+      const kvar_ind = (Number(m.qhfi) + Number(m.qhri)) * k * f;
+      const kvar_cap = (Number(m.qhfc) + Number(m.qhrc)) * k * f;
       const p = Math.max(kW_consumo, kW_injecao);
       const qv = Math.abs(kvar_ind - kvar_cap);
       return {
@@ -353,7 +354,7 @@ export class GatewayDashboardService {
         nsu: agoraMin.nsu,
         kwh_consumo: doNsu.reduce((a, m) => a + Number(m.phf), 0) * k,
         kwh_injecao: doNsu.reduce((a, m) => a + Number(m.phr), 0) * k,
-        minutos: doNsu.length,
+        minutos: Math.round(doNsu.reduce((a, m) => a + (Number(m.dur) || 60), 0) / 60),
         fecha_em_s: agoraMin.seg == null ? null : Math.max(0, agoraMin.seg - decorrido),
       };
     }

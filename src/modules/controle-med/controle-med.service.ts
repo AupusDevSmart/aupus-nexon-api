@@ -163,12 +163,12 @@ export class ControleMedService implements OnModuleInit {
   /** Acumulado da hora (minutos da SSU) para o FP horário + P̂ dos últimos 5 min. */
   private async horaSsu(ssuId: string, m: MinutoSsu) {
     const ini = new Date(Math.floor(m.ts / 3_600_000) * 3_600_000);
-    const rows = await this.prisma.$queryRaw<Array<{ ts: Date; ke: number; phf: number; phr: number; qhfi: number; qhfc: number; qhri: number; qhrc: number }>>`
-      SELECT ts, ke::float AS ke, phf, phr, qhfi, qhfc, qhri, qhrc FROM ssu_minutos
+    const rows = await this.prisma.$queryRaw<Array<{ ts: Date; ke: number; phf: number; phr: number; qhfi: number; qhfc: number; qhri: number; qhrc: number; dur: number }>>`
+      SELECT ts, ke::float AS ke, phf, phr, qhfi, qhfc, qhri, qhrc, dur FROM ssu_minutos
       WHERE equipamento_id = ${ssuId}::bpchar AND ts >= ${new Date(Math.min(ini.getTime(), m.ts - 5 * 60_000))}
       ORDER BY ts`.catch(() => []);
     let E_P = 0, E_ind = 0, E_cap = 0;
-    const ult5: number[] = [];
+    let e5 = 0, s5 = 0;   // P̂ = energia dos últimos 5 min / tempo coberto (parciais de 60 ou 30 s)
     for (const r of rows) {
       const k = Number(r.ke) || m.ke;
       const t = new Date(r.ts).getTime();
@@ -177,11 +177,11 @@ export class ControleMedService implements OnModuleInit {
         E_ind += (Number(r.qhfi) + Number(r.qhri)) * k;
         E_cap += (Number(r.qhfc) + Number(r.qhrc)) * k;
       }
-      if (t >= m.ts - 5 * 60_000) ult5.push(Number(r.phf) * k * 60);
+      if (t >= m.ts - 5 * 60_000) { e5 += Number(r.phf) * k; s5 += Number(r.dur) || 60; }
     }
     return {
       E_P, E_ind, E_cap,
-      P_hat: ult5.length ? ult5.reduce((a, b) => a + b, 0) / ult5.length : grandezas(m).P_imp,
+      P_hat: s5 > 0 ? (e5 * 3600) / s5 : grandezas(m).P_imp,
       t_rest: Math.max(0, ini.getTime() + 3_600_000 - m.ts) / 1000,
     };
   }
@@ -262,7 +262,7 @@ export class ControleMedService implements OnModuleInit {
       const contr = contr0 ? contr0 * (1 + p.tol_c_pct / 100) : contr0;
       pedC = decidirDemanda({
         E_kwh: E_imp, P_kw: g.P_imp, seg: m.seg, T: g.T, contrato: contr, alvo_pct: p.alvo_c_pct, corteMax: folgaLimitada,
-        t_resposta_s: p.t_resposta_s, projAnt: est.projC, aguardando: est.aguardC, banda_pct: p.banda_pct, folgaLimitada: 0,
+        t_resposta_s: p.t_resposta_s, dur: m.dur, projAnt: est.projC, aguardando: est.aguardC, banda_pct: p.banda_pct, folgaLimitada: 0,
       });
       est.projC = pedC.D_proj; est.aguardC = pedC.acao === 'aguardar';
       if (pedC.acao === 'reduzir' && pedC.dP > folgaLimitada + 0.5) {
@@ -273,7 +273,7 @@ export class ControleMedService implements OnModuleInit {
     if (modos.demanda_g !== 'desligado') {
       pedG = decidirDemanda({
         E_kwh: E_exp, P_kw: g.P_exp, seg: m.seg, T: g.T, contrato: p.d_contr_g_kw, alvo_pct: p.alvo_g_pct, corteMax: P_ufvs,
-        t_resposta_s: p.t_resposta_s, projAnt: est.projG, aguardando: est.aguardG, banda_pct: p.banda_pct, folgaLimitada: folgaG,
+        t_resposta_s: p.t_resposta_s, dur: m.dur, projAnt: est.projG, aguardando: est.aguardG, banda_pct: p.banda_pct, folgaLimitada: folgaG,
       });
       // já esperou (ou já cortou) neste intervalo: daqui até o fechamento corta direto, sem novo minuto de espera
       est.projG = pedG.D_proj; est.aguardG = est.aguardG || pedG.acao === 'aguardar' || pedG.acao === 'reduzir';   // zera no fechamento (fim=1)
@@ -780,10 +780,10 @@ export function sanitizarParams(b: any): Params {
     margem_q3_kvar: n(b.margem_q3_kvar, P.margem_q3_kvar, 0) as number,
     prioridade_q: Math.round(n(b.prioridade_q, P.prioridade_q, 0, 1) as number),
     banda_pct: n(b.banda_pct, P.banda_pct, 0, 20) as number,
-    t_min_ajuste_fp_s: n(b.t_min_ajuste_fp_s, P.t_min_ajuste_fp_s, 60, 3600) as number,
+    t_min_ajuste_fp_s: n(b.t_min_ajuste_fp_s, P.t_min_ajuste_fp_s, 30, 3600) as number,
     t_resposta_s: n(b.t_resposta_s, P.t_resposta_s, 5, 600) as number,
     degrau_min_pct: n(b.degrau_min_pct, P.degrau_min_pct, 0.5, 20) as number,
-    t_validade_internet_s: n(b.t_validade_internet_s, P.t_validade_internet_s, 60, 3600) as number,
+    t_validade_internet_s: n(b.t_validade_internet_s, P.t_validade_internet_s, 40, 3600) as number,
     t_validade_lora_s: n(b.t_validade_lora_s, P.t_validade_lora_s, 60, 3600) as number,
     t_estagio2_s: n(b.t_estagio2_s, P.t_estagio2_s, 0, 86400) as number,
     n_retomada: Math.round(n(b.n_retomada, P.n_retomada, 1, 20) as number),
