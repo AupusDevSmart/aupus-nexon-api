@@ -295,7 +295,9 @@ export class ControleMedService implements OnModuleInit {
         : qDisponivel(i, Math.max(0, vivo[i.id]?.P_kw ?? 0), noite)), 0);
       pedFp = decidirFp({
         janela, E_P_h: h.E_P, E_Q_h: janela === 'ind' ? h.E_ind : h.E_cap, P_hat: h.P_hat,
-        Q_med: janela === 'ind' ? g.Q_ind : g.Q_cap, t_rest_hora: h.t_rest,
+        // Q LÍQUIDO do minuto no sentido da janela: com compensação demais o medidor vira o outro tipo
+        // (ex.: capacitivo na janela indutiva) → negativo → devolve. Só o tipo da janela conta na conta da hora.
+        Q_med: janela === 'ind' ? g.Q_ind - g.Q_cap : g.Q_cap - g.Q_ind, t_rest_hora: h.t_rest,
         fp_lim: janela === 'ind' ? p.fp_lim_ind : p.fp_lim_cap, fp_alvo: janela === 'ind' ? p.fp_alvo_ind : p.fp_alvo_cap,
         banda_kvar: Math.max(1, Q_disp_total * p.banda_pct / 100), margem_q3: p.margem_q3_kvar,
         Q_ufv_atual, Q_disp_total, desdeUltimoAjuste: (Date.now() - est.ultimoAjusteFp) / 1000, t_min_ajuste: p.t_min_ajuste_fp_s,
