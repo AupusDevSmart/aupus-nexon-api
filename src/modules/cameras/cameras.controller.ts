@@ -204,6 +204,14 @@ export class CamerasController {
 
   @Public()
   @UseGuards(UsuarioOuTokenMidiaGuard)
+  @Get('instalador/fonte5')
+  @ApiOperation({ summary: 'Pacote de recuperação do Raspberry 5 que libera o boot por pendrive com carregador comum (JWT ou ?token=)' })
+  instaladorFonte5(@CurrentUser() user: Usuario, @Req() req: Request, @Res() res: Response) {
+    return this.instaladorSvc.fonte5(user, req, res);
+  }
+
+  @Public()
+  @UseGuards(UsuarioOuTokenMidiaGuard)
   @Get('instalador/primeiro-boot')
   @ApiOperation({ summary: 'primeiro-boot.sh atualizado que o instalador do PC grava no cartão/pendrive (JWT ou ?token=)' })
   instaladorPrimeiroBoot(@CurrentUser() user: Usuario, @Req() req: Request, @Res() res: Response) {
