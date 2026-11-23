@@ -6,7 +6,7 @@ import { EquipamentosCmdService } from '../equipamentos-cmd/equipamentos-cmd.ser
 import {
   CONTROLES, ComandoInv, Controle, decidirDemanda, decidirFp, despachar, EstadoAnterior, grandezas, InvAoVivo,
   janelaReativa, lerMinuto, MinutoSsu, Modo, Modos, MODOS_PADRAO, Params, PARAMS_PADRAO, PedidoDemanda, PedidoFp,
-  portaoMedidor, qDisponivel, SetpointInv, Ufv, validarCadastro, fmt,
+  portaoMedidor, qDisponivel, SetpointInv, tetoQueda, Ufv, validarCadastro, fmt,
 } from './controle-med.calc';
 import {
   AlvoSp, bruto, ItemTon, lerRespostaCtl, MAX_INV_TON, montarCadastro, montarCtl, MODO_TON_TEXTO, RespostaCtl,
@@ -244,9 +244,15 @@ export class ControleMedService implements OnModuleInit {
     const disponiveis = ufvs.flatMap((u) => u.inversores).filter((i) => vivo[i.id]?.disponivel);
     const P_ufvs = disponiveis.reduce((a, i) => a + Math.max(0, vivo[i.id]?.P_kw ?? 0), 0);
     const folgaLimitada = disponiveis.reduce((a, i) => a + Math.max(0, i.pn_kw - (est.setpoints[i.id]?.p_lim_kw ?? i.pn_kw)), 0);
-    // Decisão 19/11: sem teto R4 no despacho — abaixo do contrato libera até 100 % (o piso garante o corte).
-    // O R4 fica só como aviso de cadastro (validarCadastro); a proteção na queda de comunicação é a validade + P estático na TON.
-    const folgaG = folgaLimitada;
+    // R4 olhando o medidor (23/11): teto da Σ limite para a queda de comunicação com consumo zero, usando a
+    // energia já exportada no intervalo. Com a fazenda consumindo o teto fica alto e não limita.
+    const tVal = Math.max(0, ...ufvs.map((u) => (u.rota === 'lora' ? p.t_validade_lora_s : p.t_validade_internet_s)));
+    const tetoR4 = modos.demanda_g !== 'desligado'
+      ? tetoQueda({ contrato: p.d_contr_g_kw, T: g.T, E_kwh: E_exp, seg: m.seg, t_val: tVal, t_estagio2: p.t_estagio2_s, ufvs })
+      : null;
+    const somaPlim = ufvs.flatMap((u) => u.inversores).reduce((a, i) => a + (est.setpoints[i.id]?.p_lim_kw ?? i.pn_kw), 0);
+    const folgaG = tetoR4 != null ? Math.min(folgaLimitada, Math.max(0, tetoR4 - somaPlim)) : folgaLimitada;
+    Object.assign(entradas, { teto_queda_kw: tetoR4 });
 
     // Demanda de carga (prioridade 2) e de geração (3)
     let pedC: PedidoDemanda | null = null, pedG: PedidoDemanda | null = null;
@@ -307,7 +313,7 @@ export class ControleMedService implements OnModuleInit {
       ufvs, vivo, atuais: est.setpoints,
       dP_g: pedG?.acao === 'reduzir' ? pedG.dP : pedG?.acao === 'liberar' ? -pedG.dP : 0,
       dP_c: pedC?.acao === 'reduzir' ? Math.min(pedC.dP, folgaLimitada) : 0,
-      Q_alvo_total, noite, tetoPlim: null, degrau_min_pct: p.degrau_min_pct,
+      Q_alvo_total, noite, tetoPlim: tetoR4, degrau_min_pct: p.degrau_min_pct,
       controlaP: modos.demanda_g !== 'desligado' || modos.demanda_c !== 'desligado',
       pisoTotal: modos.demanda_g !== 'desligado' ? p.d_contr_g_kw : null,
       prioridadeQ: p.prioridade_q === 1 && modos.fp !== 'desligado',

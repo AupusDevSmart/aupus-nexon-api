@@ -295,6 +295,28 @@ export function dividirQ(Q_total: number, disp: Array<{ id: string; q_disp: numb
  * validade vencer e depois no P_estatico até o estágio 2. Devolve o maior Σp_lim que ainda fecha
  * o intervalo ≤ contrato, e avisos do cadastro.
  */
+/**
+ * R4 olhando o medidor (decisão 23/11): maior Σ limite de P que, se a comunicação cair AGORA e o consumo for a
+ * zero, ainda fecha o intervalo ≤ contrato. Pior caso daqui ao fechamento: Σlimite durante a validade, depois
+ * Σ P estático (estágio 1) e, passado o estágio 2, só as UFVs que não zeram. Usa a energia JÁ exportada no
+ * intervalo: com a fazenda consumindo sobra margem e o teto fica alto (não limita); perto do contrato, aperta.
+ */
+export function tetoQueda(a: {
+  contrato: number | null; T: number; E_kwh: number; seg: number;
+  t_val: number; t_estagio2: number; ufvs: Ufv[];
+}): number | null {
+  if (!a.contrato || a.contrato <= 0 || !a.ufvs.length) return null;
+  const somaEst = a.ufvs.reduce((s, u) => s + Math.max(0, u.p_estatico_kw), 0);
+  const somaEstNz = a.ufvs.reduce((s, u) => s + (u.zera_estagio2 ? 0 : Math.max(0, u.p_estatico_kw)), 0);
+  const seg = Math.max(0, a.seg);
+  const d1 = Math.min(a.t_val, seg);                                   // último limite (validade)
+  const d2 = Math.min(a.t_estagio2, Math.max(0, seg - a.t_val));       // estágio 1: P estático
+  const d3 = Math.max(0, seg - a.t_val - a.t_estagio2);                // estágio 2: só as que não zeram
+  const sobra = a.contrato * a.T - a.E_kwh * 3600 - somaEst * d2 - somaEstNz * d3;   // kW·s
+  if (d1 <= 0) return null;                                            // intervalo fechando: nada a proteger
+  return Math.max(0, sobra / d1);
+}
+
 export function validarCadastro(p: Params, ufvs: Ufv[], T_intervalo_s = 900) {
   const avisos: string[] = [];
   const bloqueios: string[] = [];   // impedem o modo ativo
@@ -302,17 +324,11 @@ export function validarCadastro(p: Params, ufvs: Ufv[], T_intervalo_s = 900) {
   const somaEst = ufvs.reduce((a, u) => a + Math.max(0, u.p_estatico_kw), 0);
   const somaPn = ufvs.reduce((a, u) => a + u.inversores.reduce((b, i) => b + i.pn_kw, 0), 0);
   const tVal = Math.max(0, ...ufvs.map((u) => (u.rota === 'lora' ? p.t_validade_lora_s : p.t_validade_internet_s)));
-  let tetoPlim: number | null = null;
-  if (contrato && contrato > 0 && ufvs.length) {
-    const alvo = contrato * p.alvo_g_pct / 100;
-    const T = T_intervalo_s > 0 ? T_intervalo_s : 900;   // intervalo do medidor (bancada: 5 min)
-    if (somaEst > contrato) avisos.push(`Σ P estático (${fmt(somaEst)} kW) passa do contrato de geração (${fmt(contrato)} kW): o estágio 2 precisa ser curto o bastante.`);
-    const folga = (contrato - alvo) * T - Math.max(0, somaEst - alvo) * p.t_estagio2_s;
-    tetoPlim = tVal > 0 ? alvo + folga / tVal : null;
-    if (tetoPlim != null && tetoPlim < alvo) {
-      bloqueios.push(`Com validade de ${tVal} s e estágio 2 de ${p.t_estagio2_s} s, nem o alvo cabe no pior caso: reduza o P estático ou o estágio 2.`);
-      tetoPlim = null;
-    }
+  const T = T_intervalo_s > 0 ? T_intervalo_s : 900;   // intervalo do medidor (bancada: 5 min)
+  // teto no INÍCIO do intervalo (nada exportado ainda) — referência para o cadastro; no ciclo ele usa a energia real
+  const tetoPlim = tetoQueda({ contrato, T, E_kwh: 0, seg: T, t_val: tVal, t_estagio2: p.t_estagio2_s, ufvs });
+  if (contrato && contrato > 0 && somaEst > contrato + 1e-6) {
+    bloqueios.push(`Σ P estático (${fmt(somaEst)} kW) passa do contrato de geração (${fmt(contrato)} kW): sem comunicação as UFVs exportariam acima do contrato.`);
   }
   for (const u of ufvs) {
     if (!u.watchdog_nativo) avisos.push(`${u.nome}: sem watchdog nativo validado → limite dinâmico fica ≤ P estático (${fmt(u.p_estatico_kw)} kW).`);

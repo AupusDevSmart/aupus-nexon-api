@@ -1,6 +1,6 @@
 import {
   decidirDemanda, decidirFp, demandaProjetada, despachar, dividirQ, grandezas, janelaReativa, lerMinuto,
-  PARAMS_PADRAO, portaoMedidor, qDisponivel, Ufv, validarCadastro,
+  PARAMS_PADRAO, portaoMedidor, qDisponivel, tetoQueda, Ufv, validarCadastro,
 } from './controle-med.calc';
 
 /** Núcleo do controle pelo MED Concessionária (docs/IOT-CONTROLE-MED-CONCESSIONARIA-IMPLEMENTACAO.md). */
@@ -160,6 +160,29 @@ describe('carta e divisão de Q', () => {
   });
 });
 
+describe('R4 olhando o medidor (queda de comunicação com consumo zero)', () => {
+  const u = (id: string, est: number, zera = false) => ufv(id, 1, [inv(`${id}-1`)], { p_estatico_kw: est, zera_estagio2: zera });
+  it('campo: início do intervalo, P estático 45/45 com a B zerando → não limita', () => {
+    const t = tetoQueda({ contrato: 100, T: 900, E_kwh: 0, seg: 900, t_val: 60, t_estagio2: 600, ufvs: [u('a', 45), u('b', 45, true)] })!;
+    expect(t).toBeCloseTo((90000 - 90 * 600 - 45 * 240) / 60, 6);   // 420 kW
+  });
+  it('bancada 5 min: aperta no início e mais ainda com o intervalo já gasto', () => {
+    const ufvs = [u('a', 45), u('b', 45, true)];
+    const ini = tetoQueda({ contrato: 100, T: 300, E_kwh: 0, seg: 300, t_val: 90, t_estagio2: 180, ufvs })!;
+    expect(ini).toBeCloseTo((30000 - 90 * 180 - 45 * 30) / 90, 6);   // ≈ 138 kW
+    const gasto = tetoQueda({ contrato: 100, T: 300, E_kwh: 100 * 120 / 3600, seg: 180, t_val: 90, t_estagio2: 180, ufvs })!;
+    expect(gasto).toBeLessThan(ini);
+  });
+  it('fazenda consumindo (exportou pouco) → teto alto', () => {
+    const t = tetoQueda({ contrato: 100, T: 900, E_kwh: 2, seg: 600, t_val: 60, t_estagio2: 600, ufvs: [u('a', 45), u('b', 45, true)] })!;
+    expect(t).toBeGreaterThan(200);
+  });
+  it('Σ P estático acima do contrato bloqueia o ativo', () => {
+    const v = validarCadastro({ ...PARAMS_PADRAO, d_contr_g_kw: 100 }, [u('a', 100), u('b', 100)], 300);
+    expect(v.bloqueios.join(' ')).toMatch(/Σ P estático/);
+  });
+});
+
 describe('despachante', () => {
   const vivo = (P: Record<string, number>) => Object.fromEntries(Object.entries(P).map(([id, p]) => [id, { id, P_kw: p, disponivel: true }]));
 
@@ -253,8 +276,8 @@ describe('cadastro (R2/R4)', () => {
   it('teto do Σp_lim pelo pior caso e avisos', () => {
     const p = { ...PARAMS_PADRAO, d_contr_g_kw: 990, alvo_g_pct: 90, t_estagio2_s: 300 };
     const v = validarCadastro(p, [ufv('a', 1, [inv('a-1', 500)], { p_estatico_kw: 400, watchdog_nativo: false })]);
-    // folga = (990 − 891)·900 − 0 → teto = 891 + 89100/180 = 1386
-    expect(v.tetoPlim).toBeCloseTo(1386);
+    // início do intervalo: (990·900 − 400·300 − 400·420) / 180 = 3350 (o alvo não entra mais na conta)
+    expect(v.tetoPlim).toBeCloseTo(3350);
     expect(v.avisos.join(' ')).toMatch(/watchdog nativo/);
   });
 });
