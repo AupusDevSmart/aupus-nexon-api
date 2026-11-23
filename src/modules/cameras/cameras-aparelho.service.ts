@@ -106,6 +106,44 @@ export class CamerasAparelhoService {
     return { id: cmd.id, tipo: t, estado: cmd.estado };
   }
 
+  /**
+   * NEXON-108: aparelho novo (instalado há até 7 dias) que conecta numa versão mais velha que a publicada
+   * recebe sozinho o pedido de atualização — ninguém precisa lembrar de clicar em Atualizar. No máximo um
+   * pedido automático por dia (se a versão nova não subir, ele volta para a anterior e não entra em ciclo).
+   * Auditoria camera_agente_comando, sem usuário ("automático").
+   */
+  async atualizarSozinho(agenteId: string, versaoRelatada: string | undefined, agora = new Date()) {
+    const versao = versaoRelatada?.trim();
+    if (!versao) return;
+    const m = await this.manifesto();
+    if (!m || !versaoMaior(m.versao, versao)) return;
+    const a = await this.prisma.cameras_agentes.findFirst({
+      where: { id: agenteId, deleted_at: null },
+      select: { id: true, nome: true, unidade_id: true, versao: true, host: true, created_at: true },
+    });
+    if (!a || agora.getTime() - a.created_at.getTime() > 7 * 86_400_000) return;
+    const recente = await this.prisma.cameras_comandos.findFirst({
+      where: { agente_id: a.id, camera_id: null, tipo: 'atualizar', created_at: { gte: new Date(agora.getTime() - 86_400_000) } },
+      select: { id: true },
+    });
+    if (recente) return;
+    const parametros = { versao: m.versao, automatico: true };
+    const cmd = await this.prisma.cameras_comandos.create({
+      data: { id: novoId26(), camera_id: null, agente_id: a.id, tipo: 'atualizar', parametros, solicitado_por_id: null },
+    });
+    this.despertar.despertar(a.id);
+    const ctx = await this.auditoria.contextoUnidade(a.unidade_id);
+    await this.auditoria.registrar('camera_agente_comando', {
+      mensagem: `Atualização automática do aparelho novo "${a.nome}" (versão ${versao} → ${m.versao}) — ${ctx.unidade?.nome ?? a.unidade_id}${ctx.planta ? ` (${ctx.planta.nome})` : ''}`,
+      user: null,
+      unidade: ctx.unidade,
+      planta: ctx.planta,
+      objetoTipo: 'camera_agente',
+      objetoId: a.id,
+      extra: { comando: { id: cmd.id, tipo: 'atualizar', ...parametros }, agente: { id: a.id, nome: a.nome, versao, host: a.host } },
+    });
+  }
+
   /** GET /cameras/agentes/:id/comandos/:cmdId — estado e resultado (logs: resultado.linhas). */
   async estado(agenteId: string, comandoId: string, user?: Usuario) {
     const a = await this.agente(agenteId, user);
@@ -143,4 +181,14 @@ export class CamerasAparelhoService {
     if (user) await this.scope.assertEntityInScope('unidade', a.unidade_id, user);
     return a;
   }
+}
+
+/** a > b em versão semântica simples (0.4.10 > 0.4.9). */
+export function versaoMaior(a: string, b: string): boolean {
+  const pa = a.split('.').map((x) => parseInt(x, 10) || 0);
+  const pb = b.split('.').map((x) => parseInt(x, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) > (pb[i] ?? 0);
+  }
+  return false;
 }
