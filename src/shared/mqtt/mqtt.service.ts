@@ -120,6 +120,12 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
   public setPivoHooks(h: { status?: (tonId: string, dados: any) => void; evento?: (tonId: string, dados: any) => void }): void {
     this.pivoHooks = h;
   }
+  // Falta de energia (NEXON-145): <base>/energia {evento:"falta"|"retorno", ts}. Quem consome é o
+  // FaltaEnergiaService (registra no init): abre chamado na concessionária pelo WhatsAupus.
+  private energiaHook?: (tonId: string, dados: any) => Promise<void> | void;
+  public setEnergiaHook(h: (tonId: string, dados: any) => Promise<void> | void): void {
+    this.energiaHook = h;
+  }
 
   // Buffer para agregação de 1 minuto
   private buffers: Map<string, BufferData> = new Map();
@@ -488,7 +494,7 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
     }
 
     // 6) Bomba de combustível + carregador: <base>/abastecimento, <base>/bomba, <base>/carregador.
-    for (const suf of ['abastecimento', 'bomba', 'evento', 'auth/req', 'carregador', 'pivo', 'pivo/evento']) {
+    for (const suf of ['abastecimento', 'bomba', 'evento', 'auth/req', 'carregador', 'pivo', 'pivo/evento', 'energia']) {
       const t = `${topic}/${suf}`;
       if (!this.subscriptions.has(t)) {
         this.subscriptions.set(t, []);
@@ -976,6 +982,17 @@ export class MqttService extends EventEmitter implements OnModuleInit, OnModuleD
       if (topic.endsWith('/evt')) {
         for (const equipamentoId of equipamentoIds) {
           await this.processReleEvento(equipamentoId, dados);
+        }
+        return;
+      }
+
+      // Falta/retorno de energia na TON. Retido = aviso velho reentregue: ignora.
+      if (topic.endsWith('/energia')) {
+        if (retained) return;
+        for (const equipamentoId of equipamentoIds) {
+          try { await this.energiaHook?.(equipamentoId.trim(), dados); } catch (e) {
+            console.error(`❌ Erro na falta de energia (${topic}):`, e);
+          }
         }
         return;
       }

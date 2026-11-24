@@ -3835,3 +3835,37 @@ model cameras_descobertas {
   @@unique([agente_id, ip])
   @@index([visto_em])
 }
+
+/// NEXON-145 — aviso de falta de energia da TON → chamado EXTERNO na concessionária pelo robô
+/// do WhatsAupus. Tabela criada por db/manual-migrations/2026-11-24b_falta_energia.sql.
+/// Ids varchar(26) sem padding, sem relação Prisma (mesmo motivo dos chamados).
+model falta_energia_eventos {
+  id                  String    @id @db.VarChar(26)
+  equipamento_id      String?   @db.VarChar(26)
+  unidade_id          String?   @db.VarChar(26)
+  planta_id           String    @db.VarChar(26)
+  chave               String    @db.VarChar(60)
+  origem              String    @default("TON") @db.VarChar(10)
+  status              String    @default("AGUARDANDO") @db.VarChar(12)
+  inicio_em           DateTime  @db.Timestamp(0)
+  fim_em              DateTime? @db.Timestamp(0)
+  chamado_id          String?   @db.VarChar(26)
+  uc                  String?   @db.VarChar(30)
+  concessionaria      String?   @db.VarChar(120)
+  whatsaupus_id       String?   @db.VarChar(40)
+  protocolo           String?   @db.VarChar(40)
+  tentativas          Int       @default(0)
+  ultimo_erro         String?   @db.VarChar(500)
+  callback_token_hash String?   @db.VarChar(64)
+  callback_em         DateTime? @db.Timestamp(0)
+  avisos              Int       @default(1)
+  payload_ton         Json?
+  autor_id            String?   @db.VarChar(26)
+  autor_nome          String?   @db.VarChar(255)
+  created_at          DateTime  @default(now()) @db.Timestamp(0)
+  updated_at          DateTime  @default(now()) @updatedAt @db.Timestamp(0)
+
+  @@index([status, inicio_em])
+  @@index([chamado_id])
+  @@index([planta_id, created_at])
+}
