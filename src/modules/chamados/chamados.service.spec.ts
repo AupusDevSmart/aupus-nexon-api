@@ -12,8 +12,8 @@ const equipamento = {
 function montar(scope: string[] | null = null) {
   const prisma: any = {
     equipamentos: { findFirst: jest.fn().mockResolvedValue(equipamento), findMany: jest.fn().mockResolvedValue([]) },
-    unidades: { findMany: jest.fn().mockResolvedValue([]) },
-    plantas: { findFirst: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
+    unidades: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn().mockResolvedValue(null) },
+    plantas: { findFirst: jest.fn().mockResolvedValue({ id: 'pl1', nome: 'Fazenda', proprietario_id: 'pr1' }), findMany: jest.fn().mockResolvedValue([]) },
     usuarios: {
       findFirst: jest.fn().mockResolvedValue({ id: 'pr1', nome: 'Dono', email: 'dono@x.com', telefone: '62999990000' }),
     },
@@ -27,11 +27,13 @@ function montar(scope: string[] | null = null) {
       ]),
     },
     chamados_encaminhamentos: { create: jest.fn().mockImplementation(({ data }) => data) },
+    chamados_atualizacoes: { create: jest.fn().mockImplementation(({ data }) => data), findMany: jest.fn().mockResolvedValue([]) },
     $transaction: jest.fn().mockImplementation((ops: any[]) => Promise.all(ops)),
   };
   const scopeService: any = {
     getScope: jest.fn().mockResolvedValue(scope),
     getEquipamentosScope: jest.fn().mockResolvedValue(null),
+    getUnidadesScope: jest.fn().mockResolvedValue(null),
     assertEquipamentoLiberado: jest.fn().mockResolvedValue(undefined),
     isScoped: (s: any) => Array.isArray(s),
     assertPlantaInScope: jest.fn().mockImplementation(async (p: string) => {
@@ -56,7 +58,7 @@ describe('ChamadosService', () => {
     expect(r.equipamento_nome).toBe('Inversor 1 (INV-01)');
     const reg = auditoria.registrar.mock.calls[0][0];
     expect(reg.acao).toBe('chamado_aberto');
-    expect(reg.mensagem).toContain('Chamado #7 aberto — Inversor 1 (Fazenda)');
+    expect(reg.mensagem).toContain('Chamado #7 aberto — Inversor 1 · Usina A · Fazenda');
     expect(reg.plantaIds).toEqual(['pl1']);
     expect(reg.detalhes.equipamento).toMatchObject({ id: 'eq1', nome: 'Inversor 1' });
   });
@@ -104,12 +106,86 @@ describe('ChamadosService', () => {
 
   it('contagem soma abertos e encaminhados', async () => {
     const { service } = montar();
-    expect(await service.contagem(user)).toEqual({ abertos: 5, aguardando_encaminhamento: 3, encaminhados: 2 });
+    expect(await service.contagem(user)).toEqual({ abertos: 5, aguardando_encaminhamento: 3, encaminhados: 2, externos_abertos: 0 });
   });
 
   it('esconde chamado de planta fora do escopo', async () => {
     const { service, prisma } = montar(['outra']);
     prisma.chamados.findFirst.mockResolvedValue({ id: 'c1', planta_id: 'pl1', encaminhamentos: [] });
     await expect(service.detalhe('c1', user)).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  describe('chamado externo (NEXON-144)', () => {
+    const externo = {
+      id: 'c9', numero: 9, tipo: 'EXTERNO', status: 'ABERTO', motivo: 'FALTA_ENERGIA', prioridade: 'ALTA',
+      titulo: 'Falta de energia', descricao: 'Rua sem luz', orgao: 'Equatorial', protocolo: '123', equipamento_id: null,
+      unidade_id: null, planta_id: 'pl1', autor_id: 'u2', autor_nome: 'Ana', ocorrencia_em: new Date('2026-11-20T13:00:00Z'),
+      aberto_em: new Date('2026-11-20T13:30:00Z'), previsao_em: null, fechado_em: null, created_at: new Date('2026-11-20T13:31:00Z'),
+      encaminhamentos: [],
+    };
+
+    it('abre só com a planta, órgão e protocolo; trilha com órgão e protocolo', async () => {
+      const { service, prisma, auditoria } = montar();
+      await service.abrir(
+        { tipo: 'EXTERNO', planta_id: 'pl1', orgao: 'Equatorial', protocolo: '123', titulo: 'Falta de energia', descricao: 'Rua sem luz' },
+        user,
+      );
+      const data = prisma.chamados.create.mock.calls[0][0].data;
+      expect(data).toMatchObject({ tipo: 'EXTERNO', equipamento_id: null, planta_id: 'pl1', orgao: 'Equatorial', motivo: 'FALTA_ENERGIA' });
+      expect(data.aberto_em).toBeInstanceOf(Date);
+      const reg = auditoria.registrar.mock.calls[0][0];
+      expect(reg.mensagem).toContain('Chamado #7 (Equatorial, protocolo 123) aberto — Fazenda');
+      expect(reg).toMatchObject({ objetoTipo: 'chamado', autorNome: 'Diego' });
+    });
+
+    it('externo sem órgão e interno sem equipamento são recusados', async () => {
+      const { service } = montar();
+      await expect(service.abrir({ tipo: 'EXTERNO', planta_id: 'pl1', titulo: 'x', descricao: 'y' }, user)).rejects.toBeInstanceOf(BadRequestException);
+      await expect(service.abrir({ titulo: 'x', descricao: 'y' } as any, user)).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('sem usuário grava como ação do NexON', async () => {
+      const { service, prisma } = montar();
+      await service.abrir({ tipo: 'EXTERNO', planta_id: 'pl1', orgao: 'Equatorial', titulo: 'Falta', descricao: 'TON sem rede' });
+      expect(prisma.chamados.create.mock.calls[0][0].data.autor_nome).toBe('NexON (automático)');
+    });
+
+    it('resolver grava fechado_em, linha do tempo e duração na trilha', async () => {
+      const { service, prisma, auditoria } = montar();
+      prisma.chamados.findFirst.mockResolvedValue(externo);
+      prisma.chamados.update.mockImplementation(({ data }: any) => Promise.resolve({ ...externo, ...data }));
+      await service.mudarStatus('c9', { status: 'RESOLVIDO', texto: 'Religou', quando: '2026-11-20T17:00:00Z' }, user);
+      const upd = prisma.chamados.update.mock.calls[0][0].data;
+      expect(upd).toMatchObject({ status: 'RESOLVIDO', fechado_por_nome: 'Diego', motivo_fechamento: 'Religou' });
+      expect(prisma.chamados_atualizacoes.create.mock.calls[0][0].data).toMatchObject({ tipo: 'STATUS', status_anterior: 'ABERTO', status_novo: 'RESOLVIDO' });
+      const reg = auditoria.registrar.mock.calls[0][0];
+      expect(reg.acao).toBe('chamado_status');
+      expect(reg.mensagem).toContain('Aberto → Resolvido');
+      expect(reg.detalhes.duracao_horas).toBe(4);
+    });
+
+    it('externo não é encaminhado nem fechado pelo fluxo do reparo', async () => {
+      const { service, prisma } = montar();
+      prisma.chamados.findFirst.mockResolvedValue(externo);
+      await expect(service.fechar('c9', { motivo: 'x' }, user)).rejects.toBeInstanceOf(BadRequestException);
+      await expect(service.encaminhar('c9', { destino: 'SMART_SERVICE' }, user)).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('edição grava só o que mudou (antes → depois)', async () => {
+      const { service, prisma, auditoria } = montar();
+      prisma.chamados.findFirst.mockResolvedValue(externo);
+      prisma.chamados.update.mockImplementation(({ data }: any) => Promise.resolve({ ...externo, ...data }));
+      await service.editar('c9', { protocolo: '456', titulo: 'Falta de energia' }, user);
+      const reg = auditoria.registrar.mock.calls[0][0];
+      expect(reg.acao).toBe('chamado_editado');
+      expect(reg.detalhes.alteracoes).toEqual([{ campo: 'protocolo', antes: '123', depois: '456' }]);
+    });
+
+    it('excluir: só autor ou administrador', async () => {
+      const { service, prisma } = montar();
+      prisma.chamados.findFirst.mockResolvedValue(externo);
+      await expect(service.excluir('c9', { motivo: 'duplicado' }, { id: 'u9', role: 'proprietario' } as any)).rejects.toBeInstanceOf(ForbiddenException);
+      await expect(service.excluir('c9', { motivo: 'duplicado' }, user)).resolves.toEqual({ ok: true });
+    });
   });
 });
