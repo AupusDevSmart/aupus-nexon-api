@@ -9,6 +9,13 @@ export type AcaoAuditoria =
   | 'exportacao'
   | 'exportacao_negada'
   | 'configuracao_demanda'
+  // NEXON-145 — falta de energia da TON → chamado na concessionária (objeto_tipo 'falta_energia')
+  | 'falta_energia_aviso'
+  | 'falta_energia_enviada'
+  | 'falta_energia_protocolo'
+  | 'falta_energia_falhou'
+  | 'falta_energia_retorno'
+  | 'falta_energia_manual'
   | 'chamado_aberto'
   | 'chamado_encaminhado'
   | 'chamado_envio'
