@@ -159,10 +159,14 @@ export function montarPayloadWhatsaupus(o: {
 }
 
 export interface RetornoWhatsaupus {
-  status: 'completed' | 'failed' | 'needs_human' | string;
+  status: 'completed' | 'failed' | 'needs_human' | 'in_progress' | string;
   protocolo: string | null;
   erro: string | null;
   complaintId: string | null;
+  /** UC no padrão novo da ANEEL que a Clara informa ("sua nova Unidade Consumidora será ..."). */
+  ucNova: string | null;
+  /** Previsão de atendimento dada pela concessionária, como veio. */
+  previsao: string | null;
 }
 
 /** Lê o callback do WhatsAupus (dispatchCallback). Protocolo só com dígitos/letras, até 40. */
@@ -175,6 +179,8 @@ export function lerRetornoWhatsaupus(body: unknown): RetornoWhatsaupus {
     protocolo: limpo || null,
     erro: typeof b.errorMessage === 'string' ? b.errorMessage.slice(0, 500) : null,
     complaintId: typeof b.complaintId === 'string' ? b.complaintId.slice(0, 40) : null,
+    ucNova: typeof b.ucNova === 'string' ? normalizarUc(b.ucNova) : null,
+    previsao: typeof b.previsao === 'string' && b.previsao.trim() ? b.previsao.trim().slice(0, 200) : null,
   };
 }
 

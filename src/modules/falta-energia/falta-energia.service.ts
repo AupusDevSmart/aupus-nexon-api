@@ -187,22 +187,27 @@ export class FaltaEnergiaService implements OnModuleInit {
       });
       if (ev.chamado_id) {
         await this.passo(`protocolo no chamado ${ev.chamado_id}`, () =>
-          this.chamados.editar(ev.chamado_id!, { protocolo: r.protocolo!, aberto_em: agora.toISOString() } as any),
+          this.chamados.editar(ev.chamado_id!, { protocolo: r.protocolo!, aberto_em: agora.toISOString() }),
         );
         if (!ev.fim_em) {
           await this.passo(`status do chamado ${ev.chamado_id}`, () =>
             this.chamados.mudarStatus(ev.chamado_id!, {
               status: 'EM_ANDAMENTO',
               texto: `Protocolo ${r.protocolo} aberto na ${ev.concessionaria ?? 'concessionária'} pelo WhatsApp.`,
-            } as any),
+            }),
           );
         } else {
           await this.nota(ev.chamado_id, `Protocolo ${r.protocolo} aberto na ${ev.concessionaria ?? 'concessionária'} pelo WhatsApp (a energia já tinha voltado).`);
         }
       }
+      const extras = [
+        r.previsao ? `Previsão da concessionária: ${r.previsao}.` : '',
+        r.ucNova && r.ucNova !== normalizarUc(ev.uc) ? `A Clara informou a UC no padrão novo: ${r.ucNova} (atualize o cadastro da unidade).` : '',
+      ].filter(Boolean);
+      if (ev.chamado_id && extras.length) await this.nota(ev.chamado_id, extras.join(' '));
       await this.auditar('falta_energia_protocolo', { ...ev, protocolo: r.protocolo }, inst, {
         mensagem: `Protocolo ${r.protocolo} da ${ev.concessionaria ?? 'concessionária'} — falta de energia em ${inst.planta.nome}, UC ${ev.uc ?? '-'}`,
-        extra: { whatsaupus_id: r.complaintId },
+        extra: { whatsaupus_id: r.complaintId, uc_nova: r.ucNova, previsao: r.previsao },
       });
       return { ok: true };
     }
@@ -224,7 +229,22 @@ export class FaltaEnergiaService implements OnModuleInit {
       return { ok: true };
     }
 
-    // needs_human / in_progress: só registra; o atendente do WhatsAupus termina e manda de novo.
+    // needs_human: o robô parou e um atendente do WhatsAupus assumiu; o protocolo chega depois pelo
+    // mesmo callback. Nota uma vez por motivo. in_progress: só carimba.
+    if (r.status === 'needs_human') {
+      const motivo = `Atendente do WhatsAupus assumiu: ${r.erro ?? 'o robô não entendeu a Clara'}`.slice(0, 500);
+      const novo = ev.ultimo_erro !== motivo;
+      await this.prisma.falta_energia_eventos.update({ where: { id: ev.id }, data: { callback_em: new Date(), ultimo_erro: motivo } });
+      if (novo && ev.chamado_id) await this.nota(ev.chamado_id, `${motivo}. O protocolo aparece aqui quando ele terminar.`);
+      if (novo) {
+        await this.auditar('falta_energia_falhou', ev, inst, {
+          resultado: 'erro',
+          mensagem: `Robô da ${ev.concessionaria ?? 'concessionária'} passou para atendente — ${inst.planta.nome}, UC ${ev.uc ?? '-'}: ${r.erro ?? '-'}`,
+          extra: { whatsaupus_id: r.complaintId, atendente: true },
+        });
+      }
+      return { ok: true };
+    }
     await this.prisma.falta_energia_eventos.update({ where: { id: ev.id }, data: { callback_em: new Date() } });
     return { ok: true };
   }
@@ -294,7 +314,7 @@ export class FaltaEnergiaService implements OnModuleInit {
           ...(inst.unidade ? { unidade_id: inst.unidade.id } : {}),
           ...(inst.equipamento ? { equipamento_id: inst.equipamento.id } : {}),
           ocorrencia_em: ev.inicio_em.toISOString(),
-        } as any,
+        },
         undefined,
       )) as { id: string; numero: number };
     } catch (e) {
@@ -449,7 +469,7 @@ export class FaltaEnergiaService implements OnModuleInit {
     const texto = `Energia voltou às ${horaBr(fim)} (TON ${inst.equipamento?.nome ?? ''}), depois de ${duracao(aberto.inicio_em, fim)} sem energia.`;
     if (aberto.chamado_id) {
       await this.passo(`resolver chamado ${aberto.chamado_id}`, () =>
-        this.chamados.mudarStatus(aberto.chamado_id!, { status: 'RESOLVIDO', texto, quando: fim.toISOString() } as any),
+        this.chamados.mudarStatus(aberto.chamado_id!, { status: 'RESOLVIDO', texto, quando: fim.toISOString() }),
       );
     }
     await this.auditar('falta_energia_retorno', { ...aberto, fim_em: fim }, inst, {
@@ -557,7 +577,7 @@ export class FaltaEnergiaService implements OnModuleInit {
   }
 
   private async nota(chamadoId: string, texto: string, user?: Usuario, cliente?: ClienteInfo) {
-    await this.passo(`nota no chamado ${chamadoId}`, () => this.chamados.adicionarNota(chamadoId, { texto } as any, user, cliente));
+    await this.passo(`nota no chamado ${chamadoId}`, () => this.chamados.adicionarNota(chamadoId, { texto }, user, cliente));
   }
 
   /** Passo que não pode derrubar o fluxo (linha do tempo do chamado): loga e segue. */

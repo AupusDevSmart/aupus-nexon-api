@@ -104,11 +104,15 @@ describe('montarPayloadWhatsaupus', () => {
 
 describe('lerRetornoWhatsaupus', () => {
   it('lê o callback com protocolo', () => {
-    expect(lerRetornoWhatsaupus({ status: 'completed', protocoloEquatorial: '2026112400123', complaintId: 'c1' })).toEqual({
+    expect(
+      lerRetornoWhatsaupus({ status: 'completed', protocoloEquatorial: '2026112400123', complaintId: 'c1', ucNova: '000405952101297', previsao: ' até 4 h ' }),
+    ).toEqual({
       status: 'completed',
       protocolo: '2026112400123',
       erro: null,
       complaintId: 'c1',
+      ucNova: '000405952101297',
+      previsao: 'até 4 h',
     });
   });
 

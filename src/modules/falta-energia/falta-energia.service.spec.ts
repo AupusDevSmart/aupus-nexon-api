@@ -183,6 +183,22 @@ describe('FaltaEnergiaService', () => {
     expect(chamados.adicionarNota.mock.calls.at(-1)[1].texto).toContain('62 3243-2020');
   });
 
+  it('atendente assumiu: nota uma vez e o protocolo chega depois', async () => {
+    const { svc, eventos, chamados, auditoria } = montar();
+    await svc.receberDaTon('ton1', { evento: 'falta' });
+    await svc.tick();
+    const token = JSON.parse(fetchMock.mock.calls[0][1].body).callbackUrl.split('/').pop();
+    await svc.retornoWhatsaupus(token, { status: 'needs_human', errorMessage: 'Clara mudou o menu' });
+    await svc.retornoWhatsaupus(token, { status: 'needs_human', errorMessage: 'Clara mudou o menu' });
+    const notas = chamados.adicionarNota.mock.calls.map((c: any[]) => c[1].texto).filter((t: string) => t.includes('Atendente'));
+    expect(notas).toHaveLength(1);
+    expect(eventos.linhas[0].status).toBe('NO_ROBO');
+    await svc.retornoWhatsaupus(token, { status: 'completed', protocoloEquatorial: '486057723', ucNova: '000405952101297' });
+    expect(eventos.linhas[0]).toMatchObject({ status: 'PROTOCOLO', protocolo: '486057723' });
+    expect(chamados.adicionarNota.mock.calls.at(-1)[1].texto).toContain('000405952101297');
+    expect(acoes(auditoria).filter((a: string) => a === 'falta_energia_falhou')).toHaveLength(1);
+  });
+
   it('automação desligada não abre nada', async () => {
     process.env.FALTA_ENERGIA_ATIVO = 'false';
     const { svc, chamados } = montar();
