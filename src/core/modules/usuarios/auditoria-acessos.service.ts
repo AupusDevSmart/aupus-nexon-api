@@ -13,6 +13,11 @@ export type AcaoAuditoria =
   | 'chamado_encaminhado'
   | 'chamado_envio'
   | 'chamado_fechado'
+  // NEXON-144: chamado externo (Equatorial...) e edição/linha do tempo de qualquer chamado
+  | 'chamado_editado'
+  | 'chamado_status'
+  | 'chamado_nota'
+  | 'chamado_excluido'
   // NEXON-20 (spec de permissões, seção 8)
   | 'usuario_criado'
   | 'usuario_alterado'

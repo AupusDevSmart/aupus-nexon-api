@@ -67,3 +67,39 @@ describe('chamados-regras', () => {
     expect(interpretarBusca('  ')).toEqual({});
   });
 });
+
+import { agregarEstatisticas, duracaoHoras, podeMudarStatus, ultimosMeses } from './chamados-regras';
+
+describe('NEXON-144: externo', () => {
+  it('troca de status só no externo e para outro status', () => {
+    expect(podeMudarStatus('INTERNO', 'ABERTO', 'RESOLVIDO')).toHaveProperty('erro');
+    expect(podeMudarStatus('EXTERNO', 'ABERTO', 'ABERTO')).toHaveProperty('erro');
+    expect(podeMudarStatus('EXTERNO', 'ABERTO', 'FECHADO')).toHaveProperty('erro');
+    expect(podeMudarStatus('EXTERNO', 'RESOLVIDO', 'EM_ANDAMENTO')).toEqual({ ok: true });
+  });
+
+  it('duração conta da ocorrência até o encerramento', () => {
+    const c = { ocorrencia_em: new Date('2026-11-20T10:00:00Z'), aberto_em: new Date('2026-11-20T11:00:00Z'), created_at: new Date('2026-11-20T12:00:00Z'), fechado_em: new Date('2026-11-20T16:30:00Z') };
+    expect(duracaoHoras(c)).toBe(6.5);
+  });
+
+  it('últimos meses atravessa a virada do ano', () => {
+    expect(ultimosMeses(3, new Date('2026-02-10T15:00:00Z'))).toEqual(['2025-12', '2026-01', '2026-02']);
+  });
+
+  it('agrega totais, meses e órgãos', () => {
+    const agora = new Date('2026-11-24T15:00:00Z');
+    const base = { motivo: 'FALTA_ENERGIA', planta_id: 'p1', equipamento_id: null, aberto_em: null, previsao_em: null, ocorrencia_em: null };
+    const r = agregarEstatisticas(
+      [
+        { ...base, tipo: 'EXTERNO', status: 'RESOLVIDO', orgao: 'Equatorial', created_at: new Date('2026-11-10T12:00:00Z'), fechado_em: new Date('2026-11-10T16:00:00Z') },
+        { ...base, tipo: 'EXTERNO', status: 'ABERTO', orgao: 'Equatorial', created_at: new Date('2026-11-23T15:00:00Z'), fechado_em: null, previsao_em: new Date('2026-11-24T12:00:00Z') },
+        { ...base, motivo: 'FALHA', tipo: 'INTERNO', status: 'ENCAMINHADO', orgao: null, equipamento_id: 'e1', created_at: new Date('2026-10-05T12:00:00Z'), fechado_em: null },
+      ],
+      agora,
+    );
+    expect(r.totais).toMatchObject({ total: 3, abertos: 2, externos_abertos: 1, internos_abertos: 1, resolvidos: 1, resolvidos_no_mes: 1, previsao_vencida: 1, horas_media_resolucao: 4, horas_media_falta_energia: 4 });
+    expect(r.por_mes.slice(-2)).toEqual([{ mes: '2026-10', abertos: 1, resolvidos: 0 }, { mes: '2026-11', abertos: 2, resolvidos: 1 }]);
+    expect(r.por_orgao).toEqual([{ chave: 'Equatorial', total: 2 }]);
+  });
+});
