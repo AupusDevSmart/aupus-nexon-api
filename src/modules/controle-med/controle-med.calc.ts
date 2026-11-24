@@ -17,12 +17,18 @@ export const MODOS_PADRAO: Modos = { fp: 'desligado', demanda_g: 'desligado', de
 export interface Params {
   d_contr_g_kw: number | null;      // demanda de geração contratada (limite — R3: nunca passar)
   alvo_g_pct: number;               // ritmo de geração planejado (% do contrato)
+  tol_g_pct: number;                // tolerância de ultrapassagem da geração (R4 protege contrato × (1 + tol))
+  t_ciclo_s: number;                // tempo do intervalo de demanda (padrão 900 s; bancada 300)
+  kp_min: number;                   // ganho da liberação no início do intervalo (sobe até kp_max no fim)
+  kp_max: number;
+  kp_reduzir: number;               // ganho do corte (erro ≤ 0): > 1 corta um pouco além do necessário
+  r4_ativo: number;                 // 1 = teto de queda de comunicação (R4) ligado
   d_contr_c_kw: number | null;      // demanda de carga (verde: valor único; azul: fora de ponta)
   d_contr_c_ponta_kw: number | null;
   alvo_c_pct: number;
   tol_c_pct: number;                // tolerância de ultrapassagem da Aneel acima do contrato de carga (limite = contrato × (1 + tol))
   fp_lim_ind: number; fp_lim_cap: number;
-  fp_alvo_ind: number; fp_alvo_cap: number;
+  fp_alvo: number;                  // FP alvo — o mesmo nas janelas indutiva e capacitiva
   janela_cap_ini: string;           // "HH:MM" — até a TON publicar o posto reativo da SSU
   janela_cap_fim: string;
   margem_q3_kvar: number;
@@ -43,8 +49,9 @@ export interface Params {
 }
 
 export const PARAMS_PADRAO: Params = {
-  d_contr_g_kw: null, alvo_g_pct: 95, d_contr_c_kw: null, d_contr_c_ponta_kw: null, alvo_c_pct: 95, tol_c_pct: 5,
-  fp_lim_ind: 0.92, fp_lim_cap: 0.92, fp_alvo_ind: 0.93, fp_alvo_cap: 0.93,
+  d_contr_g_kw: null, alvo_g_pct: 95, tol_g_pct: 5, t_ciclo_s: 900, kp_min: 0.6, kp_max: 1, kp_reduzir: 1.1, r4_ativo: 1,
+  d_contr_c_kw: null, d_contr_c_ponta_kw: null, alvo_c_pct: 95, tol_c_pct: 5,
+  fp_lim_ind: 0.92, fp_lim_cap: 0.92, fp_alvo: 0.93,
   janela_cap_ini: '00:00', janela_cap_fim: '06:00', margem_q3_kvar: 0, prioridade_q: 1,
   banda_pct: 3, t_min_ajuste_fp_s: 300, t_resposta_s: 60, degrau_min_pct: 3,
   t_validade_internet_s: 180, t_validade_lora_s: 300, t_estagio2_s: 600, n_retomada: 3, rampa_pct_min: 10,
@@ -62,6 +69,7 @@ export interface Ufv {
   id: string; nome: string;
   ordem: number;                    // distância ao medidor (1 = mais próxima)
   p_estatico_kw: number;            // P no modo seguro (estágio 1)
+  piso_pct?: number;                // mínimo do limite de P (% de Pn) no corte de geração; 0/vazio = parte do contrato
   zera_estagio2: boolean;
   watchdog_nativo: boolean;         // validado em campo (R2)
   rota: 'internet' | 'lora';
@@ -169,6 +177,7 @@ export type AcaoDemanda = 'nada' | 'aguardar' | 'reduzir' | 'liberar' | 'sem_con
 export interface PedidoDemanda {
   acao: AcaoDemanda; D_proj: number | null; P_perm: number | null; dP: number; contrato: number | null;
   alvo: number | null; motivo: string;
+  kp?: number;                      // ganho usado (lei proporcional da geração)
 }
 
 /**
@@ -182,6 +191,9 @@ export function decidirDemanda(a: {
   E_kwh: number; P_kw: number; seg: number; T: number;
   contrato: number | null; alvo_pct: number; corteMax: number; t_resposta_s: number;
   projAnt: number | null; aguardando: boolean; banda_pct: number; folgaLimitada: number; dur?: number;
+  /** Lei proporcional (decisão 24/11, geração): erro = P_perm − P. erro > 0 → libera Kp·erro, com Kp de kp.min
+   *  (início do intervalo) a kp.max (fim); erro < 0 → corta kp.reduzir·|erro| no mesmo ciclo (sem aguardar, sem banda). */
+  kp?: { min: number; max: number; reduzir: number };
 }): PedidoDemanda {
   if (!a.contrato || a.contrato <= 0) {
     return { acao: 'sem_contrato', D_proj: null, P_perm: null, dP: 0, contrato: null, alvo: null, motivo: 'Contrato não cadastrado' };
@@ -191,6 +203,19 @@ export function decidirDemanda(a: {
   const P_perm = a.seg > 0 ? (alvo * a.T - a.E_kwh * 3600) / a.seg : 0;
   const banda = a.contrato * a.banda_pct / 100;
   const base = { D_proj, P_perm, contrato: a.contrato, alvo };
+  if (a.kp) {
+    const erro = P_perm - a.P_kw;
+    if (erro > 0) {
+      if (a.folgaLimitada <= 1e-6) return { acao: 'nada', ...base, dP: 0, motivo: `Projeção ${fmt(D_proj)} kW abaixo do contrato ${fmt(a.contrato)} kW` };
+      const kp = a.kp.min + (a.kp.max - a.kp.min) * Math.min(1, Math.max(0, 1 - a.seg / a.T));
+      const dP = Math.min(a.folgaLimitada, kp * erro);
+      return { acao: 'liberar', ...base, dP, kp, motivo: `Projeção ${fmt(D_proj)} kW, folga ${fmt(erro)} kW: liberar ${fmt(dP)} kW (Kp ${fmt(kp, 2)})` };
+    }
+    if (erro === 0) return { acao: 'nada', ...base, dP: 0, motivo: `Projeção ${fmt(D_proj)} kW no contrato` };
+    const kp = a.kp.reduzir;
+    const dP = kp * -erro;
+    return { acao: 'reduzir', ...base, dP, kp, motivo: `Projeção ${fmt(D_proj)} kW ≥ ${fmt(alvo)} kW: reduzir ${fmt(dP)} kW (Kp ${fmt(kp, 2)})` };
+  }
   const subindo = a.projAnt != null && D_proj > a.projAnt + 1e-6;
   const gatilho = D_proj >= a.contrato || (D_proj >= alvo && subindo);
   if (!gatilho) {
@@ -307,15 +332,17 @@ export function dividirQ(Q_total: number, disp: Array<{ id: string; q_disp: numb
 export function tetoQueda(a: {
   contrato: number | null; T: number; E_kwh: number; seg: number;
   t_val: number; t_estagio2: number; ufvs: Ufv[];
+  tol_pct?: number;                 // 24/11: protege o limite da multa (contrato + tolerância), não o contrato
 }): number | null {
   if (!a.contrato || a.contrato <= 0 || !a.ufvs.length) return null;
+  const lim = a.contrato * (1 + Math.max(0, a.tol_pct ?? 0) / 100);
   const somaEst = a.ufvs.reduce((s, u) => s + Math.max(0, u.p_estatico_kw), 0);
   const somaEstNz = a.ufvs.reduce((s, u) => s + (u.zera_estagio2 ? 0 : Math.max(0, u.p_estatico_kw)), 0);
   const seg = Math.max(0, a.seg);
   const d1 = Math.min(a.t_val, seg);                                   // último limite (validade)
   const d2 = Math.min(a.t_estagio2, Math.max(0, seg - a.t_val));       // estágio 1: P estático
   const d3 = Math.max(0, seg - a.t_val - a.t_estagio2);                // estágio 2: só as que não zeram
-  const sobra = a.contrato * a.T - a.E_kwh * 3600 - somaEst * d2 - somaEstNz * d3;   // kW·s
+  const sobra = lim * a.T - a.E_kwh * 3600 - somaEst * d2 - somaEstNz * d3;   // kW·s
   if (d1 <= 0) return null;                                            // intervalo fechando: nada a proteger
   return Math.max(0, sobra / d1);
 }
@@ -329,7 +356,14 @@ export function validarCadastro(p: Params, ufvs: Ufv[], T_intervalo_s = 900) {
   const tVal = Math.max(0, ...ufvs.map((u) => (u.rota === 'lora' ? p.t_validade_lora_s : p.t_validade_internet_s)));
   const T = T_intervalo_s > 0 ? T_intervalo_s : 900;   // intervalo do medidor (bancada: 5 min)
   // teto no INÍCIO do intervalo (nada exportado ainda) — referência para o cadastro; no ciclo ele usa a energia real
-  const tetoPlim = tetoQueda({ contrato, T, E_kwh: 0, seg: T, t_val: tVal, t_estagio2: p.t_estagio2_s, ufvs });
+  const tetoArgs = { contrato, T, t_val: tVal, t_estagio2: p.t_estagio2_s, ufvs, tol_pct: p.tol_g_pct };
+  const tetoPlim = p.r4_ativo === 1 ? tetoQueda({ ...tetoArgs, E_kwh: 0, seg: T }) : null;
+  if (p.r4_ativo !== 1 && contrato && contrato > 0 && somaPn > 0) {
+    // pior momento: exportando no contrato o intervalo todo e a comunicação cai faltando `seg`
+    let pior = Infinity;
+    for (let seg = 5; seg <= T; seg += 5) pior = Math.min(pior, tetoQueda({ ...tetoArgs, E_kwh: contrato * (T - seg) / 3600, seg }) ?? Infinity);
+    if (pior < somaPn - 1e-6) avisos.push(`R4 desligado: se a comunicação cair perto do fim do intervalo com a carga indo a zero, a geração pode fechar acima do contrato + ${fmt(p.tol_g_pct)} % (teto seguro ${fmt(pior)} kW < Σ Pn ${fmt(somaPn)} kW).`);
+  }
   if (contrato && contrato > 0 && somaEst > contrato + 1e-6) {
     bloqueios.push(`Σ P estático (${fmt(somaEst)} kW) passa do contrato de geração (${fmt(contrato)} kW): sem comunicação as UFVs exportariam acima do contrato.`);
   }
@@ -339,7 +373,7 @@ export function validarCadastro(p: Params, ufvs: Ufv[], T_intervalo_s = 900) {
       if (!(i.pn_kw > 0) || !(i.smax_kva > 0)) bloqueios.push(`${u.nome} · ${i.nome ?? i.id}: informe Pn e Smax.`);
     }
   }
-  if (p.fp_alvo_ind < p.fp_lim_ind + 0.005 || p.fp_alvo_cap < p.fp_lim_cap + 0.005) {
+  if (p.fp_alvo < Math.max(p.fp_lim_ind, p.fp_lim_cap) + 0.005) {
     bloqueios.push('Alvo de FP precisa ser pelo menos 0,005 acima do limite.');
   }
   return { tetoPlim, somaEst, somaPn, tVal, avisos, bloqueios };
@@ -389,7 +423,12 @@ export function despachar(a: {
   // do contrato (exportação = geração − consumo, consumo ≥ 0) → cortar abaixo do piso nunca é preciso.
   const somaPnTot = invs.reduce((s, x) => s + x.i.pn_kw, 0);
   const piso: Record<string, number> = {};
-  for (const x of invs) piso[x.i.id] = a.pisoTotal && a.pisoTotal > 0 && somaPnTot > 0 ? a.pisoTotal * x.i.pn_kw / somaPnTot : 0;
+  // 24/11: mínimo configurável por UFV (% de Pn); sem ele, a parte do contrato
+  for (const x of invs) {
+    piso[x.i.id] = !(a.pisoTotal && a.pisoTotal > 0) ? 0
+      : (x.u.piso_pct ?? 0) > 0 ? x.i.pn_kw * Math.min(100, x.u.piso_pct as number) / 100
+      : somaPnTot > 0 ? a.pisoTotal * x.i.pn_kw / somaPnTot : 0;
+  }
   const ativos = invs.filter((x) => x.disp);
   /** distribui `total` entre `lista` proporcional a `peso`, sem passar de `peso` (sobra volta). */
   const repartir = (total: number, lista: typeof invs, peso: (x: (typeof invs)[number]) => number, aplica: (x: (typeof invs)[number], v: number) => void) => {
@@ -410,7 +449,7 @@ export function despachar(a: {
     });
     if (sobra > 0.5) {
       noPiso = true;
-      for (const x of ativos) if (sp[x.i.id].p_lim_kw <= piso[x.i.id] + 1e-6) motivos[x.i.id].push(`no piso (${fmt(piso[x.i.id])} kW = parte do contrato)`);
+      for (const x of ativos) if (sp[x.i.id].p_lim_kw <= piso[x.i.id] + 1e-6) motivos[x.i.id].push(`no mínimo (${fmt(piso[x.i.id])} kW)`);
     }
   }
   const libera = Math.max(0, -a.dP_g) + Math.max(0, a.dP_c);

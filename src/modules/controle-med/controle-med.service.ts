@@ -20,6 +20,7 @@ interface EstadoMed {
   aguardG: boolean; aguardC: boolean;
   setpoints: Record<string, SetpointInv>;     // aplicados (ativo) ou simulados (sombra)
   enviadoEm: Record<string, number>;          // último p_lim enviado (confirmação, item 10)
+  limAnt: Record<string, number>;             // p_lim antes do último envio (subida ainda pendente)
   falhas: Record<string, number>;
   ultimoAjusteFp: number;
   validos: number;                            // ciclos válidos seguidos (retomada, 11.2)
@@ -126,7 +127,7 @@ export class ControleMedService implements OnModuleInit {
     let e = this.estados.get(medId);
     if (!e) {
       e = {
-        ant: null, projG: null, projC: null, aguardG: false, aguardC: false, setpoints: {}, enviadoEm: {}, falhas: {}, ultimoAjusteFp: 0, validos: 0, houveFalha: false,
+        ant: null, projG: null, projC: null, aguardG: false, aguardC: false, setpoints: {}, enviadoEm: {}, limAnt: {}, falhas: {}, ultimoAjusteFp: 0, validos: 0, houveFalha: false,
         cmd: {}, tonsAtivas: new Set(), legado: new Set(), offConferido: false, alvos: null, modoTon: {},
       };
       this.estados.set(medId, e);
@@ -246,13 +247,26 @@ export class ControleMedService implements OnModuleInit {
     const folgaLimitada = disponiveis.reduce((a, i) => a + Math.max(0, i.pn_kw - (est.setpoints[i.id]?.p_lim_kw ?? i.pn_kw)), 0);
     // R4 olhando o medidor (23/11): teto da Σ limite para a queda de comunicação com consumo zero, usando a
     // energia já exportada no intervalo. Com a fazenda consumindo o teto fica alto e não limita.
+    // 24/11: limite = contrato + tolerância (onde começa a multa) e desligável (r4_ativo); T = tempo do ciclo cadastrado.
+    const Tc = p.t_ciclo_s;
     const tVal = Math.max(0, ...ufvs.map((u) => (u.rota === 'lora' ? p.t_validade_lora_s : p.t_validade_internet_s)));
-    const tetoR4 = modos.demanda_g !== 'desligado'
-      ? tetoQueda({ contrato: p.d_contr_g_kw, T: g.T, E_kwh: E_exp, seg: m.seg, t_val: tVal, t_estagio2: p.t_estagio2_s, ufvs })
+    const tetoR4 = modos.demanda_g !== 'desligado' && p.r4_ativo === 1
+      ? tetoQueda({ contrato: p.d_contr_g_kw, T: Tc, E_kwh: E_exp, seg: m.seg, t_val: tVal, t_estagio2: p.t_estagio2_s, ufvs, tol_pct: p.tol_g_pct })
       : null;
+    // Tempo morto (24/11): comando enviado há menos de t_resposta ainda não apareceu no medidor. Desconta o que
+    // falta acontecer para não cortar/liberar duas vezes: queda = limite abaixo do P medido; subida = até o
+    // quanto o limite subiu (o sol pode não dar tudo — só segura a liberação por t_resposta).
+    let pendente = 0;
+    for (const i of disponiveis) {
+      const em = est.enviadoEm[i.id], lim = est.setpoints[i.id]?.p_lim_kw, P = vivo[i.id]?.P_kw;
+      if (!em || lim == null || P == null || Date.now() - em >= p.t_resposta_s * 1000) continue;
+      if (lim < P) pendente += lim - P;
+      else if (est.limAnt[i.id] != null && lim > est.limAnt[i.id]) pendente += Math.max(0, Math.min(lim - P, lim - est.limAnt[i.id]));
+    }
+    const P_exp_ef = Math.max(0, g.P_exp + pendente);
     const somaPlim = ufvs.flatMap((u) => u.inversores).reduce((a, i) => a + (est.setpoints[i.id]?.p_lim_kw ?? i.pn_kw), 0);
     const folgaG = tetoR4 != null ? Math.min(folgaLimitada, Math.max(0, tetoR4 - somaPlim)) : folgaLimitada;
-    Object.assign(entradas, { teto_queda_kw: tetoR4 });
+    Object.assign(entradas, { teto_queda_kw: tetoR4, T_ciclo: Tc, pendente_kw: pendente, P_exp_efetivo: P_exp_ef });
 
     // Demanda de carga (prioridade 2) e de geração (3)
     let pedC: PedidoDemanda | null = null, pedG: PedidoDemanda | null = null;
@@ -261,7 +275,7 @@ export class ControleMedService implements OnModuleInit {
       // Limite = contrato + tolerância da Aneel (ultrapassagem só acima dela); o alvo % vale sobre esse limite.
       const contr = contr0 ? contr0 * (1 + p.tol_c_pct / 100) : contr0;
       pedC = decidirDemanda({
-        E_kwh: E_imp, P_kw: g.P_imp, seg: m.seg, T: g.T, contrato: contr, alvo_pct: p.alvo_c_pct, corteMax: folgaLimitada,
+        E_kwh: E_imp, P_kw: g.P_imp, seg: m.seg, T: Tc, contrato: contr, alvo_pct: p.alvo_c_pct, corteMax: folgaLimitada,
         t_resposta_s: p.t_resposta_s, dur: m.dur, projAnt: est.projC, aguardando: est.aguardC, banda_pct: p.banda_pct, folgaLimitada: 0,
       });
       est.projC = pedC.D_proj; est.aguardC = pedC.acao === 'aguardar';
@@ -272,8 +286,9 @@ export class ControleMedService implements OnModuleInit {
     }
     if (modos.demanda_g !== 'desligado') {
       pedG = decidirDemanda({
-        E_kwh: E_exp, P_kw: g.P_exp, seg: m.seg, T: g.T, contrato: p.d_contr_g_kw, alvo_pct: p.alvo_g_pct, corteMax: P_ufvs,
+        E_kwh: E_exp, P_kw: P_exp_ef, seg: m.seg, T: Tc, contrato: p.d_contr_g_kw, alvo_pct: p.alvo_g_pct, corteMax: P_ufvs,
         t_resposta_s: p.t_resposta_s, dur: m.dur, projAnt: est.projG, aguardando: est.aguardG, banda_pct: p.banda_pct, folgaLimitada: folgaG,
+        kp: { min: p.kp_min, max: p.kp_max, reduzir: p.kp_reduzir },
       });
       // já esperou (ou já cortou) neste intervalo: daqui até o fechamento corta direto, sem novo minuto de espera
       est.projG = pedG.D_proj; est.aguardG = est.aguardG || pedG.acao === 'aguardar' || pedG.acao === 'reduzir';   // zera no fechamento (fim=1)
@@ -298,7 +313,7 @@ export class ControleMedService implements OnModuleInit {
         // Q LÍQUIDO do minuto no sentido da janela: com compensação demais o medidor vira o outro tipo
         // (ex.: capacitivo na janela indutiva) → negativo → devolve. Só o tipo da janela conta na conta da hora.
         Q_med: janela === 'ind' ? g.Q_ind - g.Q_cap : g.Q_cap - g.Q_ind, t_rest_hora: h.t_rest,
-        fp_lim: janela === 'ind' ? p.fp_lim_ind : p.fp_lim_cap, fp_alvo: janela === 'ind' ? p.fp_alvo_ind : p.fp_alvo_cap,
+        fp_lim: janela === 'ind' ? p.fp_lim_ind : p.fp_lim_cap, fp_alvo: p.fp_alvo,
         banda_kvar: Math.max(1, Q_disp_total * p.banda_pct / 100), margem_q3: p.margem_q3_kvar,
         Q_ufv_atual, Q_disp_total, desdeUltimoAjuste: (Date.now() - est.ultimoAjusteFp) / 1000, t_min_ajuste: p.t_min_ajuste_fp_s,
       });
@@ -321,7 +336,7 @@ export class ControleMedService implements OnModuleInit {
       prioridadeQ: p.prioridade_q === 1 && modos.fp !== 'desligado',
     });
     if (noPiso && pedG?.acao === 'reduzir') {
-      eventos.push(`Medidor acima do contrato com a geração já no piso (Σ limites = contrato ${fmt(p.d_contr_g_kw)} kW): com os inversores obedecendo isso é impossível — verificar a medição ou os inversores`);
+      eventos.push(`Medidor acima do contrato (${fmt(p.d_contr_g_kw)} kW) com a geração já no mínimo cadastrado — verificar a medição, os inversores ou o mínimo das UFVs`);
     }
 
     // P também é comandado pelo FP quando o reativo é prioritário (reduz P para caber o Q na carta)
@@ -369,7 +384,7 @@ export class ControleMedService implements OnModuleInit {
         const sp = est.setpoints[r.inversor_id];
         if (pe.p_pct !== undefined) {
           r.enviado_p = x.ok ? 'ok' : x.texto;
-          if (x.ok) { sp.p_lim_kw = r.p_lim_kw; est.enviadoEm[r.inversor_id] = Date.now(); }
+          if (x.ok) { est.limAnt[r.inversor_id] = sp.p_lim_kw; sp.p_lim_kw = r.p_lim_kw; est.enviadoEm[r.inversor_id] = Date.now(); }
         }
         if (pe.q_pct !== undefined) {
           r.enviado_q = x.ok ? 'ok' : x.texto;
@@ -659,7 +674,7 @@ export class ControleMedService implements OnModuleInit {
     return {
       params: cfg.params, ufvs: cfg.ufvs, modos: cfg.modos, versao: cfg.versao, existe: cfg.existe,
       padrao: PARAMS_PADRAO,
-      validacao: validarCadastro(cfg.params, cfg.ufvs, Number(ult[0]?.entradas?.T) || 900),
+      validacao: validarCadastro(cfg.params, cfg.ufvs, cfg.params.t_ciclo_s),
       candidatos: pode ? await this.candidatos(unidadeId, plantaId) : [],
       ultimo_ciclo: ult[0] ?? null,
       tons: Object.entries(this.estados.get(id)?.modoTon ?? {}).map(([ton_id, modo]) => ({ ton_id, modo, texto: MODO_TON_TEXTO[modo] ?? modo })),
@@ -721,7 +736,7 @@ export class ControleMedService implements OnModuleInit {
       if (c === 'demanda_g' && !p.d_contr_g_kw) throw new BadRequestException('Demanda de geração: informe o contrato de geração.');
       if (c === 'demanda_c' && !p.d_contr_c_kw) throw new BadRequestException('Demanda de carga: informe o contrato de carga.');
       if (modos[c] === 'ativo') {
-        const { bloqueios } = validarCadastro(p, atual.ufvs);
+        const { bloqueios } = validarCadastro(p, atual.ufvs, p.t_ciclo_s);
         if (bloqueios.length) throw new BadRequestException(`${ROTULO[c]} não pode ficar ativo: ${bloqueios.join(' ')}`);
       }
     }
@@ -771,11 +786,16 @@ export function sanitizarParams(b: any): Params {
   const fp = (v: unknown, d: number) => n(v, d, 0.8, 1) as number;
   return {
     d_contr_g_kw: n(b.d_contr_g_kw, null, 0), alvo_g_pct: n(b.alvo_g_pct, P.alvo_g_pct, 50, 100) as number,
+    tol_g_pct: n(b.tol_g_pct, P.tol_g_pct, 0, 20) as number,
+    t_ciclo_s: n(b.t_ciclo_s, P.t_ciclo_s, 60, 3600) as number,
+    kp_min: n(b.kp_min, P.kp_min, 0.1, 2) as number, kp_max: n(b.kp_max, P.kp_max, 0.1, 2) as number,
+    kp_reduzir: n(b.kp_reduzir, P.kp_reduzir, 0.5, 2) as number,
+    r4_ativo: Math.round(n(b.r4_ativo, P.r4_ativo, 0, 1) as number),
     d_contr_c_kw: n(b.d_contr_c_kw, null, 0), d_contr_c_ponta_kw: n(b.d_contr_c_ponta_kw, null, 0),
     alvo_c_pct: n(b.alvo_c_pct, P.alvo_c_pct, 50, 100) as number,
     tol_c_pct: n(b.tol_c_pct, P.tol_c_pct, 0, 20) as number,
     fp_lim_ind: fp(b.fp_lim_ind, P.fp_lim_ind), fp_lim_cap: fp(b.fp_lim_cap, P.fp_lim_cap),
-    fp_alvo_ind: fp(b.fp_alvo_ind, P.fp_alvo_ind), fp_alvo_cap: fp(b.fp_alvo_cap, P.fp_alvo_cap),
+    fp_alvo: fp(b.fp_alvo, P.fp_alvo),
     janela_cap_ini: hhmm(b.janela_cap_ini, P.janela_cap_ini), janela_cap_fim: hhmm(b.janela_cap_fim, P.janela_cap_fim),
     margem_q3_kvar: n(b.margem_q3_kvar, P.margem_q3_kvar, 0) as number,
     prioridade_q: Math.round(n(b.prioridade_q, P.prioridade_q, 0, 1) as number),
@@ -817,6 +837,7 @@ export function sanitizarUfvs(lista: any): Ufv[] {
       nome: String(u?.nome ?? '').trim() || `UFV ${k + 1}`,
       ordem: Math.round(n(u?.ordem, k + 1, 1, 99) as number),
       p_estatico_kw: n(u?.p_estatico_kw, 0, 0) as number,
+      piso_pct: n(u?.piso_pct, 0, 0, 100) as number,
       zera_estagio2: u?.zera_estagio2 === true,
       watchdog_nativo: u?.watchdog_nativo === true,
       rota: u?.rota === 'lora' ? 'lora' : 'internet',

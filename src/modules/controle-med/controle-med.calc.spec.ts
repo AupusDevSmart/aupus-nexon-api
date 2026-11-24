@@ -287,8 +287,66 @@ describe('cadastro (R2/R4)', () => {
   it('teto do Σp_lim pelo pior caso e avisos', () => {
     const p = { ...PARAMS_PADRAO, d_contr_g_kw: 990, alvo_g_pct: 90, t_estagio2_s: 300 };
     const v = validarCadastro(p, [ufv('a', 1, [inv('a-1', 500)], { p_estatico_kw: 400, watchdog_nativo: false })]);
-    // início do intervalo: (990·900 − 400·300 − 400·420) / 180 = 3350 (o alvo não entra mais na conta)
-    expect(v.tetoPlim).toBeCloseTo(3350);
+    // início do intervalo, limite = contrato + 5 %: (1039,5·900 − 400·300 − 400·420) / 180 = 3597,5
+    expect(v.tetoPlim).toBeCloseTo(3597.5);
     expect(v.avisos.join(' ')).toMatch(/watchdog nativo/);
+  });
+
+  it('R4 desligado: sem teto e avisa quando o pior caso passa da tolerância', () => {
+    const ufvs = [ufv('a', 1, [inv('a-1', 110)], { p_estatico_kw: 50 }), ufv('b', 2, [inv('b-1', 110)], { p_estatico_kw: 50, zera_estagio2: true })];
+    const base = { ...PARAMS_PADRAO, d_contr_g_kw: 110, t_validade_internet_s: 45, t_estagio2_s: 180 };
+    const ok = validarCadastro({ ...base, r4_ativo: 0 }, ufvs, 900);
+    expect(ok.tetoPlim).toBeNull();
+    expect(ok.avisos.join(' ')).not.toMatch(/R4 desligado/);       // campo (15 min, P estático 50+50): seguro
+    const alto = validarCadastro({ ...base, r4_ativo: 0 }, [ufv('a', 1, [inv('a-1', 400)], { p_estatico_kw: 100 })], 900);
+    expect(alto.avisos.join(' ')).toMatch(/R4 desligado/);
+  });
+});
+
+describe('lei proporcional da geração (24/11)', () => {
+  const base = { T: 900, contrato: 110, alvo_pct: 100, t_resposta_s: 60, projAnt: null, aguardando: false, banda_pct: 3, corteMax: 220, kp: { min: 0.6, max: 1, reduzir: 1.1 } };
+
+  it('erro > 0: libera Kp·erro, Kp 0,6 no início e 1,0 no fim do intervalo', () => {
+    // P_perm = (110·900 − 0)/900 = 110; erro = 110 − 80 = 30
+    const ini = decidirDemanda({ ...base, E_kwh: 0, P_kw: 80, seg: 900, folgaLimitada: 100 });
+    expect(ini.acao).toBe('liberar');
+    expect(ini.kp).toBeCloseTo(0.6);
+    expect(ini.dP).toBeCloseTo(18);
+    // meio: seg 450, E = 80·450/3600 = 10 → P_perm = (99000 − 36000)/450 = 140; erro 60; Kp 0,8 → 48
+    const meio = decidirDemanda({ ...base, E_kwh: 10, P_kw: 80, seg: 450, folgaLimitada: 100 });
+    expect(meio.kp).toBeCloseTo(0.8);
+    expect(meio.dP).toBeCloseTo(48);
+    // nada limitado → nada
+    expect(decidirDemanda({ ...base, E_kwh: 0, P_kw: 80, seg: 900, folgaLimitada: 0 }).acao).toBe('nada');
+  });
+
+  it('liberação limitada à folga dos inversores', () => {
+    expect(decidirDemanda({ ...base, E_kwh: 0, P_kw: 80, seg: 900, folgaLimitada: 5 }).dP).toBeCloseTo(5);
+  });
+
+  it('erro < 0: reduz 1,1·|erro| no mesmo ciclo, sem aguardar', () => {
+    // P_perm = 110; P = 125 → erro −15 → corta 16,5
+    const r = decidirDemanda({ ...base, E_kwh: 0, P_kw: 125, seg: 900, folgaLimitada: 0 });
+    expect(r.acao).toBe('reduzir');
+    expect(r.dP).toBeCloseTo(16.5);
+  });
+});
+
+describe('R4 com tolerância e mínimo por UFV (24/11)', () => {
+  it('teto usa contrato + tolerância', () => {
+    const u = (id: string, est: number, zera = false) => ufv(id, 1, [inv(`${id}-1`)], { p_estatico_kw: est, zera_estagio2: zera });
+    const a = { contrato: 110, T: 900, E_kwh: 110 * 780 / 3600, seg: 120, t_val: 45, t_estagio2: 180, ufvs: [u('a', 50), u('b', 50, true)] };
+    expect(tetoQueda(a)!).toBeCloseTo((13200 - 100 * 75) / 45, 3);                       // ≈ 126,7
+    expect(tetoQueda({ ...a, tol_pct: 5 })!).toBeCloseTo((115.5 * 900 - 110 * 780 - 100 * 75) / 45, 3);   // ≈ 236,7
+  });
+
+  it('mínimo configurado por UFV (% de Pn) no lugar da parte do contrato', () => {
+    const ufvs = [ufv('a', 1, [inv('a-1')], { piso_pct: 70 }), ufv('b', 2)];
+    const vivo = { 'a-1': { id: 'a-1', P_kw: 100, disponivel: true }, 'b-1': { id: 'b-1', P_kw: 100, disponivel: true } };
+    const r = despachar({ ufvs, vivo, atuais: {}, dP_g: 150, dP_c: 0, Q_alvo_total: null, noite: false, tetoPlim: null, degrau_min_pct: 3, pisoTotal: 100 });
+    const c = Object.fromEntries(r.comandos.map((x) => [x.inversor_id, x]));
+    expect(c['a-1'].p_lim_kw).toBe(70);    // mínimo da UFV A
+    expect(c['b-1'].p_lim_kw).toBe(50);    // B sem mínimo: parte do contrato
+    expect(r.noPiso).toBe(true);
   });
 });
