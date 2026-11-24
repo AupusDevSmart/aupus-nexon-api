@@ -134,9 +134,17 @@ export function montarPayloadWhatsaupus(o: {
 }) {
   const { dados } = o;
   const tel = (dados.proprietario?.telefone ?? '').replace(/\D/g, '');
+  const p = dados.planta;
+  const referencia = [p.nome, p.logradouro, p.bairro, p.cidade && p.uf ? `${p.cidade}/${p.uf}` : p.cidade || p.uf]
+    .filter(Boolean)
+    .join(' - ')
+    .slice(0, 300);
   return {
     eventId: o.eventoId,
     uc: normalizarUc(dados.uc)!,
+    /** "Ponto de referência" que a Clara pede, numa linha só. */
+    referencia,
+    escopo: 'Meu imóvel',
     endereco: {
       logradouro: dados.planta.logradouro ?? undefined,
       bairro: dados.planta.bairro ?? undefined,

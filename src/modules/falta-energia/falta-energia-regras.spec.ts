@@ -93,6 +93,8 @@ describe('montarPayloadWhatsaupus', () => {
     expect(p).toMatchObject({
       eventId: 'ev1',
       uc: '1001234567',
+      referencia: 'Fazenda Boa Vista - Rod. GO-060 km 12 - Zona Rural - Trindade/GO',
+      escopo: 'Meu imóvel',
       endereco: { logradouro: 'Rod. GO-060 km 12', cidade: 'Trindade', uf: 'GO' },
       cliente: { nome: 'João', cpfCnpj: '12345678909', telefone: '62998765432' },
       ocorrencia: { tipo: 'falta_energia', inicio: agora.toISOString() },

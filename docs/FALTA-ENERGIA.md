@@ -28,7 +28,7 @@ conseguir avisar a falta; o `retorno` fecha o chamado.
   Voltou antes = `CANCELADO`, nada aberto ("piscada").
 - **Um por UC**: avisos da mesma unidade (ou da planta, sem unidade) nas últimas 24 h caem no mesmo
   evento (`avisos` conta quantos).
-- **Dados enviados**: UC (`unidades.numero_uc`, senão `plantas.numero_uc`), endereço da planta, nome,
+- **Dados enviados**: ponto de referência (planta + endereço, uma linha), UC (`unidades.numero_uc`, senão `plantas.numero_uc`), endereço da planta, nome,
   CPF/CNPJ e telefone do proprietário da planta.
 - **Só Equatorial Goiás**: concessionária da unidade com "Equatorial" em GO, ou sem concessionária e
   UF GO. Fora disso, ou sem UC/proprietário/telefone: chamado aberto com status `SEM_DADOS` e nota
