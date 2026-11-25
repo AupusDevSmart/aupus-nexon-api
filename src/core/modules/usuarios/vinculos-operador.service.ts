@@ -176,6 +176,40 @@ export class VinculosOperadorService {
     };
   }
 
+  /**
+   * Árvore de todos os proprietários de uma vez (NEXON-143): a tela abre já com
+   * Proprietário → Planta → Instalação → Equipamento, sem escolher dono antes.
+   * Proprietário logado recebe só o próprio grupo. Só entra dono com planta que
+   * tem equipamento.
+   */
+  async arvoreCompleta(operadorId: string, req: Requisitante) {
+    const operador = await this.carregarOperador(operadorId, req);
+    let donos: string[];
+    if (papelCanonico(req.role) === 'proprietario') {
+      donos = [req.id!.trim()];
+    } else {
+      const linhas = await this.prisma.$queryRaw<Array<{ id: string }>>`
+        SELECT DISTINCT TRIM(p.proprietario_id) AS id
+        FROM plantas p
+        JOIN usuarios d ON d.id = p.proprietario_id AND d.deleted_at IS NULL
+        WHERE p.deleted_at IS NULL AND p.proprietario_id IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM equipamentos e
+            LEFT JOIN unidades u ON u.id = e.unidade_id AND u.deleted_at IS NULL
+            WHERE e.deleted_at IS NULL AND COALESCE(e.planta_id, u.planta_id) = p.id
+          )`;
+      donos = linhas.map((l) => l.id);
+    }
+    const grupos = [];
+    // Em série: cada árvore são poucas consultas, e não disputa o pool com a API.
+    for (const dono of donos) {
+      const a = await this.arvore(operador.id, dono, req);
+      if (a.plantas.length) grupos.push({ proprietario: a.proprietario, vinculo: a.vinculo, plantas: a.plantas });
+    }
+    grupos.sort((x, y) => (x.proprietario.nome ?? '').localeCompare(y.proprietario.nome ?? '', 'pt-BR'));
+    return { operador, grupos };
+  }
+
   // ==========================================================================
   // Gravação
   // ==========================================================================
