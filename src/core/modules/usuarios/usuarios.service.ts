@@ -273,12 +273,37 @@ export class UsuariosService {
       }
     }
 
-    // Filtrar por role (singular) - case-insensitive
-    if (role) {
-      where.role = {
-        equals: role,
-        mode: 'insensitive'
-      };
+    // Filtrar pelo papel (NEXON-143). Aceita o papel canônico (admin,
+    // analista_automacao, analista_operacao, proprietario, operador), que junta
+    // os nomes que valem por ele (admin = super_admin + admin), ou o nome exato
+    // de uma role. Vale o papel do Spatie (model_has_roles), que é o que dá
+    // acesso; a coluna legada `usuarios.role` só conta para quem não tem papel.
+    if (role && role !== 'all') {
+      const pedido = role.trim().toLowerCase();
+      const todas = await this.prisma.roles.findMany({ select: { name: true } });
+      const nomes = todas
+        .map((r) => r.name)
+        .filter((n) => n.toLowerCase() === pedido || papelCanonico(n) === pedido);
+      if (!nomes.includes(pedido)) nomes.push(pedido);
+      const nomesLower = nomes.map((n) => n.toLowerCase());
+      const [comEste, comAlgum] = await Promise.all([
+        this.prisma.$queryRaw<Array<{ id: string }>>`
+          SELECT DISTINCT TRIM(m.model_id) AS id FROM model_has_roles m
+          JOIN roles r ON r.id = m.role_id
+          WHERE LOWER(r.name) = ANY(${nomesLower}::text[])`,
+        this.prisma.$queryRaw<Array<{ id: string }>>`SELECT DISTINCT TRIM(model_id) AS id FROM model_has_roles`,
+      ]);
+      grupos.push({
+        OR: [
+          { id: { in: comEste.map((r) => r.id) } },
+          {
+            AND: [
+              { OR: nomes.map((n) => ({ role: { equals: n, mode: 'insensitive' } })) },
+              { id: { notIn: comAlgum.map((r) => r.id) } },
+            ],
+          },
+        ],
+      });
     }
 
     // Filtrar por múltiplas roles (plural) - case-insensitive - tem prioridade sobre singular
