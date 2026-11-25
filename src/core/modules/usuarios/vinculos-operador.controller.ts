@@ -29,6 +29,13 @@ export class VinculosOperadorController {
     return this.vinculos.arvore(id, proprietarioId, user);
   }
 
+  @Get(':id/vinculos/arvore-completa')
+  @Permissions('usuarios.create_operador', 'usuarios.manage')
+  @ApiOperation({ summary: 'Proprietário → planta → instalação → equipamentos de todos os donos visíveis, com o que o operador já tem' })
+  arvoreCompleta(@Param('id') id: string, @CurrentUser() user: any) {
+    return this.vinculos.arvoreCompleta(id, user);
+  }
+
   @Put(':id/vinculos')
   @Permissions('usuarios.create_operador', 'usuarios.manage')
   @ApiOperation({ summary: 'Grava o vínculo com um proprietário (lista vazia remove)' })
