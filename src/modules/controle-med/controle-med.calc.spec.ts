@@ -350,3 +350,47 @@ describe('R4 com tolerância e mínimo por UFV (24/11)', () => {
     expect(r.noPiso).toBe(true);
   });
 });
+
+describe('capabilidade: FP mínimo do fabricante (Chimarrão, 25/11)', () => {
+  const vivo = (P: Record<string, number>) => Object.fromEntries(Object.entries(P).map(([id, p]) => [id, { id, P_kw: p, disponivel: true }]));
+  const inv08 = (id: string) => ({ ...inv(id), qmax_pct: 100, fp_min: 0.8 });   // Pn 100, Smax 110, tanφ = 0,75
+  const base = (P: number, prio: boolean, Q = 200) => ({
+    ufvs: [ufv('a', 1, [inv08('a-1')])], vivo: vivo({ 'a-1': P }), atuais: {}, dP_g: 0, dP_c: 0, Q_alvo_total: Q,
+    noite: false, tetoPlim: null, degrau_min_pct: 3, controlaP: false, prioridadeQ: prio,
+  });
+  const fpDe = (p: number, q: number) => p / Math.hypot(p, q);
+
+  it('Q disponível ≤ P·tan(acos FPmin); P zero → Q zero', () => {
+    expect(qDisponivel(inv08('a'), 40, false)).toBeCloseTo(30, 6);
+    expect(qDisponivel(inv08('a'), 0, false)).toBe(0);
+    expect(qDisponivel(inv('a'), 0, false)).toBeCloseTo(66);         // sem fp_min: comportamento antigo
+  });
+  it('sem prioridade: Q cortado pelo FP com P baixo', () => {
+    const c = despachar(base(20, false)).comandos[0];
+    expect(c.q_kvar).toBeCloseTo(15, 6);
+    expect(fpDe(20, c.q_kvar)).toBeGreaterThanOrEqual(0.8 - 1e-9);
+  });
+  it('reativo prioritário nunca passa do FP mínimo nem do Smax, com qualquer P', () => {
+    for (const P of [0, 5, 30, 60, 88, 100]) {
+      const c = despachar(base(P, true)).comandos[0];
+      const pFinal = Math.min(P, c.p_lim_kw);
+      expect(Math.abs(c.q_kvar)).toBeLessThanOrEqual(0.75 * pFinal + 1e-6);
+      expect(Math.hypot(c.p_lim_kw, c.q_kvar)).toBeLessThanOrEqual(110 + 1e-6);
+    }
+  });
+  it('reativo prioritário com P cheio: Q ≤ S·sen φ (66) e P cabe na carta', () => {
+    const c = despachar(base(100, true)).comandos[0];
+    expect(c.q_kvar).toBeCloseTo(66, 6);
+    expect(c.p_lim_kw).toBeCloseTo(88, 6);
+  });
+  it('Q pedido negativo também respeita a trava', () => {
+    const c = despachar(base(40, false, -200)).comandos[0];
+    expect(c.q_kvar).toBeCloseTo(-30, 6);
+  });
+  it('cadastro avisa inversor sem FP mínimo', () => {
+    const v = validarCadastro(PARAMS_PADRAO, [ufv('a', 1)], 900);
+    expect(v.avisos.join(' ')).toMatch(/FP mínimo/);
+    const w = validarCadastro(PARAMS_PADRAO, [ufv('a', 1, [inv08('a-1')])], 900);
+    expect(w.avisos.join(' ')).not.toMatch(/FP mínimo/);
+  });
+});

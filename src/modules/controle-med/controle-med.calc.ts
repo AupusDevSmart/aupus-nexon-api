@@ -62,6 +62,7 @@ export interface Inversor {
   id: string; nome?: string;
   pn_kw: number; smax_kva: number;
   qmax_pct: number;                 // Q máximo pela carta (% de Smax)
+  fp_min?: number;                  // FP mínimo do fabricante (capabilidade): |Q| ≤ P·tan(acos fp_min); vazio = sem trava
   sinal_q: 1 | -1;                  // sinal do sp_q_pct que FORNECE reativo neste modelo
   q_noturno: boolean;
 }
@@ -305,7 +306,29 @@ export function qDisponivel(inv: Inversor, P_kw: number, noite: boolean): number
   if (noite && !inv.q_noturno) return 0;
   const S = Math.max(0, inv.smax_kva);
   const curva = Math.sqrt(Math.max(0, S * S - P_kw * P_kw));
-  return Math.max(0, Math.min(S * inv.qmax_pct / 100, curva));
+  return Math.max(0, Math.min(S * inv.qmax_pct / 100, curva, qPorFp(inv, P_kw, noite)));
+}
+
+/** FP mínimo do fabricante válido (0 < fp < 1) ou null. */
+const fpMin = (inv: Inversor) => (Number(inv.fp_min) > 0 && Number(inv.fp_min) < 1 ? Number(inv.fp_min) : null);
+
+/** Trava da capabilidade pelo FP mínimo: |Q| ≤ P·tan(acos FPmin). P zero → Q zero (lado seguro).
+ *  Q noturno (inversor que faz Q sem P) é outra curva do fabricante → não se aplica à noite. */
+export function qPorFp(inv: Inversor, P_kw: number, noite: boolean): number {
+  const fp = fpMin(inv);
+  if (fp == null || (noite && inv.q_noturno)) return Infinity;
+  return Math.max(0, P_kw) * tanAcos(fp);
+}
+
+/** Teto de Q do equipamento com prioridade do reativo (o P é reduzido para caber Q na carta).
+ *  Com FP mínimo: Q ≤ P·tanφ e P ≤ √(S²−Q²) → Q ≤ S·sen φ; e P nunca sobe acima do que gera agora. */
+export function qTetoInv(inv: Inversor, P_kw: number, noite: boolean): number {
+  if (noite && !inv.q_noturno) return 0;
+  const S = Math.max(0, inv.smax_kva);
+  let t = Math.min(S * inv.qmax_pct / 100, S);
+  const fp = fpMin(inv);
+  if (fp != null && !(noite && inv.q_noturno)) t = Math.min(t, S * Math.sqrt(1 - fp * fp), qPorFp(inv, P_kw, noite));
+  return Math.max(0, t);
 }
 
 /** Divide Q total entre inversores pelo Q disponível (5.2). */
@@ -371,6 +394,7 @@ export function validarCadastro(p: Params, ufvs: Ufv[], T_intervalo_s = 900) {
     if (!u.watchdog_nativo) avisos.push(`${u.nome}: sem watchdog nativo validado → limite dinâmico fica ≤ P estático (${fmt(u.p_estatico_kw)} kW).`);
     for (const i of u.inversores) {
       if (!(i.pn_kw > 0) || !(i.smax_kva > 0)) bloqueios.push(`${u.nome} · ${i.nome ?? i.id}: informe Pn e Smax.`);
+      if (!(Number(i.fp_min) > 0 && Number(i.fp_min) < 1)) avisos.push(`${u.nome} · ${i.nome ?? i.id}: sem FP mínimo do fabricante → o Q só é limitado por Q máx e Smax (preencha pelo datasheet).`);
     }
   }
   if (p.fp_alvo < Math.max(p.fp_lim_ind, p.fp_lim_cap) + 0.005) {
@@ -482,7 +506,7 @@ export function despachar(a: {
 
   // Q: divisão pelo disponível. Com prioridade do reativo, o disponível é o teto do equipamento (Q máx da
   // carta com P reduzido); sem ela, o que cabe na carta com o P atual (o inversor dá prioridade ao P e corta o Q).
-  const qTeto = (x: (typeof invs)[number]) => (a.noite && !x.i.q_noturno ? 0 : Math.max(0, Math.min(x.i.smax_kva * x.i.qmax_pct / 100, x.i.smax_kva)));
+  const qTeto = (x: (typeof invs)[number]) => qTetoInv(x.i, Math.min(x.P, sp[x.i.id].p_lim_kw), a.noite);
   const prioQ = !!a.prioridadeQ;
   // sem controle de demanda, o limite de P só existe para abrir espaço ao Q: recomeça de Pn a cada ciclo
   if (!controlaP && prioQ) for (const x of invs) sp[x.i.id].p_lim_kw = x.i.pn_kw;

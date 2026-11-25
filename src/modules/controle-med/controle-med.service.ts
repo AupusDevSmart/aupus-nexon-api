@@ -6,7 +6,7 @@ import { EquipamentosCmdService } from '../equipamentos-cmd/equipamentos-cmd.ser
 import {
   CONTROLES, ComandoInv, Controle, decidirDemanda, decidirFp, despachar, EstadoAnterior, grandezas, InvAoVivo,
   janelaReativa, lerMinuto, MinutoSsu, Modo, Modos, MODOS_PADRAO, Params, PARAMS_PADRAO, PedidoDemanda, PedidoFp,
-  portaoMedidor, qDisponivel, SetpointInv, tetoQueda, Ufv, validarCadastro, fmt,
+  portaoMedidor, qDisponivel, qTetoInv, SetpointInv, tetoQueda, Ufv, validarCadastro, fmt,
 } from './controle-med.calc';
 import {
   AlvoSp, bruto, ItemTon, lerRespostaCtl, MAX_INV_TON, montarCadastro, montarCtl, MODO_TON_TEXTO, RespostaCtl,
@@ -306,7 +306,7 @@ export class ControleMedService implements OnModuleInit {
       const janela = janelaReativa(m, p);
       // reativo prioritário: o disponível é o teto do equipamento (o despacho reduz P para caber)
       const Q_disp_total = disponiveis.reduce((a, i) => a + (p.prioridade_q === 1
-        ? (noite && !i.q_noturno ? 0 : Math.min(i.smax_kva * i.qmax_pct / 100, i.smax_kva))
+        ? qTetoInv(i, Math.max(0, vivo[i.id]?.P_kw ?? 0), noite)
         : qDisponivel(i, Math.max(0, vivo[i.id]?.P_kw ?? 0), noite)), 0);
       pedFp = decidirFp({
         janela, E_P_h: h.E_P, E_Q_h: janela === 'ind' ? h.E_ind : h.E_cap, P_hat: h.P_hat,
@@ -631,17 +631,20 @@ export class ControleMedService implements OnModuleInit {
     return { id, unidadeId: eq[0].unidade_id, plantaId: eq[0].planta_id };
   }
 
-  /** Inversores da mesma unidade (ou planta) que o firmware sabe comandar (limite de P e Q). */
-  private async candidatos(unidadeId: string | null, plantaId: string | null) {
-    const rows = await this.prisma.$queryRaw<Array<{ id: string; nome: string; pn: string | null }>>`
-      SELECT TRIM(e.id) AS id, e.nome,
+  /** Inversores da mesma unidade (ou planta) que o firmware sabe comandar (limite de P e Q).
+   *  Teste (admin): também os de `plantaExtra` e os já cadastrados no controle, de qualquer planta. */
+  private async candidatos(unidadeId: string | null, plantaId: string | null, plantaExtra: string | null = null, emUso: string[] = []) {
+    const rows = await this.prisma.$queryRaw<Array<{ id: string; nome: string; pn: string | null; planta_id: string | null; planta_nome: string | null }>>`
+      SELECT TRIM(e.id) AS id, e.nome, TRIM(COALESCE(e.planta_id, u.planta_id)) AS planta_id, pl.nome AS planta_nome,
              (SELECT d.valor FROM equipamentos_dados_tecnicos d
                WHERE d.equipamento_id = e.id AND d.campo IN ('potencia_nominal', 'Potência Nominal CA') LIMIT 1) AS pn
       FROM equipamentos e JOIN tipos_equipamentos t ON t.id = e.tipo_equipamento_id
       LEFT JOIN unidades u ON u.id = e.unidade_id
+      LEFT JOIN plantas pl ON pl.id = COALESCE(e.planta_id, u.planta_id)
       WHERE e.deleted_at IS NULL AND t.codigo = 'INVERSOR'
-        AND (e.unidade_id = ${unidadeId}::bpchar OR COALESCE(e.planta_id, u.planta_id) = ${plantaId}::bpchar)
-      ORDER BY e.nome`;
+        AND (e.unidade_id = ${unidadeId}::bpchar OR COALESCE(e.planta_id, u.planta_id) = ${plantaId}::bpchar
+             OR COALESCE(e.planta_id, u.planta_id) = ${plantaExtra}::bpchar OR TRIM(e.id) = ANY(${emUso}::text[]))
+      ORDER BY pl.nome, e.nome`;
     const out = [];
     for (const r of rows) {
       const sp = await this.cmd.listarSetpoints(r.id).catch(() => null);
@@ -649,6 +652,7 @@ export class ControleMedService implements OnModuleInit {
       const pn = Number(String(r.pn ?? '').replace(',', '.').replace(/[^\d.]/g, ''));
       out.push({
         id: r.id, nome: r.nome.trim(), modelo: sp?.modelo ?? null,
+        outra_planta: !!plantaId && r.planta_id !== plantaId, planta_nome: r.planta_nome?.trim() ?? null,
         pn_kw: Number.isFinite(pn) && pn > 0 ? (pn > 5000 ? pn / 1000 : pn) : null,
         limite_p: ids.has('sp_limite_pct'), reativo_q: ids.has('sp_q_pct'),
         // sinal do Q% que FORNECE reativo (corrige indutivo): catálogo (sinal_fornece) ou Sungrow = negativo (campo, 19/11)
@@ -663,8 +667,31 @@ export class ControleMedService implements OnModuleInit {
     return out;
   }
 
-  async obter(medId: string, user?: ScopedUser) {
+  /** Inversores de OUTRA planta no controle: só admin, só para teste (ex.: Chimarrão no MED da bancada). */
+  private ehAdmin(user?: ScopedUser) {
+    return !!user && papelCanonico((user as any).role) === 'admin';
+  }
+
+  /** Plantas com inversor, para o admin trazer inversores de outra planta (teste). */
+  async plantasComInversor(medId: string, user?: ScopedUser) {
+    await this.assertMed(medId, user);
+    if (!this.ehAdmin(user)) throw new ForbiddenException('Inversores de outra planta: só administrador.');
+    return this.prisma.$queryRaw<Array<{ id: string; nome: string; n: number }>>`
+      SELECT TRIM(pl.id) AS id, pl.nome, COUNT(*)::int AS n
+      FROM equipamentos e JOIN tipos_equipamentos t ON t.id = e.tipo_equipamento_id
+      LEFT JOIN unidades u ON u.id = e.unidade_id
+      JOIN plantas pl ON pl.id = COALESCE(e.planta_id, u.planta_id)
+      WHERE e.deleted_at IS NULL AND t.codigo = 'INVERSOR' AND pl.deleted_at IS NULL
+      GROUP BY pl.id, pl.nome ORDER BY pl.nome`;
+  }
+
+  async obter(medId: string, user?: ScopedUser, plantaExtra?: string) {
     const { id, unidadeId, plantaId } = await this.assertMed(medId, user);
+    let extra: string | null = (plantaExtra ?? '').trim() || null;
+    if (extra) {
+      if (!this.ehAdmin(user)) throw new ForbiddenException('Inversores de outra planta: só administrador.');
+      if (user) await this.scope.assertEntityInScope('planta', extra, user);
+    }
     const cfg = await this.lerConfig(id);
     if (!cfg) throw new NotFoundException('Equipamento não encontrado.');
     const ult = await this.prisma.$queryRaw<any[]>`
@@ -675,7 +702,8 @@ export class ControleMedService implements OnModuleInit {
       params: cfg.params, ufvs: cfg.ufvs, modos: cfg.modos, versao: cfg.versao, existe: cfg.existe,
       padrao: PARAMS_PADRAO,
       validacao: validarCadastro(cfg.params, cfg.ufvs, cfg.params.t_ciclo_s),
-      candidatos: pode ? await this.candidatos(unidadeId, plantaId) : [],
+      candidatos: pode ? await this.candidatos(unidadeId, plantaId, extra, cfg.ufvs.flatMap((u) => u.inversores.map((i) => i.id))) : [],
+      pode_outra_planta: this.ehAdmin(user),
       ultimo_ciclo: ult[0] ?? null,
       tons: Object.entries(this.estados.get(id)?.modoTon ?? {}).map(([ton_id, modo]) => ({ ton_id, modo, texto: MODO_TON_TEXTO[modo] ?? modo })),
       pode_configurar: pode, pode_operar: pode,
@@ -697,6 +725,7 @@ export class ControleMedService implements OnModuleInit {
     const atual = await this.lerConfig(id);
     const params = sanitizarParams({ ...(atual?.params ?? PARAMS_PADRAO), ...(body?.params ?? {}) });
     const ufvs = sanitizarUfvs(body?.ufvs ?? atual?.ufvs ?? []);
+    await this.conferirInversores(id, ufvs, atual?.ufvs ?? [], user);
     const versao = (atual?.versao ?? 0) + 1;
     const autor = user?.id?.trim() ?? null;
     await this.prisma.$transaction([
@@ -713,6 +742,30 @@ export class ControleMedService implements OnModuleInit {
     this.estados.delete(id);
     this.mapaEm = 0;
     return this.obter(id, user);
+  }
+
+  /** Todo inversor do cadastro é INVERSOR e está no escopo do usuário; os de outra planta que entram agora
+   *  exigem admin (teste). Os que já estavam no cadastro continuam aceitos (técnico pode ajustar os números). */
+  private async conferirInversores(medId: string, ufvs: Ufv[], antes: Ufv[], user?: ScopedUser) {
+    const ids = ufvs.flatMap((u) => u.inversores.map((i) => i.id));
+    if (!ids.length) return;
+    const { unidadeId, plantaId } = await this.assertMed(medId);
+    const rows = await this.prisma.$queryRaw<Array<{ id: string; nome: string; planta_id: string | null; unidade_id: string | null }>>`
+      SELECT TRIM(e.id) AS id, e.nome, TRIM(COALESCE(e.planta_id, u.planta_id)) AS planta_id, TRIM(e.unidade_id) AS unidade_id
+      FROM equipamentos e JOIN tipos_equipamentos t ON t.id = e.tipo_equipamento_id
+      LEFT JOIN unidades u ON u.id = e.unidade_id
+      WHERE e.deleted_at IS NULL AND t.codigo = 'INVERSOR' AND TRIM(e.id) = ANY(${ids}::text[])`;
+    const porId = new Map(rows.map((r) => [r.id, r]));
+    const ja = new Set(antes.flatMap((u) => u.inversores.map((i) => i.id)));
+    for (const invId of ids) {
+      const r = porId.get(invId);
+      if (!r) throw new BadRequestException(`Inversor ${invId} não encontrado.`);
+      if (user) await this.scope.assertEntityInScope('equipamento', invId, user);
+      const mesma = r.planta_id === plantaId || (!!unidadeId && r.unidade_id === unidadeId);
+      if (!mesma && !ja.has(invId) && !this.ehAdmin(user)) {
+        throw new ForbiddenException(`${r.nome.trim()} é de outra planta: só administrador pode incluir.`);
+      }
+    }
   }
 
   /** Liga/desliga cada controle (controle.operar). "ativo" só com o cadastro mínimo. */
@@ -828,6 +881,7 @@ export function sanitizarUfvs(lista: any): Ufv[] {
         id, nome: String(i?.nome ?? '').trim() || undefined,
         pn_kw: n(i?.pn_kw, 0, 0) as number, smax_kva: n(i?.smax_kva, 0, 0) as number,
         qmax_pct: n(i?.qmax_pct, 44, 0, 100) as number,
+        fp_min: (() => { const f = Number(i?.fp_min); return f > 0 && f < 1 ? Math.max(0.5, Math.min(0.99, f)) : undefined; })(),
         sinal_q: Number(i?.sinal_q) === -1 ? -1 : 1,
         q_noturno: i?.q_noturno === true,
       };

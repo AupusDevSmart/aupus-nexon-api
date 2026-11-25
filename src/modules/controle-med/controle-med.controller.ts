@@ -16,8 +16,14 @@ export class ControleMedController {
 
   @Get()
   @ApiOperation({ summary: 'Cadastro, modos, validação (R2/R4), inversores candidatos e último ciclo' })
-  obter(@Param('medId') medId: string, @CurrentUser() user?: any) {
-    return this.svc.obter(medId, user);
+  obter(@Param('medId') medId: string, @Query('planta_extra') plantaExtra?: string, @CurrentUser() user?: any) {
+    return this.svc.obter(medId, user, plantaExtra);
+  }
+
+  @Get('plantas')
+  @ApiOperation({ summary: 'Plantas com inversor (admin): trazer inversores de outra planta para teste' })
+  plantas(@Param('medId') medId: string, @CurrentUser() user?: any) {
+    return this.svc.plantasComInversor(medId, user);
   }
 
   @Get('ciclos')
