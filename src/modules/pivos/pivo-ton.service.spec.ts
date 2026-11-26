@@ -71,7 +71,7 @@ const IRR = (parada: any, extra: any = {}) => ({ modo: 'simples', config: { dire
 describe('PivoTonService', () => {
   it('alvo: mapa por papel dos pontos do padrão (com polaridade) na TON das BOs', async () => {
     const { svc } = montar(LAB, respostaPadrao);
-    expect(await svc.alvo('PIV')).toEqual({ tonId: 'T', bo: [1, 2, 3, 4, 5, 6], bi: [1, 2, 3, 4, 5, 6], inv: '000010' });
+    expect(await svc.alvo('PIV')).toEqual({ tonId: 'T', bo: [1, 2, 3, 4, 5, 6], bi: [1, 2, 3, 4, 5, 6], inv: '000010', ligado: 0 });
   });
 
   it('alvo: BOs em duas TONs ou firmware antigo (sem "pivo status") → null (segue no servidor)', async () => {

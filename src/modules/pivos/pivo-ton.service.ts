@@ -30,6 +30,8 @@ export interface AlvoTon {
   bi: number[];
   /** 6 dígitos 0/1: BI ativa em baixo (ton_bi.invertido). */
   inv: string;
+  /** BO "pivô ligado" (alta da partida até parar) — ponto de comando "Pivo_ligado"; 0 = o pivô não tem. */
+  ligado: number;
 }
 
 /**
@@ -319,10 +321,13 @@ export class PivoTonService implements OnModuleInit {
     const bo = [0, 0, 0, 0, 0, 0], bi = [0, 0, 0, 0, 0, 0], inv = ['0', '0', '0', '0', '0', '0'];
     const tonsBo = new Set<string>();
     let tonGiro: string | null = null;
+    let ligado = 0, tonLigado: string | null = null;
     for (const r of rows) {
       const n = norm(r.nome);
       if (r.tipo === 'comando' && r.bo_ton && r.bo) {
         const papel = BO.find(([, re]) => re.test(n))?.[0];
+        // "Pivo_ligado" (26/11, Pivô 11): saída fora dos 6 papéis, alta enquanto o pivô está ligado.
+        if (papel === undefined && /ligad/.test(n) && !ligado) { ligado = r.bo; tonLigado = r.bo_ton; continue; }
         if (papel === undefined || bo[papel]) continue;
         bo[papel] = r.bo;
         tonsBo.add(r.bo_ton);
@@ -330,6 +335,7 @@ export class PivoTonService implements OnModuleInit {
       }
     }
     if (!tonGiro || tonsBo.size !== 1 || !bo[2] || !bo[3] || !bo[4]) return null;
+    if (tonLigado !== tonGiro || bo.includes(ligado)) ligado = 0;   // outra TON ou BO já usada num papel: ignora
     for (const r of rows) {
       const n = norm(r.nome);
       if (r.tipo === 'status' && r.bi_ton === tonGiro && r.bi) {
@@ -340,7 +346,7 @@ export class PivoTonService implements OnModuleInit {
       }
     }
     if (!(await this.temFirmware(pivoId, tonGiro, user, cliente))) return null;
-    return { tonId: tonGiro, bo, bi, inv: inv.join('') };
+    return { tonId: tonGiro, bo, bi, inv: inv.join(''), ligado };
   }
 
   /** Firmware com a sequência local? (já publicou status/evento, ou responde "pivo status"). Cache 30 min / 10 min. */
@@ -389,7 +395,8 @@ export class PivoTonService implements OnModuleInit {
     ];
     const enc = await this.encoderNaTon(x.pivoId, alvo.tonId, false);
     // Um comando só (cabe no LoRa): BOs e BIs em 6 dígitos, polaridade, 9 tempos e a resolução do encoder.
-    const args = `${alvo.bo.join('')} ${alvo.bi.join('')} ${alvo.inv} ${tempos.join(' ')} ${enc?.resolucao ?? 0}`;
+    // + BO "pivô ligado" só quando o pivô tem (14º arg opcional; sem ele o texto/CRC dos outros pivôs não muda).
+    const args = `${alvo.bo.join('')} ${alvo.bi.join('')} ${alvo.inv} ${tempos.join(' ')} ${enc?.resolucao ?? 0}${alvo.ligado ? ` ${alvo.ligado}` : ''}`;
     const t = alvo.tonId.trim();
     if (this.cfgEnviada.get(t) === args) return;
     // A TON já tem esta config (CRC do ack do "pivo status", feito no alvo()): nada a mandar.
